@@ -573,6 +573,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_peer_announces_and_another_reads_the_manifest_back() {
+        use crate::version::{InterfaceVersion, PeerManifest, Version};
+
+        let (_bus, service, client) = bus().await;
+        let manifest = PeerManifest::new("voice-service")
+            .version(Version::new(0, 4, 2))
+            .provides(InterfaceVersion::provided(
+                InterfaceName::new(VOICE_NAME).unwrap(),
+                Version::new(2, 3, 0),
+            ));
+        service.announce(&manifest).await.unwrap();
+
+        // Readable by well-known name, which is what a caller actually holds.
+        let seen = client.manifest_of(VOICE_NAME).await.unwrap().expect("announced");
+        assert_eq!(seen, manifest);
+
+        let peers = client.peers().await.unwrap();
+        assert_eq!(peers.len(), 1, "only the peer that announced");
+        assert_eq!(peers[0].names, vec![BusName::new(VOICE_NAME).unwrap()]);
+    }
+
+    #[tokio::test]
+    async fn require_passes_on_a_compatible_peer_and_names_both_versions_otherwise() {
+        use crate::version::{InterfaceVersion, PeerManifest, Version};
+
+        let (_bus, service, client) = bus().await;
+        let interface = InterfaceName::new(VOICE_NAME).unwrap();
+        service
+            .announce(
+                &PeerManifest::new("voice-service").provides(InterfaceVersion::provided(
+                    interface.clone(),
+                    Version::new(2, 3, 0),
+                )),
+            )
+            .await
+            .unwrap();
+
+        // A caller written against 2.1 is served by a 2.3 provider.
+        let ok = PeerManifest::new("openhuman").consumes(InterfaceVersion::consumed(
+            interface.clone(),
+            Version::new(2, 1, 0),
+        ));
+        client.require(VOICE_NAME, VOICE_NAME, &ok).await.unwrap();
+
+        // A caller that needs 3.x is not, and the error says so with numbers.
+        let stale = PeerManifest::new("openhuman").consumes(InterfaceVersion::consumed(
+            interface,
+            Version::new(3, 0, 0),
+        ));
+        let err = client.require(VOICE_NAME, VOICE_NAME, &stale).await.unwrap_err();
+        assert!(matches!(err, Error::IncompatibleVersion { .. }), "{err}");
+        assert!(err.to_string().contains("2.3.0"), "{err}");
+        assert!(err.to_string().contains("3.0.0"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_never_announced_is_still_callable() {
+        // Manifests roll out service by service; a peer without one must not
+        // be locked off the bus by peers that have adopted them.
+        use crate::version::{InterfaceVersion, PeerManifest, Version};
+
+        let (_bus, _service, client) = bus().await;
+        let local = PeerManifest::new("openhuman").consumes(InterfaceVersion::consumed(
+            InterfaceName::new(VOICE_NAME).unwrap(),
+            Version::new(9, 0, 0),
+        ));
+        client.require(VOICE_NAME, VOICE_NAME, &local).await.unwrap();
+
+        let transcript: String = client
+            .proxy(VOICE_NAME, VOICE_PATH, VOICE_NAME)
+            .unwrap()
+            .call("Transcribe", ("/tmp/clip.wav",))
+            .await
+            .unwrap();
+        assert_eq!(transcript, "transcript of /tmp/clip.wav");
+    }
+
+    #[tokio::test]
+    async fn a_dead_peers_manifest_goes_with_it() {
+        use crate::version::{InterfaceVersion, PeerManifest, Version};
+
+        let (_bus, service, client) = bus().await;
+        service
+            .announce(
+                &PeerManifest::new("voice-service").provides(InterfaceVersion::provided(
+                    InterfaceName::new(VOICE_NAME).unwrap(),
+                    Version::new(2, 3, 0),
+                )),
+            )
+            .await
+            .unwrap();
+        assert!(client.manifest_of(VOICE_NAME).await.unwrap().is_some());
+
+        drop(service);
+        // Wait for the detach to land, then the name — and its manifest — are gone.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while client.manifest_of(VOICE_NAME).await.unwrap().is_some() {
+            assert!(tokio::time::Instant::now() < deadline, "manifest outlived its peer");
+            tokio::task::yield_now().await;
+        }
+        assert!(client.peers().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn the_bus_answers_ping_and_reports_a_stable_id() {
         let (_bus, _service, client) = bus().await;
         let bus_proxy = client
