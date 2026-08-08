@@ -30,7 +30,7 @@ use std::time::Duration;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tokio::sync::{Mutex, RwLock, broadcast, oneshot};
+use tokio::sync::{Mutex, RwLock, broadcast, mpsc, oneshot};
 
 use crate::error::{Error, Result};
 use crate::message::{Header, Message, MessageKind};
@@ -39,6 +39,7 @@ use crate::ports::Transport;
 use crate::proxy::Proxy;
 use crate::router::MatchRule;
 use crate::service::{Interface, ObjectTree};
+use crate::version::{Compatibility, PeerManifest, PeerRecord};
 
 /// How long a call waits before giving up.
 ///
@@ -54,12 +55,27 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// told it lagged (`RecvError::Lagged`) rather than being silently starved.
 pub const SIGNAL_BUFFER: usize = 256;
 
+/// How many outbound messages may queue before a sender waits.
+///
+/// The queue is what makes [`Connection::try_send`] — and therefore a
+/// synchronous, fire-and-forget `publish` — possible at all: a sync caller
+/// cannot await a socket write, but it can hand a message to a writer task.
+/// Bounded, because an unbounded outbox turns a slow broker into unbounded
+/// growth in the process doing the publishing.
+pub const OUTBOX_CAPACITY: usize = 1024;
+
 struct Inner {
     transport: Arc<dyn Transport>,
+    /// Everything outbound goes through here and out via the writer task.
+    /// Serialising writes through one task is also what lets `send` be called
+    /// concurrently without interleaving two frames on the wire.
+    outbox: mpsc::Sender<Message>,
     serial: AtomicU64,
     pending: Mutex<HashMap<u64, oneshot::Sender<Message>>>,
     objects: RwLock<ObjectTree>,
-    unique_name: RwLock<Option<BusName>>,
+    /// A *std* lock, not a tokio one, so a synchronous publisher can stamp
+    /// the sender on a locally looped-back signal without an await.
+    unique_name: std::sync::RwLock<Option<BusName>>,
     signals: broadcast::Sender<Message>,
 }
 
@@ -109,7 +125,12 @@ impl Connection {
             .call_bus("Hello", serde_json::json!([]))
             .await
             .and_then(|v| Ok(serde_json::from_value(v)?))?;
-        *conn.inner.unique_name.write().await = Some(BusName::new(name)?);
+        *conn
+            .inner
+            .unique_name
+            .write()
+            .expect("the unique-name lock is never held across a panic point") =
+            Some(BusName::new(name)?);
         Ok(conn)
     }
 
@@ -120,16 +141,19 @@ impl Connection {
     /// [`Connection::connect`].
     pub fn attach(transport: Arc<dyn Transport>) -> Self {
         let (signals, _) = broadcast::channel(SIGNAL_BUFFER);
+        let (outbox, outbound) = mpsc::channel(OUTBOX_CAPACITY);
         let inner = Arc::new(Inner {
             transport,
+            outbox,
             // Serials start at 1: zero is the "unassigned" value a freshly
             // built `Message` carries, so it must never be a live serial.
             serial: AtomicU64::new(1),
             pending: Mutex::new(HashMap::new()),
             objects: RwLock::new(ObjectTree::new()),
-            unique_name: RwLock::new(None),
+            unique_name: std::sync::RwLock::new(None),
             signals,
         });
+        tokio::spawn(writer_loop(inner.transport.clone(), outbound));
         tokio::spawn(dispatch_loop(inner.clone()));
         Self {
             _close: Arc::new(CloseOnDrop(inner.clone())),
@@ -138,8 +162,35 @@ impl Connection {
     }
 
     /// This peer's broker-assigned unique name, once handshaken.
-    pub async fn unique_name(&self) -> Option<BusName> {
-        self.inner.unique_name.read().await.clone()
+    pub fn unique_name(&self) -> Option<BusName> {
+        self.inner
+            .unique_name
+            .read()
+            .expect("the unique-name lock is never held across a panic point")
+            .clone()
+    }
+
+    /// Deliver a signal to *this* connection's own subscribers, without the
+    /// broker.
+    ///
+    /// The broker never echoes a signal back to the peer that sent it — that is
+    /// what stops a service which both emits and subscribes on one interface
+    /// from looping. But a host whose publishers and subscribers live in the
+    /// same process still expects its own subscribers to see what it published,
+    /// which was free when the bus was a `tokio::sync::broadcast` inside that
+    /// process.
+    ///
+    /// This closes that gap explicitly: the publisher loops the signal back
+    /// locally and the broker fans it out to everyone else, so every subscriber
+    /// anywhere sees it exactly once. It is a separate method rather than
+    /// behaviour folded into [`Connection::emit`] precisely because the
+    /// loop-prevention it steps around is load-bearing for services; the caller
+    /// has to mean it.
+    pub fn deliver_local(&self, mut message: Message) {
+        message.header.sender = self.unique_name();
+        // Fails only when nothing on this connection is subscribed, which is
+        // the normal case for a write-only publisher.
+        let _ = self.inner.signals.send(message);
     }
 
     /// Export `interface` at `path`.
@@ -186,6 +237,84 @@ impl Connection {
             .call_bus("GetNameOwner", serde_json::json!([name]))
             .await?;
         Ok(serde_json::from_value(value)?)
+    }
+
+    /// Tell the broker what this peer speaks and accepts.
+    ///
+    /// Announcing is optional and additive: a peer that never calls this stays
+    /// fully routable, so manifests can be adopted one service at a time. What
+    /// it buys is that *other* peers can check compatibility before calling,
+    /// and get a verdict naming versions rather than a decode error naming
+    /// JSON.
+    pub async fn announce(&self, manifest: &PeerManifest) -> Result<()> {
+        self.call_bus("Announce", serde_json::json!([manifest]))
+            .await
+            .map(|_| ())
+    }
+
+    /// What `name` announced, if anything.
+    pub async fn manifest_of(&self, name: impl AsRef<str>) -> Result<Option<PeerManifest>> {
+        let name = BusName::new(name.as_ref())?;
+        let value = self
+            .call_bus("GetManifest", serde_json::json!([name]))
+            .await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Every peer that has announced, with the names it owns.
+    pub async fn peers(&self) -> Result<Vec<PeerRecord>> {
+        let value = self.call_bus("ListPeers", serde_json::json!([])).await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Check whether this peer can call `interface` on `destination`.
+    ///
+    /// `local` is this peer's own manifest. Returns the verdict rather than an
+    /// error so a caller can decide what an incompatibility means for it — a
+    /// missing optional integration is a degraded feature, not a startup
+    /// failure. Use [`Connection::require`] when it *is* a startup failure.
+    pub async fn compatibility(
+        &self,
+        destination: impl AsRef<str>,
+        interface: impl AsRef<str>,
+        local: &PeerManifest,
+    ) -> Result<Compatibility> {
+        let interface = InterfaceName::new(interface.as_ref())?;
+        let Some(remote) = self.manifest_of(destination.as_ref()).await? else {
+            // A peer that has not announced is treated as compatible, for the
+            // same reason the broker does not enforce: adoption is incremental.
+            return Ok(Compatibility::Compatible {
+                provider_speaks: crate::version::Version::new(0, 0, 0),
+                consumer_speaks: crate::version::Version::new(0, 0, 0),
+            });
+        };
+        Ok(crate::version::check(&remote, local, &interface))
+    }
+
+    /// Like [`Connection::compatibility`], but turn an incompatibility into an
+    /// error naming both versions.
+    ///
+    /// For a dependency the caller cannot run without. Failing here — at
+    /// startup, with both versions in the message — is the entire point of the
+    /// exercise: the alternative is the same failure hours later, as a
+    /// deserialize error in a log line that mentions neither peer.
+    pub async fn require(
+        &self,
+        destination: impl AsRef<str>,
+        interface: impl AsRef<str>,
+        local: &PeerManifest,
+    ) -> Result<()> {
+        let verdict = self
+            .compatibility(destination.as_ref(), interface.as_ref(), local)
+            .await?;
+        if verdict.is_compatible() {
+            return Ok(());
+        }
+        Err(Error::IncompatibleVersion {
+            peer: destination.as_ref().to_string(),
+            interface: interface.as_ref().to_string(),
+            detail: verdict.to_string(),
+        })
     }
 
     /// Subscribe to signals matching `rule`.
@@ -282,7 +411,7 @@ impl Connection {
         let (tx, rx) = oneshot::channel();
         self.inner.pending.lock().await.insert(serial, tx);
 
-        if let Err(e) = self.inner.transport.send(message).await {
+        if let Err(e) = self.enqueue(message).await {
             self.inner.pending.lock().await.remove(&serial);
             return Err(e);
         }
@@ -310,7 +439,55 @@ impl Connection {
     pub async fn send(&self, mut message: Message) -> Result<()> {
         message.header.serial = self.inner.serial.fetch_add(1, Ordering::Relaxed);
         message.validate()?;
-        self.inner.transport.send(message).await
+        self.enqueue(message).await
+    }
+
+    /// Send a message without awaiting, failing rather than blocking when the
+    /// outbox is full.
+    ///
+    /// This is the seam a synchronous, fire-and-forget publisher needs. A
+    /// domain that wants to announce "a message arrived" from a plain `fn`
+    /// cannot await a socket write, and making it await would push `async` up
+    /// through hundreds of call sites that have no other reason to have it.
+    ///
+    /// A full outbox means the process is producing faster than the broker is
+    /// draining. Returning [`Error::Backpressure`] rather than blocking is the
+    /// deliberate choice: a notification is worth less than the latency of the
+    /// caller that would be stalled to deliver it, and a caller that *does*
+    /// care can use [`Connection::send`].
+    pub fn try_send(&self, mut message: Message) -> Result<()> {
+        message.header.serial = self.inner.serial.fetch_add(1, Ordering::Relaxed);
+        message.validate()?;
+        self.inner.outbox.try_send(message).map_err(|e| match e {
+            mpsc::error::TrySendError::Full(_) => Error::Backpressure,
+            mpsc::error::TrySendError::Closed(_) => Error::ConnectionClosed,
+        })
+    }
+
+    /// Broadcast a signal without awaiting. The sync twin of
+    /// [`Connection::emit`]; see [`Connection::try_send`] for when to reach for
+    /// it.
+    pub fn try_emit(
+        &self,
+        path: ObjectPath,
+        interface: InterfaceName,
+        member: MemberName,
+        body: impl Serialize,
+    ) -> Result<()> {
+        let message = Message::signal(path, interface, member, to_body(&body)?);
+        self.try_send(message)
+    }
+
+    /// Hand a message to the writer task, waiting if the outbox is full.
+    ///
+    /// Waiting here is backpressure a caller asked for by using an async send:
+    /// it bounds how far ahead of the broker this process can run.
+    async fn enqueue(&self, message: Message) -> Result<()> {
+        self.inner
+            .outbox
+            .send(message)
+            .await
+            .map_err(|_| Error::ConnectionClosed)
     }
 
     /// Close the link.
@@ -377,6 +554,20 @@ fn rule_to_wire(rule: &MatchRule) -> String {
     clauses.join(",")
 }
 
+/// The single writer task. Owns `send`; drains the outbox onto the transport.
+///
+/// One task rather than "everyone writes concurrently" for two reasons: a
+/// synchronous publisher needs somewhere to hand a message to, and two
+/// concurrent writers on one transport risk interleaving frames.
+async fn writer_loop(transport: Arc<dyn Transport>, mut outbound: mpsc::Receiver<Message>) {
+    while let Some(message) = outbound.recv().await {
+        if let Err(e) = transport.send(message).await {
+            tracing::debug!(error = %e, "connection write failed; closing");
+            break;
+        }
+    }
+}
+
 /// The single reader task. Owns `recv`; never awaits user code inline.
 async fn dispatch_loop(inner: Arc<Inner>) {
     loop {
@@ -429,7 +620,7 @@ async fn handle_call(inner: Arc<Inner>, message: Message) {
         Err(e) => Message::error_reply(&header, &e),
     };
     reply.header.serial = inner.serial.fetch_add(1, Ordering::Relaxed);
-    if let Err(e) = inner.transport.send(reply).await {
+    if let Err(e) = inner.outbox.send(reply).await {
         tracing::debug!(error = %e, "could not reply; the caller will time out");
     }
 }

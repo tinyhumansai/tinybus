@@ -68,13 +68,17 @@ extern crate self as tinybus;
 pub mod broker;
 pub mod connection;
 pub mod error;
+pub mod events;
+pub mod global;
 pub mod message;
 pub mod name;
+pub mod native;
 pub mod ports;
 pub mod proxy;
 pub mod router;
 pub mod service;
 pub mod transport;
+pub mod version;
 
 #[doc(hidden)]
 #[path = "private.rs"]
@@ -82,12 +86,20 @@ pub mod __private;
 
 pub use crate::connection::Connection;
 pub use crate::error::{Error, Result};
+pub use crate::events::{
+    Event, EventBus, EventBusConfig, EventHandler, EventReceiver, SubscriptionHandle, TryRecvError,
+};
+pub use crate::global::OnceBus;
 pub use crate::message::{Header, Message, MessageKind};
 pub use crate::name::{BusName, InterfaceName, MemberName, ObjectPath};
+pub use crate::native::{NativeRegistry, NativeRequestError};
 pub use crate::ports::{Listener, Transport};
 pub use crate::proxy::Proxy;
 pub use crate::router::MatchRule;
 pub use crate::service::Interface;
+pub use crate::version::{
+    Compatibility, InterfaceVersion, PeerManifest, PeerRecord, Version, VersionRange,
+};
 
 #[cfg(feature = "macros")]
 pub use tinybus_macros::interface;

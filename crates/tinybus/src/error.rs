@@ -49,6 +49,16 @@ pub enum Error {
     #[error("connection closed")]
     ConnectionClosed,
 
+    /// The outbound queue is full: this process is producing faster than the
+    /// broker is draining.
+    ///
+    /// Only ever returned by the non-blocking senders
+    /// ([`crate::Connection::try_send`] and friends). It is a *dropped
+    /// notification*, not a lost call — a caller that cannot tolerate the drop
+    /// should use the awaiting send and take the backpressure instead.
+    #[error("outbound queue is full; message dropped")]
+    Backpressure,
+
     /// No peer owns the destination name.
     ///
     /// The common cause is an integration that has not been started yet, which
@@ -95,6 +105,20 @@ pub enum Error {
         member: MemberName,
     },
 
+    /// An event's domain is not usable as an object-path element.
+    ///
+    /// A catalog bug in the host, not a bus failure: the event cannot be
+    /// addressed, so it cannot be published. Named rather than silently
+    /// dropped, because an event that vanishes with no error is the hardest
+    /// possible thing to debug from the subscriber's end.
+    #[error("event domain {domain:?} is not a usable path element: {reason}")]
+    InvalidDomain {
+        /// The offending domain string.
+        domain: String,
+        /// Why it cannot be a path element.
+        reason: String,
+    },
+
     /// A method's arguments did not deserialize into the signature it declares.
     ///
     /// Carries the member and the serde message — never the arguments.
@@ -104,6 +128,22 @@ pub enum Error {
         member: MemberName,
         /// What serde objected to.
         reason: String,
+    },
+
+    /// A peer speaks a version of an interface this peer cannot work with.
+    ///
+    /// Raised by [`crate::Connection::require`] at the point of checking, not
+    /// at the point of failing — which is the difference between a startup
+    /// error naming two versions and a deserialize error hours later naming
+    /// neither.
+    #[error("{peer} is not compatible on {interface}: {detail}")]
+    IncompatibleVersion {
+        /// The peer that was checked.
+        peer: String,
+        /// The interface in question.
+        interface: String,
+        /// Which side rejected which version.
+        detail: String,
     },
 
     /// A method ran and failed. This is the variant that crosses the wire.
@@ -187,6 +227,14 @@ impl Error {
         }
     }
 
+    /// Build an [`Error::InvalidDomain`] for `domain`.
+    pub fn invalid_domain(domain: impl Into<String>, reason: impl std::fmt::Display) -> Self {
+        Self::InvalidDomain {
+            domain: domain.into(),
+            reason: reason.to_string(),
+        }
+    }
+
     /// Build the generic remote failure, the one a service returns when its own
     /// error type has no better mapping.
     pub fn failed(message: impl std::fmt::Display) -> Self {
@@ -220,13 +268,16 @@ impl Error {
             Self::Protocol(_) => "ai.tinyhumans.tinybus.Error.Protocol",
             Self::Transport(_) | Self::Io(_) => "ai.tinyhumans.tinybus.Error.Transport",
             Self::ConnectionClosed => "ai.tinyhumans.tinybus.Error.ConnectionClosed",
+            Self::Backpressure => "ai.tinyhumans.tinybus.Error.Backpressure",
             Self::NameHasNoOwner(_) => "ai.tinyhumans.tinybus.Error.NameHasNoOwner",
             Self::NameTaken { .. } => "ai.tinyhumans.tinybus.Error.NameTaken",
             Self::UnknownObject { .. } => "ai.tinyhumans.tinybus.Error.UnknownObject",
             Self::UnknownInterface { .. } => "ai.tinyhumans.tinybus.Error.UnknownInterface",
             Self::UnknownMethod { .. } => Self::UNKNOWN_METHOD,
             Self::BadArguments { .. } => "ai.tinyhumans.tinybus.Error.BadArguments",
+            Self::InvalidDomain { .. } => "ai.tinyhumans.tinybus.Error.InvalidDomain",
             Self::Timeout { .. } => "ai.tinyhumans.tinybus.Error.Timeout",
+            Self::IncompatibleVersion { .. } => "ai.tinyhumans.tinybus.Error.IncompatibleVersion",
             Self::Path { .. } => "ai.tinyhumans.tinybus.Error.Path",
             Self::FeatureDisabled(_, _) => "ai.tinyhumans.tinybus.Error.FeatureDisabled",
             Self::Json(_) => "ai.tinyhumans.tinybus.Error.Json",
