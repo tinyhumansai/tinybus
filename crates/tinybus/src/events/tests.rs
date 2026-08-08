@@ -291,6 +291,51 @@ async fn a_receiver_yields_decoded_events() {
 }
 
 #[tokio::test]
+async fn a_peer_that_publishes_and_subscribes_sees_the_event_exactly_once() {
+    // The invariant the local loopback depends on: the publisher delivers to
+    // its own subscribers directly, and the broker deliberately does not echo
+    // a signal back to its sender. Break either half and this is 0 or 2.
+    let (_t, bus) = bus().await;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let _handle = bus.subscribe(Arc::new(Capture {
+        name: "test::self",
+        domains: None,
+        seen: seen.clone(),
+    }));
+
+    bus.publish(TestEvent::SystemStartup);
+    wait_for(&seen, 1).await;
+
+    // Give the broker ample opportunity to echo it back before asserting.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(seen.lock().await.len(), 1, "delivered exactly once");
+}
+
+#[tokio::test]
+async fn a_local_subscriber_still_receives_when_the_outbox_is_full() {
+    // Local delivery runs before the wire send and cannot fail, so a wedged
+    // bus degrades to in-process-only rather than to silence.
+    let (_t, bus) = bus().await;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let _handle = bus.subscribe(Arc::new(Capture {
+        name: "test::local",
+        domains: None,
+        seen: seen.clone(),
+    }));
+
+    for i in 0..(crate::connection::OUTBOX_CAPACITY * 2) {
+        bus.publish(TestEvent::AgentTurnCompleted {
+            run: format!("run-{i}"),
+        });
+    }
+
+    // Every publish reached the local subscriber even though the outbox will
+    // have overflowed part-way through.
+    let events = wait_for(&seen, crate::connection::OUTBOX_CAPACITY * 2).await;
+    assert_eq!(events.len(), crate::connection::OUTBOX_CAPACITY * 2);
+}
+
+#[tokio::test]
 async fn publishing_with_no_subscribers_is_not_an_error() {
     // The old bus dropped events with no receivers silently, and 254 call sites
     // depend on that being a non-event.
