@@ -289,6 +289,67 @@ mod tests {
         assert!(!bus.is_initialised());
     }
 
+    /// Collect events off a bus until `n` arrive, or fail on a deadline.
+    async fn drain(bus: &OnceBus<Tick>, n: usize) -> Vec<Tick> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let _handle = bus
+            .subscribe(Arc::new(Capture(seen.clone())))
+            .expect("the bus is initialised");
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            {
+                let guard = seen.lock().await;
+                if guard.len() >= n {
+                    return guard.clone();
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the bus delivered nothing"
+            );
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[test]
+    fn a_bus_outlives_the_runtime_that_initialised_it() {
+        // The exact shape of the bug this owns a runtime to prevent: under
+        // `cargo test` the first `#[tokio::test]` to touch a global bus
+        // initialises it and then tears its own runtime down. If the bus's
+        // tasks lived on that runtime, every later test would inherit a bus
+        // attached to a dead reactor — publishing into silence, with nothing
+        // anywhere reporting an error.
+        static BUS: OnceBus<Tick> = OnceBus::new();
+
+        let first = tokio::runtime::Runtime::new().unwrap();
+        first.block_on(async {
+            BUS.init_in_process(config()).await.unwrap();
+            // Delivery works while the initialising runtime is still alive.
+            BUS.publish(Tick(1));
+            assert_eq!(drain(&BUS, 1).await, vec![Tick(1)]);
+        });
+        drop(first);
+
+        // A later, unrelated runtime — a second test, in the real case.
+        let second = tokio::runtime::Runtime::new().unwrap();
+        second.block_on(async {
+            BUS.publish(Tick(2));
+            assert_eq!(drain(&BUS, 1).await, vec![Tick(2)]);
+        });
+    }
+
+    #[test]
+    fn the_bus_runtime_is_built_once_and_shared() {
+        static BUS: OnceBus<Tick> = OnceBus::new();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            BUS.init_in_process(config()).await.unwrap();
+            BUS.init_in_process(config()).await.unwrap();
+        });
+        // One runtime, however many times `init` is called.
+        assert!(BUS.runtime.get().is_some());
+    }
+
     #[test]
     fn a_once_bus_can_be_a_static() {
         // `new()` being `const` is what lets the host declare the singleton.
