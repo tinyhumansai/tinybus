@@ -255,7 +255,9 @@ impl Connection {
     /// What `name` announced, if anything.
     pub async fn manifest_of(&self, name: impl AsRef<str>) -> Result<Option<PeerManifest>> {
         let name = BusName::new(name.as_ref())?;
-        let value = self.call_bus("GetManifest", serde_json::json!([name])).await?;
+        let value = self
+            .call_bus("GetManifest", serde_json::json!([name]))
+            .await?;
         Ok(serde_json::from_value(value)?)
     }
 

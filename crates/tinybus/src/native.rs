@@ -241,9 +241,9 @@ impl NativeRegistry {
         }
 
         match handler(Box::new(req)).await {
-            Ok(boxed) => Ok(*boxed
-                .downcast::<Resp>()
-                .expect("native: handler returned the wrong response type despite the TypeId check")),
+            Ok(boxed) => Ok(*boxed.downcast::<Resp>().expect(
+                "native: handler returned the wrong response type despite the TypeId check",
+            )),
             Err(message) => Err(NativeRequestError::HandlerFailed {
                 method: method.to_string(),
                 message,
@@ -367,14 +367,20 @@ mod tests {
             .request::<Req, u64>("demo.typed", Req(1))
             .await
             .unwrap_err();
-        assert!(matches!(err, NativeRequestError::TypeMismatch { .. }), "{err}");
+        assert!(
+            matches!(err, NativeRequestError::TypeMismatch { .. }),
+            "{err}"
+        );
 
         // Wrong request type.
         let err = registry
             .request::<String, Resp>("demo.typed", "nope".to_string())
             .await
             .unwrap_err();
-        assert!(matches!(err, NativeRequestError::TypeMismatch { .. }), "{err}");
+        assert!(
+            matches!(err, NativeRequestError::TypeMismatch { .. }),
+            "{err}"
+        );
     }
 
     #[tokio::test]

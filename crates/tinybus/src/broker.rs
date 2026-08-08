@@ -586,7 +586,11 @@ mod tests {
         service.announce(&manifest).await.unwrap();
 
         // Readable by well-known name, which is what a caller actually holds.
-        let seen = client.manifest_of(VOICE_NAME).await.unwrap().expect("announced");
+        let seen = client
+            .manifest_of(VOICE_NAME)
+            .await
+            .unwrap()
+            .expect("announced");
         assert_eq!(seen, manifest);
 
         let peers = client.peers().await.unwrap();
@@ -618,11 +622,12 @@ mod tests {
         client.require(VOICE_NAME, VOICE_NAME, &ok).await.unwrap();
 
         // A caller that needs 3.x is not, and the error says so with numbers.
-        let stale = PeerManifest::new("openhuman").consumes(InterfaceVersion::consumed(
-            interface,
-            Version::new(3, 0, 0),
-        ));
-        let err = client.require(VOICE_NAME, VOICE_NAME, &stale).await.unwrap_err();
+        let stale = PeerManifest::new("openhuman")
+            .consumes(InterfaceVersion::consumed(interface, Version::new(3, 0, 0)));
+        let err = client
+            .require(VOICE_NAME, VOICE_NAME, &stale)
+            .await
+            .unwrap_err();
         assert!(matches!(err, Error::IncompatibleVersion { .. }), "{err}");
         assert!(err.to_string().contains("2.3.0"), "{err}");
         assert!(err.to_string().contains("3.0.0"), "{err}");
@@ -639,7 +644,10 @@ mod tests {
             InterfaceName::new(VOICE_NAME).unwrap(),
             Version::new(9, 0, 0),
         ));
-        client.require(VOICE_NAME, VOICE_NAME, &local).await.unwrap();
+        client
+            .require(VOICE_NAME, VOICE_NAME, &local)
+            .await
+            .unwrap();
 
         let transcript: String = client
             .proxy(VOICE_NAME, VOICE_PATH, VOICE_NAME)
@@ -670,7 +678,10 @@ mod tests {
         // Wait for the detach to land, then the name — and its manifest — are gone.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         while client.manifest_of(VOICE_NAME).await.unwrap().is_some() {
-            assert!(tokio::time::Instant::now() < deadline, "manifest outlived its peer");
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "manifest outlived its peer"
+            );
             tokio::task::yield_now().await;
         }
         assert!(client.peers().await.unwrap().is_empty());

@@ -181,7 +181,10 @@ mod tests {
         let bus: OnceBus<Tick> = OnceBus::new();
         assert!(!bus.is_initialised());
         bus.publish(Tick(1));
-        assert!(bus.subscribe(Arc::new(Capture(Arc::new(Mutex::new(Vec::new()))))).is_none());
+        assert!(
+            bus.subscribe(Arc::new(Capture(Arc::new(Mutex::new(Vec::new())))))
+                .is_none()
+        );
     }
 
     #[tokio::test]

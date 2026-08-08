@@ -446,7 +446,10 @@ impl fmt::Display for Compatibility {
             Self::Compatible {
                 provider_speaks,
                 consumer_speaks,
-            } => write!(f, "compatible (provider {provider_speaks}, consumer {consumer_speaks})"),
+            } => write!(
+                f,
+                "compatible (provider {provider_speaks}, consumer {consumer_speaks})"
+            ),
             Self::ConsumerRejects {
                 provider_speaks,
                 consumer_accepts,
@@ -530,8 +533,14 @@ mod tests {
         let v = Version::parse("2.3.1").unwrap();
         assert_eq!((v.major, v.minor, v.patch), (2, 3, 1));
         assert_eq!(v.to_string(), "2.3.1");
-        assert_eq!(Version::parse("1.0.0-rc.1").unwrap().tag.as_deref(), Some("rc.1"));
-        assert_eq!(Version::parse("1.0.0-rc.1").unwrap().to_string(), "1.0.0-rc.1");
+        assert_eq!(
+            Version::parse("1.0.0-rc.1").unwrap().tag.as_deref(),
+            Some("rc.1")
+        );
+        assert_eq!(
+            Version::parse("1.0.0-rc.1").unwrap().to_string(),
+            "1.0.0-rc.1"
+        );
     }
 
     #[test]
@@ -547,7 +556,9 @@ mod tests {
         // A pre-release ordering nobody agreed on is worse than none: a peer
         // that needs to distinguish them is describing two interfaces.
         assert_eq!(
-            Version::parse("1.0.0-rc1").unwrap().cmp(&Version::parse("1.0.0").unwrap()),
+            Version::parse("1.0.0-rc1")
+                .unwrap()
+                .cmp(&Version::parse("1.0.0").unwrap()),
             Ordering::Equal
         );
         assert!(Version::parse("1.2.0").unwrap() < Version::parse("1.10.0").unwrap());
@@ -559,12 +570,18 @@ mod tests {
         // The asymmetry, asserted directly: it is the single easiest thing to
         // get wrong here, and getting it wrong rejects every older client.
         let provider = Version::new(2, 3, 0).compatible_series();
-        assert!(provider.accepts(&Version::new(2, 0, 0)), "an older caller still fits");
+        assert!(
+            provider.accepts(&Version::new(2, 0, 0)),
+            "an older caller still fits"
+        );
         assert!(provider.accepts(&Version::new(2, 3, 0)));
         assert!(!provider.accepts(&Version::new(3, 0, 0)));
 
         let consumer = Version::new(2, 3, 0).caret();
-        assert!(!consumer.accepts(&Version::new(2, 0, 0)), "an older provider does not");
+        assert!(
+            !consumer.accepts(&Version::new(2, 0, 0)),
+            "an older provider does not"
+        );
         assert!(consumer.accepts(&Version::new(2, 9, 0)));
     }
 
@@ -595,7 +612,10 @@ mod tests {
 
         let open = VersionRange::parse(">=1.0.0").unwrap();
         assert!(open.accepts(&Version::new(99, 0, 0)));
-        assert!(VersionRange::parse("<2.0.0").is_err(), "a range needs a lower bound");
+        assert!(
+            VersionRange::parse("<2.0.0").is_err(),
+            "a range needs a lower bound"
+        );
         assert!(VersionRange::parse("~1.0.0").is_err());
     }
 
@@ -637,7 +657,10 @@ mod tests {
         // names the caller's requirement rather than the provider's, which is
         // the side that has to change.
         let behind = check(&provider("2.1.0"), &consumer("3.0.0"), &interface);
-        assert!(matches!(behind, Compatibility::ConsumerRejects { .. }), "{behind}");
+        assert!(
+            matches!(behind, Compatibility::ConsumerRejects { .. }),
+            "{behind}"
+        );
         assert!(behind.to_string().contains("3.0.0"), "{behind}");
     }
 
@@ -650,7 +673,10 @@ mod tests {
             &consumer("2.5.0"),
             &iface("ai.tinyhumans.openhuman.Voice"),
         );
-        assert!(matches!(result, Compatibility::ConsumerRejects { .. }), "{result}");
+        assert!(
+            matches!(result, Compatibility::ConsumerRejects { .. }),
+            "{result}"
+        );
     }
 
     #[test]
@@ -663,11 +689,16 @@ mod tests {
             InterfaceVersion::provided(interface.clone(), Version::new(2, 3, 0))
                 .with_accepts(VersionRange::parse(">=2.2.0, <3.0.0").unwrap()),
         );
-        let consumer = PeerManifest::new("openhuman")
-            .consumes(InterfaceVersion::consumed(interface.clone(), Version::new(2, 0, 0)));
+        let consumer = PeerManifest::new("openhuman").consumes(InterfaceVersion::consumed(
+            interface.clone(),
+            Version::new(2, 0, 0),
+        ));
 
         let result = check(&provider, &consumer, &interface);
-        assert!(matches!(result, Compatibility::ProviderRejects { .. }), "{result}");
+        assert!(
+            matches!(result, Compatibility::ProviderRejects { .. }),
+            "{result}"
+        );
         assert!(result.to_string().contains(">=2.2.0"), "{result}");
     }
 
@@ -711,7 +742,11 @@ mod tests {
             )
             .with_accepts(VersionRange::parse(">=1.0.0, <3.0.0").unwrap()),
         );
-        let result = check(&provider, &consumer, &iface("ai.tinyhumans.openhuman.Voice"));
+        let result = check(
+            &provider,
+            &consumer,
+            &iface("ai.tinyhumans.openhuman.Voice"),
+        );
         assert!(result.is_compatible(), "{result}");
     }
 

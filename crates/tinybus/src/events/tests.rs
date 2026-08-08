@@ -38,7 +38,11 @@ impl Event for TestEvent {
 }
 
 fn config() -> EventBusConfig {
-    EventBusConfig::new("/ai/tinyhumans/openhuman/events", "ai.tinyhumans.openhuman.Events").unwrap()
+    EventBusConfig::new(
+        "/ai/tinyhumans/openhuman/events",
+        "ai.tinyhumans.openhuman.Events",
+    )
+    .unwrap()
 }
 
 /// A capturing handler with an optional domain filter.
@@ -86,7 +90,10 @@ async fn wait_for(seen: &Arc<Mutex<Vec<TestEvent>>>, n: usize) -> Vec<TestEvent>
             }
         }
         if tokio::time::Instant::now() > deadline {
-            panic!("timed out waiting for {n} events; saw {:?}", seen.lock().await);
+            panic!(
+                "timed out waiting for {n} events; saw {:?}",
+                seen.lock().await
+            );
         }
         tokio::task::yield_now().await;
     }
@@ -126,7 +133,9 @@ async fn a_domain_filter_excludes_other_domains() {
     }));
 
     bus.publish(TestEvent::AgentTurnCompleted { run: "a".into() });
-    bus.publish(TestEvent::CronJobTriggered { job: "nightly".into() });
+    bus.publish(TestEvent::CronJobTriggered {
+        job: "nightly".into(),
+    });
     bus.publish(TestEvent::AgentTurnCompleted { run: "b".into() });
 
     let events = wait_for(&seen, 1).await;
@@ -200,7 +209,10 @@ async fn a_panicking_handler_does_not_stop_its_neighbour_or_itself() {
     // survived the first panic rather than silently unsubscribing.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while calls.load(Ordering::SeqCst) < 2 {
-        assert!(tokio::time::Instant::now() < deadline, "exploder stopped after panicking");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "exploder stopped after panicking"
+        );
         tokio::task::yield_now().await;
     }
 }
@@ -221,7 +233,9 @@ async fn dropping_the_handle_stops_delivery() {
     drop(handle);
     // Give the abort a chance to land before publishing again.
     tokio::task::yield_now().await;
-    bus.publish(TestEvent::CronJobTriggered { job: "after".into() });
+    bus.publish(TestEvent::CronJobTriggered {
+        job: "after".into(),
+    });
 
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(seen.lock().await.len(), 1, "no delivery after drop");
@@ -363,7 +377,9 @@ async fn a_domain_becomes_a_path_element() {
     let bus = EventBus::<TestEvent>::without_match(
         // A connection is not needed to compute a path, but the type is, so
         // this uses one over a transport that is never driven.
-        Connection::attach(Arc::new(crate::transport::memory::MemoryTransport::pair().0)),
+        Connection::attach(Arc::new(
+            crate::transport::memory::MemoryTransport::pair().0,
+        )),
         config,
     );
     assert_eq!(
