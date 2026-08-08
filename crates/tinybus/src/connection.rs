@@ -54,8 +54,21 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// told it lagged (`RecvError::Lagged`) rather than being silently starved.
 pub const SIGNAL_BUFFER: usize = 256;
 
+/// How many outbound messages may queue before a sender waits.
+///
+/// The queue is what makes [`Connection::try_send`] — and therefore a
+/// synchronous, fire-and-forget `publish` — possible at all: a sync caller
+/// cannot await a socket write, but it can hand a message to a writer task.
+/// Bounded, because an unbounded outbox turns a slow broker into unbounded
+/// growth in the process doing the publishing.
+pub const OUTBOX_CAPACITY: usize = 1024;
+
 struct Inner {
     transport: Arc<dyn Transport>,
+    /// Everything outbound goes through here and out via the writer task.
+    /// Serialising writes through one task is also what lets `send` be called
+    /// concurrently without interleaving two frames on the wire.
+    outbox: mpsc::Sender<Message>,
     serial: AtomicU64,
     pending: Mutex<HashMap<u64, oneshot::Sender<Message>>>,
     objects: RwLock<ObjectTree>,
