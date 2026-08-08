@@ -83,7 +83,6 @@ pub mod __private;
 pub use crate::connection::Connection;
 pub use crate::error::{Error, Result};
 pub use crate::message::{Header, Message, MessageKind};
-pub use crate::native::{NativeRegistry, NativeRequestError};
 pub use crate::name::{BusName, InterfaceName, MemberName, ObjectPath};
 pub use crate::ports::{Listener, Transport};
 pub use crate::proxy::Proxy;
