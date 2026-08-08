@@ -395,12 +395,13 @@ async fn try_recv_skips_another_catalogs_signals_rather_than_reporting_them() {
     let mut receiver = bus.receiver();
 
     // A signal on the same connection but a different interface: not ours.
-    bus.connection().deliver_local(crate::message::Message::signal(
-        ObjectPath::new("/somewhere/else").unwrap(),
-        InterfaceName::new("ai.tinyhumans.other.Events").unwrap(),
-        MemberName::new("Published").unwrap(),
-        serde_json::json!([{ "nope": true }]),
-    ));
+    bus.connection()
+        .deliver_local(crate::message::Message::signal(
+            ObjectPath::new("/somewhere/else").unwrap(),
+            InterfaceName::new("ai.tinyhumans.other.Events").unwrap(),
+            MemberName::new("Published").unwrap(),
+            serde_json::json!([{ "nope": true }]),
+        ));
 
     // `Empty` means nothing for *this* catalog, having skipped the rest.
     assert_eq!(receiver.try_recv().unwrap_err(), TryRecvError::Empty);

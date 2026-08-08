@@ -86,7 +86,9 @@ pub mod __private;
 
 pub use crate::connection::Connection;
 pub use crate::error::{Error, Result};
-pub use crate::events::{Event, EventBus, EventBusConfig, EventHandler, SubscriptionHandle};
+pub use crate::events::{
+    Event, EventBus, EventBusConfig, EventHandler, EventReceiver, SubscriptionHandle, TryRecvError,
+};
 pub use crate::global::OnceBus;
 pub use crate::message::{Header, Message, MessageKind};
 pub use crate::name::{BusName, InterfaceName, MemberName, ObjectPath};
