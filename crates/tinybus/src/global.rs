@@ -303,12 +303,19 @@ mod tests {
         assert!(!bus.is_initialised());
     }
 
-    /// Collect events off a bus until `n` arrive, or fail on a deadline.
-    async fn drain(bus: &OnceBus<Tick>, n: usize) -> Vec<Tick> {
+    /// Subscribe first, so a publish that follows cannot be broadcast into an
+    /// empty room. Returns the handle, which must be held for delivery to
+    /// continue.
+    fn watch(bus: &OnceBus<Tick>) -> (SubscriptionHandle, Arc<Mutex<Vec<Tick>>>) {
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let _handle = bus
+        let handle = bus
             .subscribe(Arc::new(Capture(seen.clone())))
             .expect("the bus is initialised");
+        (handle, seen)
+    }
+
+    /// Wait for `n` events to land, or fail on a deadline.
+    async fn wait_for(seen: &Arc<Mutex<Vec<Tick>>>, n: usize) -> Vec<Tick> {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             {
@@ -339,16 +346,18 @@ mod tests {
         first.block_on(async {
             BUS.init_in_process(config()).await.unwrap();
             // Delivery works while the initialising runtime is still alive.
+            let (_handle, seen) = watch(&BUS);
             BUS.publish(Tick(1));
-            assert_eq!(drain(&BUS, 1).await, vec![Tick(1)]);
+            assert_eq!(wait_for(&seen, 1).await, vec![Tick(1)]);
         });
         drop(first);
 
         // A later, unrelated runtime — a second test, in the real case.
         let second = tokio::runtime::Runtime::new().unwrap();
         second.block_on(async {
+            let (_handle, seen) = watch(&BUS);
             BUS.publish(Tick(2));
-            assert_eq!(drain(&BUS, 1).await, vec![Tick(2)]);
+            assert_eq!(wait_for(&seen, 1).await, vec![Tick(2)]);
         });
     }
 
