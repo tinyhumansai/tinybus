@@ -624,30 +624,51 @@ mod tests {
     }
 
     #[test]
-    fn a_major_bump_on_either_side_is_caught_and_says_which() {
+    fn a_major_bump_in_either_direction_is_caught() {
         let interface = iface("ai.tinyhumans.openhuman.Voice");
 
         // Provider ran ahead of the caller.
-        let result = check(&provider("3.0.0"), &consumer("2.1.0"), &interface);
-        assert!(matches!(result, Compatibility::ConsumerRejects { .. }), "{result}");
-        assert!(result.to_string().contains("does not accept"), "{result}");
+        let ahead = check(&provider("3.0.0"), &consumer("2.1.0"), &interface);
+        assert!(!ahead.is_compatible(), "{ahead}");
+        assert!(ahead.to_string().contains("does not accept"), "{ahead}");
 
-        // Caller ran ahead of the provider — the direction a one-sided check
-        // would miss entirely.
-        let result = check(&provider("2.1.0"), &consumer("3.0.0"), &interface);
-        assert!(matches!(result, Compatibility::ProviderRejects { .. }), "{result}");
+        // Caller ran ahead of the provider. Both are caught by the consumer's
+        // own range — it demands >=3.0.0 and is offered 2.1.0 — so the verdict
+        // names the caller's requirement rather than the provider's, which is
+        // the side that has to change.
+        let behind = check(&provider("2.1.0"), &consumer("3.0.0"), &interface);
+        assert!(matches!(behind, Compatibility::ConsumerRejects { .. }), "{behind}");
+        assert!(behind.to_string().contains("3.0.0"), "{behind}");
     }
 
     #[test]
     fn an_older_provider_than_the_caller_needs_is_rejected() {
-        // Same major, but the caller declared 2.5 and the provider only has
-        // 2.1 — the caller may be using something 2.1 does not implement.
+        // Same major, but the caller was written against 2.5 and the provider
+        // only implements 2.1 — the caller may use something 2.1 lacks.
         let result = check(
             &provider("2.1.0"),
             &consumer("2.5.0"),
             &iface("ai.tinyhumans.openhuman.Voice"),
         );
+        assert!(matches!(result, Compatibility::ConsumerRejects { .. }), "{result}");
+    }
+
+    #[test]
+    fn a_provider_that_dropped_old_callers_says_so() {
+        // The case only the provider-side check catches: the caller is happy
+        // with what is offered, but the provider has narrowed its own support
+        // window and will not serve a caller this old.
+        let interface = iface("ai.tinyhumans.openhuman.Voice");
+        let provider = PeerManifest::new("voice").provides(
+            InterfaceVersion::provided(interface.clone(), Version::new(2, 3, 0))
+                .with_accepts(VersionRange::parse(">=2.2.0, <3.0.0").unwrap()),
+        );
+        let consumer = PeerManifest::new("openhuman")
+            .consumes(InterfaceVersion::consumed(interface.clone(), Version::new(2, 0, 0)));
+
+        let result = check(&provider, &consumer, &interface);
         assert!(matches!(result, Compatibility::ProviderRejects { .. }), "{result}");
+        assert!(result.to_string().contains(">=2.2.0"), "{result}");
     }
 
     #[test]
