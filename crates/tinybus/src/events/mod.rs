@@ -162,13 +162,24 @@ impl<E: Event> EventBus<E> {
     /// [`EventBus::publish`], which logs and drops — see its note on why that
     /// is the right default for a notification.
     pub fn try_publish(&self, event: E) -> Result<()> {
+        let message = self.signal_for(&event)?;
+        // Local first, then the wire. Local delivery cannot fail and does not
+        // depend on the broker being reachable, so a subscriber in the
+        // publisher's own process keeps working even when the bus is wedged —
+        // which is exactly the behaviour the in-process bus had.
+        self.connection.deliver_local(message.clone());
+        self.connection.try_send(message)
+    }
+
+    /// Build the signal one event travels as.
+    fn signal_for(&self, event: &E) -> Result<Message> {
         let path = self.path_for(event.domain())?;
-        self.connection.try_emit(
+        Ok(Message::signal(
             path,
             self.config.interface.clone(),
             self.member.clone(),
-            (event,),
-        )
+            serde_json::to_value((event,))?,
+        ))
     }
 
     /// Publish an event, logging and dropping on failure.
@@ -191,15 +202,9 @@ impl<E: Event> EventBus<E> {
     /// For the rare emitter that would rather be slowed down than lose an
     /// event — an audit trail, say.
     pub async fn publish_awaited(&self, event: E) -> Result<()> {
-        let path = self.path_for(event.domain())?;
-        self.connection
-            .emit(
-                path,
-                self.config.interface.clone(),
-                self.member.clone(),
-                (event,),
-            )
-            .await
+        let message = self.signal_for(&event)?;
+        self.connection.deliver_local(message.clone());
+        self.connection.send(message).await
     }
 
     /// Subscribe a handler. The returned handle cancels it when dropped.
