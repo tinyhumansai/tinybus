@@ -312,10 +312,15 @@ async fn a_peer_that_publishes_and_subscribes_sees_the_event_exactly_once() {
 }
 
 #[tokio::test]
-async fn a_local_subscriber_still_receives_when_the_outbox_is_full() {
-    // Local delivery runs before the wire send and cannot fail, so a wedged
-    // bus degrades to in-process-only rather than to silence.
-    let (_t, bus) = bus().await;
+async fn a_local_subscriber_still_receives_once_the_outbox_has_overflowed() {
+    // Local delivery runs before the wire send and does not depend on the
+    // broker, so a bus that has stopped draining degrades to in-process-only
+    // rather than to silence. Driven with no broker at all: the far end of this
+    // transport is never read, so the outbox fills and stays full.
+    let (near, _far) = crate::transport::memory::MemoryTransport::pair();
+    let connection = Connection::attach(Arc::new(near));
+    let bus = EventBus::<TestEvent>::without_match(connection, config());
+
     let seen = Arc::new(Mutex::new(Vec::new()));
     let _handle = bus.subscribe(Arc::new(Capture {
         name: "test::local",
@@ -323,16 +328,24 @@ async fn a_local_subscriber_still_receives_when_the_outbox_is_full() {
         seen: seen.clone(),
     }));
 
+    // Overflow the outbox. Publishing is infallible-by-design, so this cannot
+    // fail; what it can do is stop reaching the wire.
     for i in 0..(crate::connection::OUTBOX_CAPACITY * 2) {
         bus.publish(TestEvent::AgentTurnCompleted {
             run: format!("run-{i}"),
         });
     }
 
-    // Every publish reached the local subscriber even though the outbox will
-    // have overflowed part-way through.
-    let events = wait_for(&seen, crate::connection::OUTBOX_CAPACITY * 2).await;
-    assert_eq!(events.len(), crate::connection::OUTBOX_CAPACITY * 2);
+    // The wire is definitively refusing traffic by now...
+    let wire = bus.try_publish(TestEvent::SystemStartup).unwrap_err();
+    assert!(
+        matches!(wire, crate::Error::Backpressure),
+        "expected backpressure, got {wire}"
+    );
+    // ...and the local subscriber is still being fed. It will have lagged —
+    // a 256-slot broadcast cannot hold 2048 events — so this asserts that
+    // delivery continued, not that nothing was dropped.
+    assert!(!wait_for(&seen, 1).await.is_empty());
 }
 
 #[tokio::test]
