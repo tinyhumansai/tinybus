@@ -309,9 +309,10 @@ mod tests {
         let address = dir.path().join("bus");
         let listener = UnixListenerAdapter::bind(&address).await.unwrap();
         Broker::new().spawn(listener);
-        let service = Connection::connect(Box::new(UnixTransport::connect(&address).await.unwrap()))
-            .await
-            .unwrap();
+        let service =
+            Connection::connect(Box::new(UnixTransport::connect(&address).await.unwrap()))
+                .await
+                .unwrap();
         service.request_name(DESTINATION).await.unwrap();
         service
             .serve_at(ObjectPath::new(PATH).unwrap(), Echo)
@@ -337,13 +338,33 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(cli.timeout, 7);
-        assert_eq!(resolve_address(cli.address).unwrap(), PathBuf::from("/run/user/1000/tinybus/bus"));
+        assert_eq!(
+            resolve_address(cli.address).unwrap(),
+            PathBuf::from("/run/user/1000/tinybus/bus")
+        );
         assert!(matches!(cli.command, Command::Call { args, .. } if args == "[1]"));
-        assert!(matches!(Cli::try_parse_from(["tinybus", "serve"]).unwrap().command, Command::Serve));
-        assert!(matches!(Cli::try_parse_from(["tinybus", "list"]).unwrap().command, Command::List));
-        assert!(matches!(Cli::try_parse_from(["tinybus", "doctor"]).unwrap().command, Command::Doctor));
-        assert!(matches!(Cli::try_parse_from(["tinybus", "emit", PATH, INTERFACE, "Changed"]).unwrap().command, Command::Emit { .. }));
-        assert!(matches!(Cli::try_parse_from(["tinybus", "monitor"]).unwrap().command, Command::Monitor { .. }));
+        assert!(matches!(
+            Cli::try_parse_from(["tinybus", "serve"]).unwrap().command,
+            Command::Serve
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["tinybus", "list"]).unwrap().command,
+            Command::List
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["tinybus", "doctor"]).unwrap().command,
+            Command::Doctor
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["tinybus", "emit", PATH, INTERFACE, "Changed"])
+                .unwrap()
+                .command,
+            Command::Emit { .. }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["tinybus", "monitor"]).unwrap().command,
+            Command::Monitor { .. }
+        ));
     }
 
     #[test]
@@ -364,8 +385,17 @@ mod tests {
             serde_json::json!([]),
         );
         assert!(render(&signal).starts_with("signal"));
-        assert!(render(&tinybus::Message::method_return(&call.header, Value::Null)).starts_with("return"));
-        assert!(render(&tinybus::Message::error_reply(&call.header, &Error::ConnectionClosed)).starts_with("error"));
+        assert!(
+            render(&tinybus::Message::method_return(&call.header, Value::Null))
+                .starts_with("return")
+        );
+        assert!(
+            render(&tinybus::Message::error_reply(
+                &call.header,
+                &Error::ConnectionClosed
+            ))
+            .starts_with("error")
+        );
     }
 
     #[tokio::test]
@@ -397,12 +427,20 @@ mod tests {
         })
         .await
         .unwrap();
-        run(Cli { address: Some(address.clone()), timeout: 1, command: Command::List })
-            .await
-            .unwrap();
-        run(Cli { address: Some(address), timeout: 1, command: Command::Doctor })
-            .await
-            .unwrap();
+        run(Cli {
+            address: Some(address.clone()),
+            timeout: 1,
+            command: Command::List,
+        })
+        .await
+        .unwrap();
+        run(Cli {
+            address: Some(address),
+            timeout: 1,
+            command: Command::Doctor,
+        })
+        .await
+        .unwrap();
         assert!(service.unique_name().is_some());
     }
 }

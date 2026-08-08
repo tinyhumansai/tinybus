@@ -408,6 +408,22 @@ async fn try_recv_skips_another_catalogs_signals_rather_than_reporting_them() {
 }
 
 #[tokio::test]
+async fn a_closure_subscriber_receives_events() {
+    let (_t, bus) = bus().await;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = seen.clone();
+    let _handle = bus.on("test::closure", move |event| {
+        let sink = sink.clone();
+        async move {
+            sink.lock().await.push(event);
+        }
+    });
+
+    bus.publish(TestEvent::SystemStartup);
+    assert_eq!(wait_for(&seen, 1).await[0], TestEvent::SystemStartup);
+}
+
+#[tokio::test]
 async fn publishing_with_no_subscribers_is_not_an_error() {
     // The old bus dropped events with no receivers silently, and 254 call sites
     // depend on that being a non-event.

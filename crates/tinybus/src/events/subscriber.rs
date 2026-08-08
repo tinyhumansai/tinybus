@@ -86,6 +86,36 @@ impl Drop for SubscriptionHandle {
     }
 }
 
+/// A closure-based handler, for a subscriber too small to justify a type.
+///
+/// Carried over from the bus this replaces, where it existed for exactly the
+/// same reason: a test or a one-line bridge should not have to declare a struct
+/// and an `impl` to react to an event.
+pub(crate) struct FnSubscriber<E, F> {
+    pub(crate) name: String,
+    pub(crate) handler: F,
+    pub(crate) _event: std::marker::PhantomData<fn() -> E>,
+}
+
+#[async_trait]
+impl<E, F, Fut> EventHandler<E> for FnSubscriber<E, F>
+where
+    E: Event,
+    F: Fn(E) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn handle(&self, event: &E) {
+        // The event is cloned rather than borrowed so the closure's future can
+        // be `'static` — which is what lets callers write an `async move` block
+        // instead of fighting a borrow that outlives the call.
+        (self.handler)(event.clone()).await;
+    }
+}
+
 /// Spawn the dispatch loop for one handler.
 pub(crate) fn spawn<E: Event>(
     mut signals: broadcast::Receiver<Message>,
