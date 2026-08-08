@@ -1,0 +1,16 @@
+[package]
+name = "tinybus-macros"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The #[interface] attribute for tinybus. Not useful on its own; use the `tinybus` crate."
+readme = "README.md"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }

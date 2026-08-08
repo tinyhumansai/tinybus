@@ -1,0 +1,617 @@
+//! A peer's link to the broker: outgoing calls, incoming dispatch, signals.
+//!
+//! One [`Connection`] serves both roles a peer can have. The kernel uses the
+//! client half ([`Connection::call`], [`Connection::add_match`]); an
+//! integration additionally uses the service half ([`Connection::serve_at`],
+//! [`Connection::emit`]). They are not separate types because a service that
+//! calls another service is normal — the transcription service asking the
+//! notification service to say it is done should not need a second socket.
+//!
+//! # The dispatch loop
+//!
+//! Exactly one task reads the transport. It never awaits user code inline: a
+//! method call is handed to a spawned task, so a slow `Transcribe` cannot stop
+//! the connection from noticing that a reply to an earlier call has arrived.
+//! That is the whole reason calls carry serials rather than relying on order.
+//!
+//! # Timeouts
+//!
+//! Every call has a deadline, defaulting to [`DEFAULT_TIMEOUT`]. This is not
+//! optional and cannot be disabled, because the failure it prevents is the one
+//! that motivated the project: an integration wedged inside a third-party
+//! library used to wedge the kernel with it. A timeout does *not* cancel the
+//! remote work — tinybus cannot — it stops waiting and frees the caller.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use serde_json::Value;
+use tokio::sync::{Mutex, RwLock, broadcast, oneshot};
+
+use crate::error::{Error, Result};
+use crate::message::{Header, Message, MessageKind};
+use crate::name::{BusName, InterfaceName, MemberName, ObjectPath};
+use crate::ports::Transport;
+use crate::proxy::Proxy;
+use crate::router::MatchRule;
+use crate::service::{Interface, ObjectTree};
+
+/// How long a call waits before giving up.
+///
+/// Thirty seconds is long enough for a model round-trip or a cold service
+/// start, and short enough that a wedged integration surfaces as an error
+/// inside one user interaction rather than as a hang.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How many signals may queue for a subscriber before the oldest are dropped.
+///
+/// Dropping rather than blocking is the right trade for a broadcast: one slow
+/// subscriber must not stall every other subscriber, and a lagging receiver is
+/// told it lagged (`RecvError::Lagged`) rather than being silently starved.
+pub const SIGNAL_BUFFER: usize = 256;
+
+struct Inner {
+    transport: Arc<dyn Transport>,
+    serial: AtomicU64,
+    pending: Mutex<HashMap<u64, oneshot::Sender<Message>>>,
+    objects: RwLock<ObjectTree>,
+    unique_name: RwLock<Option<BusName>>,
+    signals: broadcast::Sender<Message>,
+}
+
+/// Closes the transport when the last [`Connection`] handle goes away.
+///
+/// Needed because the dispatch task holds its own `Arc<Inner>`, so the
+/// refcount on `Inner` never reaches zero while that task lives — and the task
+/// only exits when the transport closes. Without this guard, dropping the last
+/// `Connection` would leak a task, and, worse, the *broker* would never see the
+/// hangup: a service that exited would keep its well-known name until the
+/// process died. `NameOwnerChanged` firing promptly is the whole reason the
+/// kernel can react to an integration dying instead of timing out on it.
+struct CloseOnDrop(Arc<Inner>);
+
+impl Drop for CloseOnDrop {
+    fn drop(&mut self) {
+        let inner = self.0.clone();
+        // Spawned, because `close` is async and `Drop` is not. If there is no
+        // runtime left to spawn on the process is going away anyway, which
+        // closes the transport by closing its file descriptors.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::spawn(async move {
+                let _ = inner.transport.close().await;
+            });
+        }
+    }
+}
+
+/// One peer's link to the bus. Cheap to clone; every clone shares one
+/// transport, one serial counter and one object tree.
+#[derive(Clone)]
+pub struct Connection {
+    inner: Arc<Inner>,
+    /// Shared, so the hangup happens when the *last* handle drops.
+    _close: Arc<CloseOnDrop>,
+}
+
+impl Connection {
+    /// Attach to the bus over `transport` and complete the `Hello` handshake.
+    ///
+    /// Returns once the broker has assigned a unique name, so
+    /// [`Connection::unique_name`] is populated for the whole life of the
+    /// connection and callers never have to handle "not yet named".
+    pub async fn connect(transport: Box<dyn Transport>) -> Result<Self> {
+        let conn = Self::attach(transport.into());
+        let name: String = conn
+            .call_bus("Hello", serde_json::json!([]))
+            .await
+            .and_then(|v| Ok(serde_json::from_value(v)?))?;
+        *conn.inner.unique_name.write().await = Some(BusName::new(name)?);
+        Ok(conn)
+    }
+
+    /// Wire up a connection without handshaking.
+    ///
+    /// Used by the broker for its own side of a peer link, and by tests that
+    /// drive the protocol by hand. Ordinary callers want
+    /// [`Connection::connect`].
+    pub fn attach(transport: Arc<dyn Transport>) -> Self {
+        let (signals, _) = broadcast::channel(SIGNAL_BUFFER);
+        let inner = Arc::new(Inner {
+            transport,
+            // Serials start at 1: zero is the "unassigned" value a freshly
+            // built `Message` carries, so it must never be a live serial.
+            serial: AtomicU64::new(1),
+            pending: Mutex::new(HashMap::new()),
+            objects: RwLock::new(ObjectTree::new()),
+            unique_name: RwLock::new(None),
+            signals,
+        });
+        tokio::spawn(dispatch_loop(inner.clone()));
+        Self {
+            _close: Arc::new(CloseOnDrop(inner.clone())),
+            inner,
+        }
+    }
+
+    /// This peer's broker-assigned unique name, once handshaken.
+    pub async fn unique_name(&self) -> Option<BusName> {
+        self.inner.unique_name.read().await.clone()
+    }
+
+    /// Export `interface` at `path`.
+    pub async fn serve_at(&self, path: ObjectPath, interface: impl Interface) -> Result<()> {
+        self.inner
+            .objects
+            .write()
+            .await
+            .insert(path, Arc::new(interface));
+        Ok(())
+    }
+
+    /// Stop exporting everything at `path`.
+    pub async fn unserve(&self, path: &ObjectPath) -> bool {
+        self.inner.objects.write().await.remove(path)
+    }
+
+    /// Claim a well-known name. Fails if another live peer holds it.
+    pub async fn request_name(&self, name: impl AsRef<str>) -> Result<()> {
+        let name = BusName::new(name.as_ref())?;
+        self.call_bus("RequestName", serde_json::json!([name]))
+            .await
+            .map(|_| ())
+    }
+
+    /// Give up a well-known name.
+    pub async fn release_name(&self, name: impl AsRef<str>) -> Result<()> {
+        let name = BusName::new(name.as_ref())?;
+        self.call_bus("ReleaseName", serde_json::json!([name]))
+            .await
+            .map(|_| ())
+    }
+
+    /// Every name currently owned on the bus, unique names included.
+    pub async fn list_names(&self) -> Result<Vec<BusName>> {
+        let value = self.call_bus("ListNames", serde_json::json!([])).await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Which peer, if any, owns `name`.
+    pub async fn name_owner(&self, name: impl AsRef<str>) -> Result<Option<BusName>> {
+        let name = BusName::new(name.as_ref())?;
+        let value = self
+            .call_bus("GetNameOwner", serde_json::json!([name]))
+            .await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Subscribe to signals matching `rule`.
+    ///
+    /// Returns a receiver rather than taking a callback: a callback would have
+    /// to run on the dispatch task, and anything it awaited would delay every
+    /// other message on the connection.
+    pub async fn add_match(&self, rule: MatchRule) -> Result<broadcast::Receiver<Message>> {
+        // Subscribe *before* telling the broker, so a signal that fires between
+        // the two cannot slip through the gap.
+        let receiver = self.inner.signals.subscribe();
+        self.call_bus("AddMatch", serde_json::json!([rule_to_wire(&rule)]))
+            .await?;
+        Ok(receiver)
+    }
+
+    /// A receiver for every signal already subscribed to on this connection.
+    pub fn signals(&self) -> broadcast::Receiver<Message> {
+        self.inner.signals.subscribe()
+    }
+
+    /// Broadcast a signal. Returns as soon as the broker has it; there is no
+    /// delivery confirmation, by design — a signal nobody subscribed to is not
+    /// a failure.
+    pub async fn emit(
+        &self,
+        path: ObjectPath,
+        interface: InterfaceName,
+        member: MemberName,
+        body: impl Serialize,
+    ) -> Result<()> {
+        let message = Message::signal(path, interface, member, to_body(&body)?);
+        self.send(message).await
+    }
+
+    /// A typed handle to one interface on one remote object.
+    pub fn proxy(
+        &self,
+        destination: impl AsRef<str>,
+        path: impl AsRef<str>,
+        interface: impl AsRef<str>,
+    ) -> Result<Proxy> {
+        Proxy::new(
+            self.clone(),
+            BusName::new(destination.as_ref())?,
+            ObjectPath::new(path.as_ref())?,
+            InterfaceName::new(interface.as_ref())?,
+        )
+    }
+
+    /// Call a method and deserialize the reply, using [`DEFAULT_TIMEOUT`].
+    pub async fn call<R: DeserializeOwned>(
+        &self,
+        destination: BusName,
+        path: ObjectPath,
+        interface: InterfaceName,
+        member: MemberName,
+        args: impl Serialize,
+    ) -> Result<R> {
+        self.call_with_timeout(destination, path, interface, member, args, DEFAULT_TIMEOUT)
+            .await
+    }
+
+    /// Call a method with an explicit deadline.
+    pub async fn call_with_timeout<R: DeserializeOwned>(
+        &self,
+        destination: BusName,
+        path: ObjectPath,
+        interface: InterfaceName,
+        member: MemberName,
+        args: impl Serialize,
+        timeout: Duration,
+    ) -> Result<R> {
+        let message = Message::method_call(
+            destination,
+            path,
+            interface,
+            member.clone(),
+            to_body(&args)?,
+        );
+        let reply = self.call_raw(message, timeout).await?;
+        Ok(serde_json::from_value(reply)?)
+    }
+
+    /// Send a call and wait for its reply, without typing either end.
+    ///
+    /// The plumbing under every typed call, and what `tinybus call` uses.
+    pub async fn call_raw(&self, mut message: Message, timeout: Duration) -> Result<Value> {
+        let serial = self.inner.serial.fetch_add(1, Ordering::Relaxed);
+        message.header.serial = serial;
+        message.validate()?;
+        let member = message.member_or_unknown();
+
+        let (tx, rx) = oneshot::channel();
+        self.inner.pending.lock().await.insert(serial, tx);
+
+        if let Err(e) = self.inner.transport.send(message).await {
+            self.inner.pending.lock().await.remove(&serial);
+            return Err(e);
+        }
+
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(reply)) => match reply.header.kind {
+                MessageKind::Error => Err(reply.into_error()),
+                _ => Ok(reply.body),
+            },
+            // The dispatch loop dropped the sender: the transport is gone.
+            Ok(Err(_)) => Err(Error::ConnectionClosed),
+            Err(_) => {
+                // Reclaim the slot, or a timed-out call leaks one entry per
+                // occurrence for the life of the connection.
+                self.inner.pending.lock().await.remove(&serial);
+                Err(Error::Timeout {
+                    member,
+                    timeout_ms: timeout.as_millis() as u64,
+                })
+            }
+        }
+    }
+
+    /// Send a message with no reply expected.
+    pub async fn send(&self, mut message: Message) -> Result<()> {
+        message.header.serial = self.inner.serial.fetch_add(1, Ordering::Relaxed);
+        message.validate()?;
+        self.inner.transport.send(message).await
+    }
+
+    /// Close the link.
+    pub async fn close(&self) -> Result<()> {
+        self.inner.transport.close().await
+    }
+
+    /// Call a method on the broker's own interface.
+    async fn call_bus(&self, member: &str, args: Value) -> Result<Value> {
+        let message = Message::method_call(
+            BusName::new(crate::BUS_NAME)?,
+            ObjectPath::new(crate::BUS_PATH)?,
+            InterfaceName::new(crate::BUS_INTERFACE)?,
+            MemberName::new(member)?,
+            args,
+        );
+        self.call_raw(message, DEFAULT_TIMEOUT).await
+    }
+}
+
+/// Serialize a call body, normalising it to the positional array the protocol
+/// specifies.
+///
+/// A caller writing `("/tmp/a.wav",)` and a caller writing
+/// `["/tmp/a.wav"]` mean the same thing; a caller writing a bare `"/tmp/a.wav"`
+/// almost certainly also does. Wrapping a scalar rather than rejecting it makes
+/// the one-argument case — by far the most common — pleasant to write.
+fn to_body(value: &impl Serialize) -> Result<Value> {
+    let value = serde_json::to_value(value)?;
+    Ok(match value {
+        Value::Array(_) => value,
+        Value::Null => Value::Array(Vec::new()),
+        other => Value::Array(vec![other]),
+    })
+}
+
+/// Render a rule back into its wire form for `AddMatch`.
+fn rule_to_wire(rule: &MatchRule) -> String {
+    let mut clauses: Vec<String> = Vec::new();
+    if let Some(kind) = rule.kind {
+        let name = match kind {
+            MessageKind::Signal => "signal",
+            MessageKind::MethodCall => "method_call",
+            MessageKind::MethodReturn => "method_return",
+            MessageKind::Error => "error",
+        };
+        clauses.push(format!("type={name}"));
+    }
+    if let Some(v) = &rule.sender {
+        clauses.push(format!("sender={v}"));
+    }
+    if let Some(v) = &rule.interface {
+        clauses.push(format!("interface={v}"));
+    }
+    if let Some(v) = &rule.member {
+        clauses.push(format!("member={v}"));
+    }
+    if let Some(v) = &rule.path {
+        clauses.push(format!("path={v}"));
+    }
+    if let Some(v) = &rule.path_namespace {
+        clauses.push(format!("path_namespace={v}"));
+    }
+    clauses.join(",")
+}
+
+/// The single reader task. Owns `recv`; never awaits user code inline.
+async fn dispatch_loop(inner: Arc<Inner>) {
+    loop {
+        let message = match inner.transport.recv().await {
+            Ok(Some(message)) => message,
+            Ok(None) => break,
+            Err(e) => {
+                tracing::debug!(error = %e, "connection read failed; closing");
+                break;
+            }
+        };
+
+        match message.header.kind {
+            MessageKind::MethodReturn | MessageKind::Error => {
+                let Some(serial) = message.header.reply_serial else {
+                    tracing::debug!("dropped a reply with no reply_serial");
+                    continue;
+                };
+                // An unmatched reply is a timed-out call arriving late. Normal,
+                // and nothing to do but drop it.
+                if let Some(waiter) = inner.pending.lock().await.remove(&serial) {
+                    let _ = waiter.send(message);
+                }
+            }
+            MessageKind::Signal => {
+                // `send` fails only when nobody is subscribed, which is the
+                // common case for a service that emits but never listens.
+                let _ = inner.signals.send(message);
+            }
+            MessageKind::MethodCall => {
+                // Spawned, so a long-running method does not block replies to
+                // calls this connection has outstanding.
+                tokio::spawn(handle_call(inner.clone(), message));
+            }
+        }
+    }
+
+    // Wake everyone still waiting rather than leaving them to time out one by
+    // one: the link is gone and no reply is ever coming.
+    inner.pending.lock().await.clear();
+}
+
+/// Run one inbound method call and send its reply.
+async fn handle_call(inner: Arc<Inner>, message: Message) {
+    let header = message.header.clone();
+    let result = dispatch(&inner, &header, message.body).await;
+
+    let mut reply = match result {
+        Ok(value) => Message::method_return(&header, value),
+        Err(e) => Message::error_reply(&header, &e),
+    };
+    reply.header.serial = inner.serial.fetch_add(1, Ordering::Relaxed);
+    if let Err(e) = inner.transport.send(reply).await {
+        tracing::debug!(error = %e, "could not reply; the caller will time out");
+    }
+}
+
+async fn dispatch(inner: &Inner, header: &Header, body: Value) -> Result<Value> {
+    let (Some(path), Some(interface), Some(member)) =
+        (&header.path, &header.interface, &header.member)
+    else {
+        return Err(Error::protocol("method call is missing an address"));
+    };
+    let objects = inner.objects.read().await;
+    objects.dispatch(path, interface, member, body).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::memory::MemoryTransport;
+    use async_trait::async_trait;
+
+    /// A service that answers `Echo` and fails `Boom`.
+    struct Echo;
+
+    #[async_trait]
+    impl Interface for Echo {
+        fn name(&self) -> InterfaceName {
+            InterfaceName::new("ai.tinyhumans.Test").unwrap()
+        }
+
+        fn members(&self) -> Vec<MemberName> {
+            vec![
+                MemberName::new("Echo").unwrap(),
+                MemberName::new("Boom").unwrap(),
+                MemberName::new("Hang").unwrap(),
+            ]
+        }
+
+        async fn call(&self, member: &MemberName, args: Value) -> Result<Value> {
+            match member.as_str() {
+                "Echo" => Ok(args),
+                "Boom" => Err(Error::failed("as requested")),
+                "Hang" => {
+                    tokio::time::sleep(Duration::from_secs(3600)).await;
+                    Ok(Value::Null)
+                }
+                other => Err(Error::failed(format!("unreachable: {other}"))),
+            }
+        }
+    }
+
+    fn path() -> ObjectPath {
+        ObjectPath::new("/ai/tinyhumans/Test").unwrap()
+    }
+
+    fn call(member: &str, body: Value) -> Message {
+        Message::method_call(
+            BusName::new("ai.tinyhumans.Test").unwrap(),
+            path(),
+            InterfaceName::new("ai.tinyhumans.Test").unwrap(),
+            MemberName::new(member).unwrap(),
+            body,
+        )
+    }
+
+    /// Two connections wired directly to each other, with no broker in the
+    /// middle: enough to exercise dispatch, replies, serials and timeouts.
+    async fn pair() -> (Connection, Connection) {
+        let (a, b) = MemoryTransport::pair();
+        let client = Connection::attach(Arc::new(a));
+        let service = Connection::attach(Arc::new(b));
+        service.serve_at(path(), Echo).await.unwrap();
+        (client, service)
+    }
+
+    #[tokio::test]
+    async fn a_call_reaches_the_service_and_the_reply_comes_back() {
+        let (client, _service) = pair().await;
+        let reply = client
+            .call_raw(call("Echo", serde_json::json!(["hi"])), DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_eq!(reply, serde_json::json!(["hi"]));
+    }
+
+    #[tokio::test]
+    async fn a_failing_method_arrives_as_an_error_with_its_name_intact() {
+        let (client, _service) = pair().await;
+        let err = client
+            .call_raw(call("Boom", serde_json::json!([])), DEFAULT_TIMEOUT)
+            .await
+            .unwrap_err();
+        assert_eq!(err.wire_name(), Error::FAILED);
+        assert!(err.to_string().contains("as requested"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_member_is_reported_as_such_rather_than_hanging() {
+        let (client, _service) = pair().await;
+        let err = client
+            .call_raw(call("Nope", serde_json::json!([])), DEFAULT_TIMEOUT)
+            .await
+            .unwrap_err();
+        assert_eq!(err.wire_name(), Error::UNKNOWN_METHOD);
+    }
+
+    #[tokio::test]
+    async fn a_wedged_method_times_out_the_caller_and_not_the_connection() {
+        let (client, _service) = pair().await;
+        let err = client
+            .call_raw(
+                call("Hang", serde_json::json!([])),
+                Duration::from_millis(50),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Timeout { .. }), "{err}");
+
+        // The point of the exercise: the connection still works afterwards.
+        let reply = client
+            .call_raw(
+                call("Echo", serde_json::json!(["still here"])),
+                DEFAULT_TIMEOUT,
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply, serde_json::json!(["still here"]));
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_call_does_not_leak_its_pending_slot() {
+        let (client, _service) = pair().await;
+        let _ = client
+            .call_raw(
+                call("Hang", serde_json::json!([])),
+                Duration::from_millis(20),
+            )
+            .await;
+        assert!(client.inner.pending.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn concurrent_calls_are_matched_by_serial_not_by_order() {
+        let (client, _service) = pair().await;
+        let slow = client.call_raw(call("Echo", serde_json::json!(["first"])), DEFAULT_TIMEOUT);
+        let fast = client.call_raw(call("Echo", serde_json::json!(["second"])), DEFAULT_TIMEOUT);
+        let (a, b) = tokio::join!(slow, fast);
+        assert_eq!(a.unwrap(), serde_json::json!(["first"]));
+        assert_eq!(b.unwrap(), serde_json::json!(["second"]));
+    }
+
+    #[tokio::test]
+    async fn a_dropped_peer_wakes_waiters_instead_of_making_them_wait_out_the_clock() {
+        let (a, b) = MemoryTransport::pair();
+        let client = Connection::attach(Arc::new(a));
+        drop(b);
+        let err = client
+            .call_raw(
+                call("Echo", serde_json::json!([])),
+                Duration::from_secs(300),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::ConnectionClosed | Error::Transport(_)),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_scalar_argument_is_wrapped_into_the_positional_array() {
+        assert_eq!(to_body(&"a").unwrap(), serde_json::json!(["a"]));
+        assert_eq!(to_body(&("a", 1)).unwrap(), serde_json::json!(["a", 1]));
+        assert_eq!(to_body(&Vec::<u8>::new()).unwrap(), serde_json::json!([]));
+        assert_eq!(to_body(&Value::Null).unwrap(), serde_json::json!([]));
+    }
+
+    #[test]
+    fn a_rule_round_trips_through_its_wire_form() {
+        let rule = MatchRule::parse(
+            "type=signal,interface=ai.tinyhumans.Mail,member=Received,path_namespace=/ai/Mail",
+        )
+        .unwrap();
+        assert_eq!(MatchRule::parse(&rule_to_wire(&rule)).unwrap(), rule);
+    }
+}

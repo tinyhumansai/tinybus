@@ -1,0 +1,77 @@
+[package]
+name = "tinybus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A zbus-style message bus that keeps external integrations out of the OpenHuman kernel's dependency graph."
+readme = "README.md"
+keywords = ["bus", "ipc", "rpc", "integrations", "openhuman"]
+categories = ["network-programming", "asynchronous"]
+# Examples are declared explicitly, with the features they need, so an example
+# can never be built by a `--no-default-features` CI job that has no transport
+# compiled in.
+autoexamples = false
+
+[dependencies]
+# --- always compiled: the offline core ---
+# The bus core is a protocol, a router, and two seams (`Transport`, `Listener`).
+# None of that needs a socket: the in-memory transport is always compiled, so
+# `cargo test` runs an entire broker, several services and a client inside one
+# process without opening a file descriptor. That invariant is what lets the
+# kernel embed tinybus in a slim build and what keeps the test suite hermetic.
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { version = "1", features = ["macros", "rt", "sync", "time", "io-util"] }
+
+tinybus-macros = { workspace = true, optional = true }
+
+# --- optional: the CLI ---
+clap = { version = "4", features = ["derive", "env"], optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+
+[features]
+# `uds` and `macros` are on by default because a bus you cannot connect to over
+# a socket, and an interface you have to hand-dispatch, are not what anyone is
+# installing. The features exist so the *kernel* can take
+# `--no-default-features` and get the protocol plus the in-process transport and
+# nothing else — no `tokio/net`, no proc-macro build step.
+default = ["uds", "macros", "cli"]
+
+# Length-prefixed JSON over a Unix domain socket (Windows: named pipe, not yet
+# implemented — see ROADMAP.md). This is the production transport.
+uds = ["tokio/net", "tokio/io-util"]
+
+# `#[tinybus::interface]`, the attribute that turns an `impl` block into a
+# dispatchable interface.
+macros = ["dep:tinybus-macros"]
+
+# The `tinybus` binary: `serve`, `call`, `emit`, `list`, `monitor`, `doctor`.
+# The library never asks for a multi-threaded runtime — only the binary does.
+cli = [
+    "dep:clap",
+    "dep:tracing-subscriber",
+    "tokio/rt-multi-thread",
+    "tokio/signal",
+    "uds",
+]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "io-util"] }
+tempfile = "3"
+
+[[bin]]
+name = "tinybus"
+path = "src/bin/tinybus.rs"
+required-features = ["cli"]
+
+[[example]]
+name = "voice_service"
+required-features = ["uds", "macros", "cli"]
+
+[[example]]
+name = "kernel_client"
+required-features = ["uds", "macros"]
