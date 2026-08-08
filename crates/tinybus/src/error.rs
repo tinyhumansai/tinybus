@@ -130,6 +130,22 @@ pub enum Error {
         reason: String,
     },
 
+    /// A peer speaks a version of an interface this peer cannot work with.
+    ///
+    /// Raised by [`crate::Connection::require`] at the point of checking, not
+    /// at the point of failing — which is the difference between a startup
+    /// error naming two versions and a deserialize error hours later naming
+    /// neither.
+    #[error("{peer} is not compatible on {interface}: {detail}")]
+    IncompatibleVersion {
+        /// The peer that was checked.
+        peer: String,
+        /// The interface in question.
+        interface: String,
+        /// Which side rejected which version.
+        detail: String,
+    },
+
     /// A method ran and failed. This is the variant that crosses the wire.
     #[error("{name}: {message}")]
     MethodFailed {
@@ -261,6 +277,7 @@ impl Error {
             Self::BadArguments { .. } => "ai.tinyhumans.tinybus.Error.BadArguments",
             Self::InvalidDomain { .. } => "ai.tinyhumans.tinybus.Error.InvalidDomain",
             Self::Timeout { .. } => "ai.tinyhumans.tinybus.Error.Timeout",
+            Self::IncompatibleVersion { .. } => "ai.tinyhumans.tinybus.Error.IncompatibleVersion",
             Self::Path { .. } => "ai.tinyhumans.tinybus.Error.Path",
             Self::FeatureDisabled(_, _) => "ai.tinyhumans.tinybus.Error.FeatureDisabled",
             Self::Json(_) => "ai.tinyhumans.tinybus.Error.Json",

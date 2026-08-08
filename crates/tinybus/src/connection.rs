@@ -39,6 +39,7 @@ use crate::ports::Transport;
 use crate::proxy::Proxy;
 use crate::router::MatchRule;
 use crate::service::{Interface, ObjectTree};
+use crate::version::{Compatibility, PeerManifest, PeerRecord};
 
 /// How long a call waits before giving up.
 ///
@@ -236,6 +237,82 @@ impl Connection {
             .call_bus("GetNameOwner", serde_json::json!([name]))
             .await?;
         Ok(serde_json::from_value(value)?)
+    }
+
+    /// Tell the broker what this peer speaks and accepts.
+    ///
+    /// Announcing is optional and additive: a peer that never calls this stays
+    /// fully routable, so manifests can be adopted one service at a time. What
+    /// it buys is that *other* peers can check compatibility before calling,
+    /// and get a verdict naming versions rather than a decode error naming
+    /// JSON.
+    pub async fn announce(&self, manifest: &PeerManifest) -> Result<()> {
+        self.call_bus("Announce", serde_json::json!([manifest]))
+            .await
+            .map(|_| ())
+    }
+
+    /// What `name` announced, if anything.
+    pub async fn manifest_of(&self, name: impl AsRef<str>) -> Result<Option<PeerManifest>> {
+        let name = BusName::new(name.as_ref())?;
+        let value = self.call_bus("GetManifest", serde_json::json!([name])).await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Every peer that has announced, with the names it owns.
+    pub async fn peers(&self) -> Result<Vec<PeerRecord>> {
+        let value = self.call_bus("ListPeers", serde_json::json!([])).await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Check whether this peer can call `interface` on `destination`.
+    ///
+    /// `local` is this peer's own manifest. Returns the verdict rather than an
+    /// error so a caller can decide what an incompatibility means for it — a
+    /// missing optional integration is a degraded feature, not a startup
+    /// failure. Use [`Connection::require`] when it *is* a startup failure.
+    pub async fn compatibility(
+        &self,
+        destination: impl AsRef<str>,
+        interface: impl AsRef<str>,
+        local: &PeerManifest,
+    ) -> Result<Compatibility> {
+        let interface = InterfaceName::new(interface.as_ref())?;
+        let Some(remote) = self.manifest_of(destination.as_ref()).await? else {
+            // A peer that has not announced is treated as compatible, for the
+            // same reason the broker does not enforce: adoption is incremental.
+            return Ok(Compatibility::Compatible {
+                provider_speaks: crate::version::Version::new(0, 0, 0),
+                consumer_speaks: crate::version::Version::new(0, 0, 0),
+            });
+        };
+        Ok(crate::version::check(&remote, local, &interface))
+    }
+
+    /// Like [`Connection::compatibility`], but turn an incompatibility into an
+    /// error naming both versions.
+    ///
+    /// For a dependency the caller cannot run without. Failing here — at
+    /// startup, with both versions in the message — is the entire point of the
+    /// exercise: the alternative is the same failure hours later, as a
+    /// deserialize error in a log line that mentions neither peer.
+    pub async fn require(
+        &self,
+        destination: impl AsRef<str>,
+        interface: impl AsRef<str>,
+        local: &PeerManifest,
+    ) -> Result<()> {
+        let verdict = self
+            .compatibility(destination.as_ref(), interface.as_ref(), local)
+            .await?;
+        if verdict.is_compatible() {
+            return Ok(());
+        }
+        Err(Error::IncompatibleVersion {
+            peer: destination.as_ref().to_string(),
+            interface: interface.as_ref().to_string(),
+            detail: verdict.to_string(),
+        })
     }
 
     /// Subscribe to signals matching `rule`.

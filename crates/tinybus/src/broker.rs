@@ -31,6 +31,7 @@ use crate::message::{Message, MessageKind};
 use crate::name::{BusName, InterfaceName, MemberName, ObjectPath};
 use crate::ports::{Listener, Transport};
 use crate::router::{MatchRule, NameChange, Router};
+use crate::version::PeerManifest;
 
 /// How many messages may queue for one peer before senders wait.
 pub const PEER_QUEUE_CAPACITY: usize = 256;
@@ -218,6 +219,22 @@ impl Broker {
                     Ok(Value::Bool(true))
                 }
                 "ListNames" => Ok(serde_json::to_value(router.list_names())?),
+                // Version negotiation. The broker stores and serves manifests
+                // but never *enforces* them: refusing to route between two
+                // peers the broker thinks are incompatible would make the bus
+                // the arbiter of every contract on it, and would break the
+                // moment a peer's declaration was merely stale. The peers
+                // decide; the broker only makes the facts available.
+                "Announce" => {
+                    let (manifest,): (PeerManifest,) = parse_args(member, body)?;
+                    router.set_manifest(from, manifest);
+                    Ok(Value::Bool(true))
+                }
+                "GetManifest" => {
+                    let (name,): (BusName,) = parse_args(member, body)?;
+                    Ok(serde_json::to_value(router.manifest_of(&name))?)
+                }
+                "ListPeers" => Ok(serde_json::to_value(router.peer_records())?),
                 "GetNameOwner" => {
                     let (name,): (BusName,) = parse_args(member, body)?;
                     Ok(serde_json::to_value(router.owner_of(&name))?)
