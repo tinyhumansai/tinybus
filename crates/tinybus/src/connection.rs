@@ -133,8 +133,10 @@ impl Connection {
     /// [`Connection::connect`].
     pub fn attach(transport: Arc<dyn Transport>) -> Self {
         let (signals, _) = broadcast::channel(SIGNAL_BUFFER);
+        let (outbox, outbound) = mpsc::channel(OUTBOX_CAPACITY);
         let inner = Arc::new(Inner {
             transport,
+            outbox,
             // Serials start at 1: zero is the "unassigned" value a freshly
             // built `Message` carries, so it must never be a live serial.
             serial: AtomicU64::new(1),
@@ -143,6 +145,7 @@ impl Connection {
             unique_name: RwLock::new(None),
             signals,
         });
+        tokio::spawn(writer_loop(inner.transport.clone(), outbound));
         tokio::spawn(dispatch_loop(inner.clone()));
         Self {
             _close: Arc::new(CloseOnDrop(inner.clone())),
