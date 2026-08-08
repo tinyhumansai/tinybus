@@ -114,20 +114,48 @@ impl Version {
         })
     }
 
-    /// The range this version is compatible with under semver's caret rule:
-    /// anything from `self` up to the next major.
+    /// The first version that breaks compatibility with this one.
     ///
-    /// `0.x` is treated as every minor being breaking, which is the convention
-    /// pre-1.0 crates actually follow.
-    pub fn caret(&self) -> VersionRange {
-        let upper = if self.major == 0 {
+    /// `0.x` treats every minor as breaking, which is the convention pre-1.0
+    /// crates actually follow.
+    pub fn next_breaking(&self) -> Version {
+        if self.major == 0 {
             Version::new(0, self.minor + 1, 0)
         } else {
             Version::new(self.major + 1, 0, 0)
-        };
+        }
+    }
+
+    /// The range a **consumer** of this version accepts: anything from `self`
+    /// up to the next breaking version.
+    ///
+    /// Lower-bounded at `self` because a caller written against 2.3 may use
+    /// something 2.1 does not implement. This is semver's caret rule.
+    pub fn caret(&self) -> VersionRange {
         VersionRange {
             min: Version::new(self.major, self.minor, self.patch),
-            max_exclusive: Some(upper),
+            max_exclusive: Some(self.next_breaking()),
+        }
+    }
+
+    /// The range a **provider** at this version accepts: the whole compatible
+    /// series, not just versions at or above its own.
+    ///
+    /// The asymmetry with [`Version::caret`] is the whole point, and getting it
+    /// wrong is the obvious mistake: minor versions are *additions*, so a
+    /// provider at 2.3 serves a caller written against 2.0 perfectly well — the
+    /// caller simply uses less of it. Defaulting a provider to caret would
+    /// reject every client older than itself, which is every client, one
+    /// release later.
+    pub fn compatible_series(&self) -> VersionRange {
+        let min = if self.major == 0 {
+            Version::new(0, self.minor, 0)
+        } else {
+            Version::new(self.major, 0, 0)
+        };
+        VersionRange {
+            min,
+            max_exclusive: Some(self.next_breaking()),
         }
     }
 }
@@ -284,10 +312,24 @@ pub struct InterfaceVersion {
 }
 
 impl InterfaceVersion {
-    /// Declare an interface at `version`, accepting anything caret-compatible
-    /// with it. The common case, and the one that matches how a Rust crate
-    /// depends on another.
-    pub fn new(interface: InterfaceName, version: Version) -> Self {
+    /// Declare an interface this peer **implements**.
+    ///
+    /// Defaults to accepting the whole compatible series — see
+    /// [`Version::compatible_series`] for why that differs from the consumer
+    /// default.
+    pub fn provided(interface: InterfaceName, version: Version) -> Self {
+        Self {
+            accepts: version.compatible_series(),
+            speaks: version,
+            interface,
+        }
+    }
+
+    /// Declare an interface this peer **calls**.
+    ///
+    /// Defaults to the caret rule: at least the version it was written
+    /// against, below the next breaking one.
+    pub fn consumed(interface: InterfaceName, version: Version) -> Self {
         Self {
             accepts: version.caret(),
             speaks: version,
@@ -295,8 +337,8 @@ impl InterfaceVersion {
         }
     }
 
-    /// Declare an explicit accepted range — for a peer that supports more (or
-    /// less) than the caret rule implies.
+    /// Override the accepted range, for a peer that supports more (or less)
+    /// than the default implies.
     pub fn with_accepts(mut self, accepts: VersionRange) -> Self {
         self.accepts = accepts;
         self
@@ -513,6 +555,20 @@ mod tests {
     }
 
     #[test]
+    fn a_provider_accepts_its_whole_series_but_a_consumer_only_looks_forward() {
+        // The asymmetry, asserted directly: it is the single easiest thing to
+        // get wrong here, and getting it wrong rejects every older client.
+        let provider = Version::new(2, 3, 0).compatible_series();
+        assert!(provider.accepts(&Version::new(2, 0, 0)), "an older caller still fits");
+        assert!(provider.accepts(&Version::new(2, 3, 0)));
+        assert!(!provider.accepts(&Version::new(3, 0, 0)));
+
+        let consumer = Version::new(2, 3, 0).caret();
+        assert!(!consumer.accepts(&Version::new(2, 0, 0)), "an older provider does not");
+        assert!(consumer.accepts(&Version::new(2, 9, 0)));
+    }
+
+    #[test]
     fn the_caret_rule_stops_at_the_next_major() {
         let range = Version::new(1, 2, 3).caret();
         assert!(range.accepts(&Version::new(1, 2, 3)));
@@ -544,14 +600,14 @@ mod tests {
     }
 
     fn provider(version: &str) -> PeerManifest {
-        PeerManifest::new("voice-service").provides(InterfaceVersion::new(
+        PeerManifest::new("voice-service").provides(InterfaceVersion::provided(
             iface("ai.tinyhumans.openhuman.Voice"),
             Version::parse(version).unwrap(),
         ))
     }
 
     fn consumer(version: &str) -> PeerManifest {
-        PeerManifest::new("openhuman").consumes(InterfaceVersion::new(
+        PeerManifest::new("openhuman").consumes(InterfaceVersion::consumed(
             iface("ai.tinyhumans.openhuman.Voice"),
             Version::parse(version).unwrap(),
         ))
@@ -621,14 +677,14 @@ mod tests {
         // A provider that genuinely kept 1.x compatibility across a major bump
         // can say so, rather than being forced into a rename.
         let provider = PeerManifest::new("voice").provides(
-            InterfaceVersion::new(
+            InterfaceVersion::provided(
                 iface("ai.tinyhumans.openhuman.Voice"),
                 Version::new(2, 0, 0),
             )
             .with_accepts(VersionRange::parse(">=1.0.0, <3.0.0").unwrap()),
         );
         let consumer = PeerManifest::new("openhuman").consumes(
-            InterfaceVersion::new(
+            InterfaceVersion::consumed(
                 iface("ai.tinyhumans.openhuman.Voice"),
                 Version::new(1, 5, 0),
             )
@@ -642,7 +698,7 @@ mod tests {
     fn a_manifest_round_trips_through_json() {
         let manifest = PeerManifest::new("voice-service")
             .version(Version::new(0, 4, 2))
-            .provides(InterfaceVersion::new(
+            .provides(InterfaceVersion::provided(
                 iface("ai.tinyhumans.openhuman.Voice"),
                 Version::new(2, 3, 0),
             ));
