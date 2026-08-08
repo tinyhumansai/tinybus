@@ -77,6 +77,7 @@ pub mod proxy;
 pub mod router;
 pub mod service;
 pub mod transport;
+pub mod version;
 
 #[doc(hidden)]
 #[path = "private.rs"]
@@ -92,6 +93,9 @@ pub use crate::ports::{Listener, Transport};
 pub use crate::proxy::Proxy;
 pub use crate::router::MatchRule;
 pub use crate::service::Interface;
+pub use crate::version::{
+    Compatibility, InterfaceVersion, PeerManifest, PeerRecord, Version, VersionRange,
+};
 
 #[cfg(feature = "macros")]
 pub use tinybus_macros::interface;
