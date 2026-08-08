@@ -110,7 +110,6 @@ async fn main() -> Result<()> {
         "voice service is up as {NAME} ({})",
         connection
             .unique_name()
-            .await
             .map(|n| n.to_string())
             .unwrap_or_default()
     );

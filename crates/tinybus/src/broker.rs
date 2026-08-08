@@ -401,8 +401,8 @@ mod tests {
     #[tokio::test]
     async fn hello_assigns_distinct_unique_names() {
         let (_bus, service, client) = bus().await;
-        let a = service.unique_name().await.unwrap();
-        let b = client.unique_name().await.unwrap();
+        let a = service.unique_name().unwrap();
+        let b = client.unique_name().unwrap();
         assert!(a.is_unique() && b.is_unique());
         assert_ne!(a, b);
     }
@@ -511,7 +511,7 @@ mod tests {
             .await
             .expect("delivered")
             .unwrap();
-        assert_eq!(received.header.sender, service.unique_name().await);
+        assert_eq!(received.header.sender, service.unique_name());
     }
 
     #[tokio::test]

@@ -72,7 +72,9 @@ struct Inner {
     serial: AtomicU64,
     pending: Mutex<HashMap<u64, oneshot::Sender<Message>>>,
     objects: RwLock<ObjectTree>,
-    unique_name: RwLock<Option<BusName>>,
+    /// A *std* lock, not a tokio one, so a synchronous publisher can stamp
+    /// the sender on a locally looped-back signal without an await.
+    unique_name: std::sync::RwLock<Option<BusName>>,
     signals: broadcast::Sender<Message>,
 }
 
@@ -122,7 +124,12 @@ impl Connection {
             .call_bus("Hello", serde_json::json!([]))
             .await
             .and_then(|v| Ok(serde_json::from_value(v)?))?;
-        *conn.inner.unique_name.write().await = Some(BusName::new(name)?);
+        *conn
+            .inner
+            .unique_name
+            .write()
+            .expect("the unique-name lock is never held across a panic point") =
+            Some(BusName::new(name)?);
         Ok(conn)
     }
 
@@ -142,7 +149,7 @@ impl Connection {
             serial: AtomicU64::new(1),
             pending: Mutex::new(HashMap::new()),
             objects: RwLock::new(ObjectTree::new()),
-            unique_name: RwLock::new(None),
+            unique_name: std::sync::RwLock::new(None),
             signals,
         });
         tokio::spawn(writer_loop(inner.transport.clone(), outbound));
@@ -154,8 +161,35 @@ impl Connection {
     }
 
     /// This peer's broker-assigned unique name, once handshaken.
-    pub async fn unique_name(&self) -> Option<BusName> {
-        self.inner.unique_name.read().await.clone()
+    pub fn unique_name(&self) -> Option<BusName> {
+        self.inner
+            .unique_name
+            .read()
+            .expect("the unique-name lock is never held across a panic point")
+            .clone()
+    }
+
+    /// Deliver a signal to *this* connection's own subscribers, without the
+    /// broker.
+    ///
+    /// The broker never echoes a signal back to the peer that sent it — that is
+    /// what stops a service which both emits and subscribes on one interface
+    /// from looping. But a host whose publishers and subscribers live in the
+    /// same process still expects its own subscribers to see what it published,
+    /// which was free when the bus was a `tokio::sync::broadcast` inside that
+    /// process.
+    ///
+    /// This closes that gap explicitly: the publisher loops the signal back
+    /// locally and the broker fans it out to everyone else, so every subscriber
+    /// anywhere sees it exactly once. It is a separate method rather than
+    /// behaviour folded into [`Connection::emit`] precisely because the
+    /// loop-prevention it steps around is load-bearing for services; the caller
+    /// has to mean it.
+    pub fn deliver_local(&self, mut message: Message) {
+        message.header.sender = self.unique_name();
+        // Fails only when nothing on this connection is subscribed, which is
+        // the normal case for a write-only publisher.
+        let _ = self.inner.signals.send(message);
     }
 
     /// Export `interface` at `path`.
