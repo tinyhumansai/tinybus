@@ -218,6 +218,23 @@ impl<E: Event> EventBus<E> {
         subscriber::spawn(self.connection.signals(), self.config.clone(), handler)
     }
 
+    /// Subscribe with a closure instead of an [`EventHandler`] implementation.
+    ///
+    /// Receives every event in the catalog — there is no domain filter, because
+    /// a closure small enough to be worth this shortcut is small enough to
+    /// `match` on what it cares about.
+    pub fn on<F, Fut>(&self, name: &str, handler: F) -> SubscriptionHandle
+    where
+        F: Fn(E) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.subscribe(Arc::new(subscriber::FnSubscriber {
+            name: name.to_string(),
+            handler,
+            _event: PhantomData,
+        }))
+    }
+
     /// A raw receiver of decoded events, for a consumer that wants to drive its
     /// own loop rather than implement [`EventHandler`].
     pub fn receiver(&self) -> EventReceiver<E> {
