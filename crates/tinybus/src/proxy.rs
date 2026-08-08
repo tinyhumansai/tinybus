@@ -189,8 +189,12 @@ mod tests {
     async fn peers() -> (Connection, Connection) {
         let bus = MemoryBus::new();
         Broker::new().spawn(bus.clone());
-        let service = Connection::connect(bus.connect().await.unwrap()).await.unwrap();
-        let client = Connection::connect(bus.connect().await.unwrap()).await.unwrap();
+        let service = Connection::connect(bus.connect().await.unwrap())
+            .await
+            .unwrap();
+        let client = Connection::connect(bus.connect().await.unwrap())
+            .await
+            .unwrap();
         (service, client)
     }
 
@@ -218,7 +222,10 @@ mod tests {
         assert_eq!(proxy.path().as_str(), PATH);
         assert_eq!(proxy.interface().as_str(), INTERFACE);
         assert!(proxy.is_available().await.unwrap());
-        assert_eq!(proxy.call::<Value>("Echo", ("hello",)).await.unwrap(), serde_json::json!(["hello"]));
+        assert_eq!(
+            proxy.call::<Value>("Echo", ("hello",)).await.unwrap(),
+            serde_json::json!(["hello"])
+        );
         assert!(format!("{proxy:?}").contains(DESTINATION));
         assert!(proxy.connection().unique_name().is_some());
     }
