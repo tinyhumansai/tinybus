@@ -272,3 +272,137 @@ fn render(message: &tinybus::Message) -> String {
         message.body
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use async_trait::async_trait;
+    use clap::Parser;
+    use serde_json::Value;
+
+    use super::*;
+    use tinybus::name::{BusName, InterfaceName, MemberName, ObjectPath};
+    use tinybus::service::Interface;
+
+    const DESTINATION: &str = "ai.tinyhumans.openhuman.Echo";
+    const PATH: &str = "/ai/tinyhumans/openhuman/Echo";
+    const INTERFACE: &str = "ai.tinyhumans.openhuman.Echo";
+
+    struct Echo;
+
+    #[async_trait]
+    impl Interface for Echo {
+        fn name(&self) -> InterfaceName {
+            InterfaceName::new(INTERFACE).unwrap()
+        }
+
+        fn members(&self) -> Vec<MemberName> {
+            vec![MemberName::new("Echo").unwrap()]
+        }
+
+        async fn call(&self, _member: &MemberName, args: Value) -> tinybus::Result<Value> {
+            Ok(args)
+        }
+    }
+
+    async fn broker_and_service() -> (tempfile::TempDir, PathBuf, Connection) {
+        let dir = tempfile::tempdir().unwrap();
+        let address = dir.path().join("bus");
+        let listener = UnixListenerAdapter::bind(&address).await.unwrap();
+        Broker::new().spawn(listener);
+        let service = Connection::connect(Box::new(UnixTransport::connect(&address).await.unwrap()))
+            .await
+            .unwrap();
+        service.request_name(DESTINATION).await.unwrap();
+        service
+            .serve_at(ObjectPath::new(PATH).unwrap(), Echo)
+            .await
+            .unwrap();
+        (dir, address, service)
+    }
+
+    #[test]
+    fn the_cli_parses_its_declared_commands_and_uses_explicit_addresses() {
+        let cli = Cli::try_parse_from([
+            "tinybus",
+            "--address",
+            "/run/user/1000/tinybus/bus",
+            "--timeout",
+            "7",
+            "call",
+            DESTINATION,
+            PATH,
+            INTERFACE,
+            "Echo",
+            "[1]",
+        ])
+        .unwrap();
+        assert_eq!(cli.timeout, 7);
+        assert_eq!(resolve_address(cli.address).unwrap(), PathBuf::from("/run/user/1000/tinybus/bus"));
+        assert!(matches!(cli.command, Command::Call { args, .. } if args == "[1]"));
+        assert!(matches!(Cli::try_parse_from(["tinybus", "serve"]).unwrap().command, Command::Serve));
+        assert!(matches!(Cli::try_parse_from(["tinybus", "list"]).unwrap().command, Command::List));
+        assert!(matches!(Cli::try_parse_from(["tinybus", "doctor"]).unwrap().command, Command::Doctor));
+        assert!(matches!(Cli::try_parse_from(["tinybus", "emit", PATH, INTERFACE, "Changed"]).unwrap().command, Command::Emit { .. }));
+        assert!(matches!(Cli::try_parse_from(["tinybus", "monitor"]).unwrap().command, Command::Monitor { .. }));
+    }
+
+    #[test]
+    fn runtime_and_monitor_rendering_are_usable() {
+        assert!(runtime().is_ok());
+        let call = tinybus::Message::method_call(
+            BusName::new(DESTINATION).unwrap(),
+            ObjectPath::new(PATH).unwrap(),
+            InterfaceName::new(INTERFACE).unwrap(),
+            MemberName::new("Echo").unwrap(),
+            serde_json::json!(["hello"]),
+        );
+        assert!(render(&call).starts_with("call"));
+        let signal = tinybus::Message::signal(
+            ObjectPath::new(PATH).unwrap(),
+            InterfaceName::new(INTERFACE).unwrap(),
+            MemberName::new("Changed").unwrap(),
+            serde_json::json!([]),
+        );
+        assert!(render(&signal).starts_with("signal"));
+        assert!(render(&tinybus::Message::method_return(&call.header, Value::Null)).starts_with("return"));
+        assert!(render(&tinybus::Message::error_reply(&call.header, &Error::ConnectionClosed)).starts_with("error"));
+    }
+
+    #[tokio::test]
+    async fn call_emit_list_and_doctor_use_a_running_broker() {
+        let (_dir, address, service) = broker_and_service().await;
+
+        run(Cli {
+            address: Some(address.clone()),
+            timeout: 1,
+            command: Command::Call {
+                destination: DESTINATION.into(),
+                path: PATH.into(),
+                interface: INTERFACE.into(),
+                member: "Echo".into(),
+                args: "[\"hello\"]".into(),
+            },
+        })
+        .await
+        .unwrap();
+        run(Cli {
+            address: Some(address.clone()),
+            timeout: 1,
+            command: Command::Emit {
+                path: PATH.into(),
+                interface: INTERFACE.into(),
+                member: "Changed".into(),
+                args: "[]".into(),
+            },
+        })
+        .await
+        .unwrap();
+        run(Cli { address: Some(address.clone()), timeout: 1, command: Command::List })
+            .await
+            .unwrap();
+        run(Cli { address: Some(address), timeout: 1, command: Command::Doctor })
+            .await
+            .unwrap();
+        assert!(service.unique_name().is_some());
+    }
+}
