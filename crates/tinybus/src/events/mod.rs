@@ -147,7 +147,7 @@ impl<E: Event> EventBus<E> {
             // A domain that is not a legal path element is a programming error
             // in the host's catalog, and it must not be reported as "the event
             // vanished". Name it.
-            Error::config_domain(domain, e)
+            Error::invalid_domain(domain, e)
         })
     }
 

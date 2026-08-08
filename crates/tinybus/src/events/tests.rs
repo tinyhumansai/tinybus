@@ -298,13 +298,13 @@ async fn publishing_with_no_subscribers_is_not_an_error() {
     bus.try_publish(TestEvent::SystemStartup).unwrap();
 }
 
-#[test]
-fn a_domain_becomes_a_path_element() {
+#[tokio::test]
+async fn a_domain_becomes_a_path_element() {
     let config = config();
     let root = config.root.clone();
     let bus = EventBus::<TestEvent>::without_match(
         // A connection is not needed to compute a path, but the type is, so
-        // this borrows one from a transport that is never driven.
+        // this uses one over a transport that is never driven.
         Connection::attach(Arc::new(crate::transport::memory::MemoryTransport::pair().0)),
         config,
     );

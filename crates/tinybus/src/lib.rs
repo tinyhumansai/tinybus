@@ -68,6 +68,7 @@ extern crate self as tinybus;
 pub mod broker;
 pub mod connection;
 pub mod error;
+pub mod events;
 pub mod message;
 pub mod name;
 pub mod ports;
@@ -82,6 +83,7 @@ pub mod __private;
 
 pub use crate::connection::Connection;
 pub use crate::error::{Error, Result};
+pub use crate::events::{Event, EventBus, EventBusConfig, EventHandler, SubscriptionHandle};
 pub use crate::message::{Header, Message, MessageKind};
 pub use crate::name::{BusName, InterfaceName, MemberName, ObjectPath};
 pub use crate::ports::{Listener, Transport};
