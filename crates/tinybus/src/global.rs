@@ -18,6 +18,24 @@
 //! …and gets the whole surface off it. `OnceBus::new` is `const`, so this costs
 //! nothing until something initialises it.
 //!
+//! # Runtime ownership
+//!
+//! [`OnceBus::init_in_process`] and [`OnceBus::init_over`] put the bus's tasks
+//! — the broker, and this peer's reader/writer loops — on a **dedicated
+//! runtime that the singleton owns**, rather than on whichever runtime happened
+//! to call `init` first.
+//!
+//! That is not a detail. A process-wide bus outlives any one runtime: under
+//! `cargo test` every `#[tokio::test]` builds and tears down its own, so the
+//! first test to win the `OnceLock` would otherwise leave every later test
+//! holding a bus attached to a dead reactor — publishes going nowhere,
+//! subscribers never waking, and no error anywhere to say why. Owning the
+//! runtime makes the bus's lifetime match the `static`'s, which is what
+//! everything reaching for a global bus already assumes.
+//!
+//! [`OnceBus::init_with`] is the exception: the caller supplied that connection
+//! and owns its tasks, so it is left where it was built.
+//!
 //! # Before initialisation
 //!
 //! Every accessor is safe to call before `init`. Publishing goes nowhere and
@@ -32,7 +50,7 @@ use std::sync::OnceLock;
 
 use crate::broker::Broker;
 use crate::connection::Connection;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::events::{Event, EventBus, EventBusConfig, EventHandler, SubscriptionHandle};
 use crate::native::NativeRegistry;
 use crate::ports::Transport;
@@ -43,6 +61,10 @@ use crate::version::PeerManifest;
 pub struct OnceBus<E: Event> {
     bus: OnceLock<EventBus<E>>,
     native: OnceLock<NativeRegistry>,
+    /// Owns the bus's tasks so they outlive the caller's runtime. Never
+    /// dropped — this lives in a `static`, and dropping a runtime from inside
+    /// an async context panics.
+    runtime: OnceLock<tokio::runtime::Runtime>,
 }
 
 impl<E: Event> Default for OnceBus<E> {
@@ -57,7 +79,26 @@ impl<E: Event> OnceBus<E> {
         Self {
             bus: OnceLock::new(),
             native: OnceLock::new(),
+            runtime: OnceLock::new(),
         }
+    }
+
+    /// The runtime this bus's tasks live on, built on first use.
+    ///
+    /// One worker thread: the broker routes messages and the connection loops
+    /// shuffle frames, none of which is CPU-bound. A second thread would buy
+    /// nothing and cost a context switch per hop.
+    fn runtime(&self) -> Result<&tokio::runtime::Runtime> {
+        if let Some(existing) = self.runtime.get() {
+            return Ok(existing);
+        }
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("tinybus")
+            .enable_all()
+            .build()
+            .map_err(|e| Error::transport(format!("could not build the bus runtime: {e}")))?;
+        Ok(self.runtime.get_or_init(|| runtime))
     }
 
     /// Initialise with an in-process broker: no sockets, no external services.
@@ -68,9 +109,22 @@ impl<E: Event> OnceBus<E> {
     /// production — moving an integration out of the process later is then a
     /// deployment change rather than a different code path that has never run.
     pub async fn init_in_process(&self, config: EventBusConfig) -> Result<&EventBus<E>> {
+        if let Some(existing) = self.bus.get() {
+            return Ok(existing);
+        }
         let transport = MemoryBus::new();
-        Broker::new().spawn(transport.clone());
-        let connection = Connection::connect(transport.connect().await?).await?;
+        let peer = transport.connect().await?;
+
+        // Everything that spawns happens under the guard; nothing is awaited
+        // under it, because an `EnterGuard` is `!Send` and holding one across
+        // an await would make this future `!Send` for every caller.
+        let connection = {
+            let _guard = self.runtime()?.enter();
+            Broker::new().spawn(transport);
+            Connection::attach(peer.into())
+        };
+        connection.handshake().await?;
+
         self.init_with(connection, config).await
     }
 
@@ -80,7 +134,16 @@ impl<E: Event> OnceBus<E> {
         transport: Box<dyn Transport>,
         config: EventBusConfig,
     ) -> Result<&EventBus<E>> {
-        let connection = Connection::connect(transport).await?;
+        if let Some(existing) = self.bus.get() {
+            return Ok(existing);
+        }
+        // Same runtime ownership as `init_in_process`: only the broker differs,
+        // and it is somebody else's process here.
+        let connection = {
+            let _guard = self.runtime()?.enter();
+            Connection::attach(transport.into())
+        };
+        connection.handshake().await?;
         self.init_with(connection, config).await
     }
 
