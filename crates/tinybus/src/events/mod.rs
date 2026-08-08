@@ -193,7 +193,10 @@ impl<E: Event> EventBus<E> {
     /// silent.
     pub fn publish(&self, event: E) {
         if let Err(e) = self.try_publish(event) {
-            tracing::warn!(error = %e, "[tinybus] dropped an event");
+            // Local subscribers have already been fed by this point — the
+            // failure is the wire leg — so the wording says what was actually
+            // lost rather than implying the event went nowhere.
+            tracing::warn!(error = %e, "[tinybus] event not delivered beyond this process");
         }
     }
 
