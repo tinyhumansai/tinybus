@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --locked --all-features
+
+      # The configuration a slim OpenHuman build embeds: no socket, no
+      # proc-macro, no CLI. It has to keep compiling, because it is the proof
+      # that `ports` is a real seam rather than decoration.
+      - name: Slim build
+        run: cargo check --locked --no-default-features
+
+      - name: Docs
+        run: cargo doc --locked --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  # The bus is meant to be embeddable on every platform OpenHuman ships on. The
+  # Unix transport is Unix-only by construction, so Windows builds the slim
+  # configuration until the named-pipe backend lands (ROADMAP.md, M6).
+  portability:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo check --locked --no-default-features --features macros
+      - name: Test
+        run: cargo test --locked --no-default-features --features macros
