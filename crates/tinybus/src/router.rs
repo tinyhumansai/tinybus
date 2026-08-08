@@ -30,6 +30,7 @@ use tokio::sync::mpsc;
 use crate::error::{Error, Result};
 use crate::message::{Message, MessageKind};
 use crate::name::{BusName, InterfaceName, MemberName, ObjectPath};
+use crate::version::{PeerManifest, PeerRecord};
 
 /// A subscription filter. Every set field must match; unset fields match all.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -170,6 +171,10 @@ struct Peer {
     /// the routing lock is released.
     outbox: mpsc::Sender<Message>,
     matches: Vec<MatchRule>,
+    /// What this peer says it speaks and accepts. `None` until it announces —
+    /// and a peer that never announces stays routable, so manifests can be
+    /// adopted one service at a time rather than as a flag day.
+    manifest: Option<PeerManifest>,
 }
 
 /// Who is attached, what they are called, and what they want to hear.
@@ -205,6 +210,7 @@ impl Router {
                 unique: unique.clone(),
                 outbox,
                 matches: Vec::new(),
+                manifest: None,
             },
         );
         self.names.insert(unique.clone(), id);
@@ -292,6 +298,44 @@ impl Router {
             }),
             None => Err(Error::NameHasNoOwner(name.clone())),
         }
+    }
+
+    /// Record what a peer says about itself.
+    pub fn set_manifest(&mut self, id: u64, manifest: PeerManifest) {
+        if let Some(peer) = self.peers.get_mut(&id) {
+            peer.manifest = Some(manifest);
+        }
+    }
+
+    /// Every peer that has announced a manifest, with the names it owns.
+    pub fn peer_records(&self) -> Vec<PeerRecord> {
+        let mut records: Vec<PeerRecord> = self
+            .peers
+            .iter()
+            .filter_map(|(id, peer)| {
+                let manifest = peer.manifest.clone()?;
+                let mut names: Vec<BusName> = self
+                    .names
+                    .iter()
+                    .filter(|(name, owner)| *owner == id && !name.is_unique())
+                    .map(|(name, _)| name.clone())
+                    .collect();
+                names.sort();
+                Some(PeerRecord {
+                    peer: peer.unique.clone(),
+                    names,
+                    manifest,
+                })
+            })
+            .collect();
+        records.sort_by(|a, b| a.peer.cmp(&b.peer));
+        records
+    }
+
+    /// The manifest of whoever owns `name`, by unique or well-known name.
+    pub fn manifest_of(&self, name: &BusName) -> Option<PeerManifest> {
+        let id = self.names.get(name)?;
+        self.peers.get(id)?.manifest.clone()
     }
 
     /// Register a subscription for `id`.
