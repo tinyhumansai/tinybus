@@ -70,7 +70,6 @@ pub mod connection;
 pub mod error;
 pub mod message;
 pub mod name;
-pub mod native;
 pub mod ports;
 pub mod proxy;
 pub mod router;
