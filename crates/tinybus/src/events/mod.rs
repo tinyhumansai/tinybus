@@ -251,6 +251,45 @@ pub struct EventReceiver<E> {
     _event: PhantomData<fn() -> E>,
 }
 
+/// Why a non-blocking [`EventReceiver::try_recv`] produced nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TryRecvError {
+    /// Nothing is waiting right now.
+    Empty,
+    /// The receiver fell behind and `n` messages were dropped.
+    ///
+    /// Surfaced rather than hidden: a consumer draining for "did anything
+    /// change" must treat a lag as "yes, probably" and re-scan, because the
+    /// event it needed may have been one of the dropped ones.
+    Lagged(u64),
+    /// The connection is gone; nothing further will arrive.
+    Closed,
+}
+
+impl<E: Event> EventReceiver<E> {
+    /// Take the next event without waiting.
+    ///
+    /// For a consumer that drains on its own schedule — an agent turn checking
+    /// "did the installed tools change since last time" — rather than parking
+    /// a task on the stream. Skips messages belonging to other catalogs, so
+    /// `Empty` means "nothing *for you*", not "nothing at all".
+    pub fn try_recv(&mut self) -> std::result::Result<E, TryRecvError> {
+        use tokio::sync::broadcast::error::TryRecvError as Raw;
+        loop {
+            match self.signals.try_recv() {
+                Ok(message) => {
+                    if let Some(event) = decode(&self.config, &message) {
+                        return Ok(event);
+                    }
+                }
+                Err(Raw::Empty) => return Err(TryRecvError::Empty),
+                Err(Raw::Lagged(n)) => return Err(TryRecvError::Lagged(n)),
+                Err(Raw::Closed) => return Err(TryRecvError::Closed),
+            }
+        }
+    }
+}
+
 impl<E: Event> EventReceiver<E> {
     /// Wait for the next event in this catalog.
     ///

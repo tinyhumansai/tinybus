@@ -363,6 +363,50 @@ async fn a_local_subscriber_still_receives_once_the_outbox_has_overflowed() {
 }
 
 #[tokio::test]
+async fn try_recv_drains_without_waiting_and_reports_why_it_is_empty() {
+    use crate::events::TryRecvError;
+
+    let (_t, bus) = bus().await;
+    let mut receiver = bus.receiver();
+
+    // Nothing published yet: empty, not blocked.
+    assert_eq!(receiver.try_recv().unwrap_err(), TryRecvError::Empty);
+
+    bus.publish(TestEvent::CronJobTriggered { job: "a".into() });
+    bus.publish(TestEvent::CronJobTriggered { job: "b".into() });
+
+    assert_eq!(
+        receiver.try_recv().unwrap(),
+        TestEvent::CronJobTriggered { job: "a".into() }
+    );
+    assert_eq!(
+        receiver.try_recv().unwrap(),
+        TestEvent::CronJobTriggered { job: "b".into() }
+    );
+    assert_eq!(receiver.try_recv().unwrap_err(), TryRecvError::Empty);
+}
+
+#[tokio::test]
+async fn try_recv_skips_another_catalogs_signals_rather_than_reporting_them() {
+    use crate::events::TryRecvError;
+    use crate::name::{InterfaceName, MemberName, ObjectPath};
+
+    let (_t, bus) = bus().await;
+    let mut receiver = bus.receiver();
+
+    // A signal on the same connection but a different interface: not ours.
+    bus.connection().deliver_local(crate::message::Message::signal(
+        ObjectPath::new("/somewhere/else").unwrap(),
+        InterfaceName::new("ai.tinyhumans.other.Events").unwrap(),
+        MemberName::new("Published").unwrap(),
+        serde_json::json!([{ "nope": true }]),
+    ));
+
+    // `Empty` means nothing for *this* catalog, having skipped the rest.
+    assert_eq!(receiver.try_recv().unwrap_err(), TryRecvError::Empty);
+}
+
+#[tokio::test]
 async fn publishing_with_no_subscribers_is_not_an_error() {
     // The old bus dropped events with no receivers silently, and 254 call sites
     // depend on that being a non-event.
