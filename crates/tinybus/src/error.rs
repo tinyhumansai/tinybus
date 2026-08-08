@@ -49,6 +49,16 @@ pub enum Error {
     #[error("connection closed")]
     ConnectionClosed,
 
+    /// The outbound queue is full: this process is producing faster than the
+    /// broker is draining.
+    ///
+    /// Only ever returned by the non-blocking senders
+    /// ([`crate::Connection::try_send`] and friends). It is a *dropped
+    /// notification*, not a lost call — a caller that cannot tolerate the drop
+    /// should use the awaiting send and take the backpressure instead.
+    #[error("outbound queue is full; message dropped")]
+    Backpressure,
+
     /// No peer owns the destination name.
     ///
     /// The common cause is an integration that has not been started yet, which
@@ -220,6 +230,7 @@ impl Error {
             Self::Protocol(_) => "ai.tinyhumans.tinybus.Error.Protocol",
             Self::Transport(_) | Self::Io(_) => "ai.tinyhumans.tinybus.Error.Transport",
             Self::ConnectionClosed => "ai.tinyhumans.tinybus.Error.ConnectionClosed",
+            Self::Backpressure => "ai.tinyhumans.tinybus.Error.Backpressure",
             Self::NameHasNoOwner(_) => "ai.tinyhumans.tinybus.Error.NameHasNoOwner",
             Self::NameTaken { .. } => "ai.tinyhumans.tinybus.Error.NameTaken",
             Self::UnknownObject { .. } => "ai.tinyhumans.tinybus.Error.UnknownObject",
