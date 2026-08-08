@@ -12,11 +12,9 @@
 //! - **Lag is survivable**, so a subscriber that falls behind during a burst
 //!   logs and continues rather than terminating for good.
 
-use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::FutureExt;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
@@ -139,22 +137,26 @@ pub(crate) fn spawn<E: Event>(
                 continue;
             }
 
-            // A panicking handler must not take the loop with it: the loop is
-            // shared by every subscriber's *sibling* tasks only in spirit, but
-            // losing this one silently is still the worst outcome — the
-            // subscriber stops reacting and nothing says so.
-            let outcome = AssertUnwindSafe(handler.handle(&event)).catch_unwind().await;
-            if let Err(panic) = outcome {
-                let message = panic
-                    .downcast_ref::<&str>()
-                    .copied()
-                    .or_else(|| panic.downcast_ref::<String>().map(|s| s.as_str()))
-                    .unwrap_or("unknown panic");
+            // A panicking handler must not take this loop with it: losing the
+            // loop silently unsubscribes the handler, so it stops reacting and
+            // nothing says so.
+            //
+            // The isolation is a spawned task rather than `catch_unwind`,
+            // because tokio already turns a panicking task into an `Err` on its
+            // `JoinHandle` — and doing it this way costs no dependency, in a
+            // crate whose entire purpose is dependency reduction. The event is
+            // cloned into the task, which is why [`Event`] requires `Clone`.
+            let dispatch = {
+                let handler = handler.clone();
+                let event = event.clone();
+                tokio::spawn(async move { handler.handle(&event).await })
+            };
+            if let Err(join) = dispatch.await {
                 tracing::error!(
                     handler = task_name,
                     domain = event.domain(),
-                    panic = message,
-                    "[tinybus] handler panicked, continuing"
+                    panicked = join.is_panic(),
+                    "[tinybus] handler failed, continuing"
                 );
             }
         }
