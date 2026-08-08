@@ -30,7 +30,7 @@ use std::time::Duration;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tokio::sync::{Mutex, RwLock, broadcast, oneshot};
+use tokio::sync::{Mutex, RwLock, broadcast, mpsc, oneshot};
 
 use crate::error::{Error, Result};
 use crate::message::{Header, Message, MessageKind};
@@ -298,7 +298,7 @@ impl Connection {
         let (tx, rx) = oneshot::channel();
         self.inner.pending.lock().await.insert(serial, tx);
 
-        if let Err(e) = self.inner.transport.send(message).await {
+        if let Err(e) = self.enqueue(message).await {
             self.inner.pending.lock().await.remove(&serial);
             return Err(e);
         }
@@ -326,7 +326,55 @@ impl Connection {
     pub async fn send(&self, mut message: Message) -> Result<()> {
         message.header.serial = self.inner.serial.fetch_add(1, Ordering::Relaxed);
         message.validate()?;
-        self.inner.transport.send(message).await
+        self.enqueue(message).await
+    }
+
+    /// Send a message without awaiting, failing rather than blocking when the
+    /// outbox is full.
+    ///
+    /// This is the seam a synchronous, fire-and-forget publisher needs. A
+    /// domain that wants to announce "a message arrived" from a plain `fn`
+    /// cannot await a socket write, and making it await would push `async` up
+    /// through hundreds of call sites that have no other reason to have it.
+    ///
+    /// A full outbox means the process is producing faster than the broker is
+    /// draining. Returning [`Error::Backpressure`] rather than blocking is the
+    /// deliberate choice: a notification is worth less than the latency of the
+    /// caller that would be stalled to deliver it, and a caller that *does*
+    /// care can use [`Connection::send`].
+    pub fn try_send(&self, mut message: Message) -> Result<()> {
+        message.header.serial = self.inner.serial.fetch_add(1, Ordering::Relaxed);
+        message.validate()?;
+        self.inner.outbox.try_send(message).map_err(|e| match e {
+            mpsc::error::TrySendError::Full(_) => Error::Backpressure,
+            mpsc::error::TrySendError::Closed(_) => Error::ConnectionClosed,
+        })
+    }
+
+    /// Broadcast a signal without awaiting. The sync twin of
+    /// [`Connection::emit`]; see [`Connection::try_send`] for when to reach for
+    /// it.
+    pub fn try_emit(
+        &self,
+        path: ObjectPath,
+        interface: InterfaceName,
+        member: MemberName,
+        body: impl Serialize,
+    ) -> Result<()> {
+        let message = Message::signal(path, interface, member, to_body(&body)?);
+        self.try_send(message)
+    }
+
+    /// Hand a message to the writer task, waiting if the outbox is full.
+    ///
+    /// Waiting here is backpressure a caller asked for by using an async send:
+    /// it bounds how far ahead of the broker this process can run.
+    async fn enqueue(&self, message: Message) -> Result<()> {
+        self.inner
+            .outbox
+            .send(message)
+            .await
+            .map_err(|_| Error::ConnectionClosed)
     }
 
     /// Close the link.
@@ -393,6 +441,20 @@ fn rule_to_wire(rule: &MatchRule) -> String {
     clauses.join(",")
 }
 
+/// The single writer task. Owns `send`; drains the outbox onto the transport.
+///
+/// One task rather than "everyone writes concurrently" for two reasons: a
+/// synchronous publisher needs somewhere to hand a message to, and two
+/// concurrent writers on one transport risk interleaving frames.
+async fn writer_loop(transport: Arc<dyn Transport>, mut outbound: mpsc::Receiver<Message>) {
+    while let Some(message) = outbound.recv().await {
+        if let Err(e) = transport.send(message).await {
+            tracing::debug!(error = %e, "connection write failed; closing");
+            break;
+        }
+    }
+}
+
 /// The single reader task. Owns `recv`; never awaits user code inline.
 async fn dispatch_loop(inner: Arc<Inner>) {
     loop {
@@ -445,7 +507,7 @@ async fn handle_call(inner: Arc<Inner>, message: Message) {
         Err(e) => Message::error_reply(&header, &e),
     };
     reply.header.serial = inner.serial.fetch_add(1, Ordering::Relaxed);
-    if let Err(e) = inner.transport.send(reply).await {
+    if let Err(e) = inner.outbox.send(reply).await {
         tracing::debug!(error = %e, "could not reply; the caller will time out");
     }
 }
