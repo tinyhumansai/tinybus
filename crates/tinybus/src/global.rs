@@ -67,6 +67,20 @@ pub struct OnceBus<E: Event> {
     runtime: OnceLock<tokio::runtime::Runtime>,
 }
 
+impl<E: Event> Drop for OnceBus<E> {
+    fn drop(&mut self) {
+        // Dropping a `Runtime` blocks until its tasks finish, and blocking is
+        // forbidden inside an async context — so a plain drop would panic for
+        // anyone holding an `OnceBus` in a local rather than a `static`.
+        // `shutdown_background` gives up waiting and returns immediately, which
+        // is safe from anywhere. A `static` is never dropped, so this is only
+        // ever the local case.
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
+        }
+    }
+}
+
 impl<E: Event> Default for OnceBus<E> {
     fn default() -> Self {
         Self::new()
