@@ -121,17 +121,33 @@ impl Connection {
     /// connection and callers never have to handle "not yet named".
     pub async fn connect(transport: Box<dyn Transport>) -> Result<Self> {
         let conn = Self::attach(transport.into());
-        let name: String = conn
+        conn.handshake().await?;
+        Ok(conn)
+    }
+
+    /// Complete the `Hello` handshake on an already-attached connection.
+    ///
+    /// Split out from [`Connection::connect`] for callers that must control
+    /// *which runtime* the connection's tasks are spawned on. [`Connection::attach`]
+    /// is where the spawning happens and is synchronous, so such a caller can
+    /// hold a runtime guard across `attach` — which is `!Send` and therefore
+    /// cannot be held across an await — and then handshake afterwards, off the
+    /// guard. See [`crate::global::OnceBus::init_in_process`].
+    ///
+    /// Idempotent in the only sense that matters: calling it twice would
+    /// request a second unique name, so don't.
+    pub async fn handshake(&self) -> Result<()> {
+        let name: String = self
             .call_bus("Hello", serde_json::json!([]))
             .await
             .and_then(|v| Ok(serde_json::from_value(v)?))?;
-        *conn
+        *self
             .inner
             .unique_name
             .write()
             .expect("the unique-name lock is never held across a panic point") =
             Some(BusName::new(name)?);
-        Ok(conn)
+        Ok(())
     }
 
     /// Wire up a connection without handshaking.

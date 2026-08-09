@@ -18,6 +18,24 @@
 //! …and gets the whole surface off it. `OnceBus::new` is `const`, so this costs
 //! nothing until something initialises it.
 //!
+//! # Runtime ownership
+//!
+//! [`OnceBus::init_in_process`] and [`OnceBus::init_over`] put the bus's tasks
+//! — the broker, and this peer's reader/writer loops — on a **dedicated
+//! runtime that the singleton owns**, rather than on whichever runtime happened
+//! to call `init` first.
+//!
+//! That is not a detail. A process-wide bus outlives any one runtime: under
+//! `cargo test` every `#[tokio::test]` builds and tears down its own, so the
+//! first test to win the `OnceLock` would otherwise leave every later test
+//! holding a bus attached to a dead reactor — publishes going nowhere,
+//! subscribers never waking, and no error anywhere to say why. Owning the
+//! runtime makes the bus's lifetime match the `static`'s, which is what
+//! everything reaching for a global bus already assumes.
+//!
+//! [`OnceBus::init_with`] is the exception: the caller supplied that connection
+//! and owns its tasks, so it is left where it was built.
+//!
 //! # Before initialisation
 //!
 //! Every accessor is safe to call before `init`. Publishing goes nowhere and
@@ -32,17 +50,78 @@ use std::sync::OnceLock;
 
 use crate::broker::Broker;
 use crate::connection::Connection;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::events::{Event, EventBus, EventBusConfig, EventHandler, SubscriptionHandle};
 use crate::native::NativeRegistry;
 use crate::ports::Transport;
 use crate::transport::memory::MemoryBus;
 use crate::version::PeerManifest;
 
+/// A tokio runtime living on a thread of its own.
+///
+/// A **current-thread** runtime driven by a dedicated OS thread, rather than a
+/// multi-threaded one, for a specific reason: `new_multi_thread` needs tokio's
+/// `rt-multi-thread` feature, and the slim `--no-default-features` build — the
+/// one an embedded host links — does not have it. A bus that could not be a
+/// singleton in the slim build would defeat the purpose of the slim build.
+///
+/// One thread is also simply enough. The broker routes messages and the
+/// connection loops shuffle frames; none of it is CPU-bound.
+struct BusRuntime {
+    handle: tokio::runtime::Handle,
+    /// Dropping this ends the thread's `block_on`, which drops the runtime on
+    /// that thread — where blocking is allowed. That is why there is no `Drop`
+    /// impl here: a plain in-place `Runtime` drop panics inside an async
+    /// context, and this shape cannot.
+    _shutdown: tokio::sync::oneshot::Sender<()>,
+}
+
+impl BusRuntime {
+    fn start() -> Result<Self> {
+        let (handle_tx, handle_rx) = std::sync::mpsc::channel();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+        std::thread::Builder::new()
+            .name("tinybus".to_string())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(e) => {
+                        let _ = handle_tx.send(Err(e.to_string()));
+                        return;
+                    }
+                };
+                if handle_tx.send(Ok(runtime.handle().clone())).is_err() {
+                    return;
+                }
+                // Drive the runtime until the owning `BusRuntime` goes away.
+                runtime.block_on(async move {
+                    let _ = shutdown_rx.await;
+                });
+            })
+            .map_err(|e| Error::transport(format!("could not start the bus thread: {e}")))?;
+
+        let handle = handle_rx
+            .recv()
+            .map_err(|_| Error::transport("the bus thread died before reporting its runtime"))?
+            .map_err(|e| Error::transport(format!("could not build the bus runtime: {e}")))?;
+
+        Ok(Self {
+            handle,
+            _shutdown: shutdown_tx,
+        })
+    }
+}
+
 /// A lazily-initialised, process-wide [`EventBus`].
 pub struct OnceBus<E: Event> {
     bus: OnceLock<EventBus<E>>,
     native: OnceLock<NativeRegistry>,
+    /// Owns the bus's tasks so they outlive the caller's runtime.
+    runtime: OnceLock<BusRuntime>,
 }
 
 impl<E: Event> Default for OnceBus<E> {
@@ -57,7 +136,17 @@ impl<E: Event> OnceBus<E> {
         Self {
             bus: OnceLock::new(),
             native: OnceLock::new(),
+            runtime: OnceLock::new(),
         }
+    }
+
+    /// The runtime this bus's tasks live on, started on first use.
+    fn runtime(&self) -> Result<&BusRuntime> {
+        if let Some(existing) = self.runtime.get() {
+            return Ok(existing);
+        }
+        let started = BusRuntime::start()?;
+        Ok(self.runtime.get_or_init(|| started))
     }
 
     /// Initialise with an in-process broker: no sockets, no external services.
@@ -68,9 +157,22 @@ impl<E: Event> OnceBus<E> {
     /// production — moving an integration out of the process later is then a
     /// deployment change rather than a different code path that has never run.
     pub async fn init_in_process(&self, config: EventBusConfig) -> Result<&EventBus<E>> {
+        if let Some(existing) = self.bus.get() {
+            return Ok(existing);
+        }
         let transport = MemoryBus::new();
-        Broker::new().spawn(transport.clone());
-        let connection = Connection::connect(transport.connect().await?).await?;
+        let peer = transport.connect().await?;
+
+        // Everything that spawns happens under the guard; nothing is awaited
+        // under it, because an `EnterGuard` is `!Send` and holding one across
+        // an await would make this future `!Send` for every caller.
+        let connection = {
+            let _guard = self.runtime()?.handle.enter();
+            Broker::new().spawn(transport);
+            Connection::attach(peer.into())
+        };
+        connection.handshake().await?;
+
         self.init_with(connection, config).await
     }
 
@@ -80,7 +182,16 @@ impl<E: Event> OnceBus<E> {
         transport: Box<dyn Transport>,
         config: EventBusConfig,
     ) -> Result<&EventBus<E>> {
-        let connection = Connection::connect(transport).await?;
+        if let Some(existing) = self.bus.get() {
+            return Ok(existing);
+        }
+        // Same runtime ownership as `init_in_process`: only the broker differs,
+        // and it is somebody else's process here.
+        let connection = {
+            let _guard = self.runtime()?.handle.enter();
+            Connection::attach(transport.into())
+        };
+        connection.handshake().await?;
         self.init_with(connection, config).await
     }
 
@@ -224,6 +335,76 @@ mod tests {
             .register::<u32, u32, _, _>("test.double", |n| async move { Ok(n * 2) });
         assert!(bus.native().is_registered("test.double"));
         assert!(!bus.is_initialised());
+    }
+
+    /// Subscribe first, so a publish that follows cannot be broadcast into an
+    /// empty room. Returns the handle, which must be held for delivery to
+    /// continue.
+    fn watch(bus: &OnceBus<Tick>) -> (SubscriptionHandle, Arc<Mutex<Vec<Tick>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let handle = bus
+            .subscribe(Arc::new(Capture(seen.clone())))
+            .expect("the bus is initialised");
+        (handle, seen)
+    }
+
+    /// Wait for `n` events to land, or fail on a deadline.
+    async fn wait_for(seen: &Arc<Mutex<Vec<Tick>>>, n: usize) -> Vec<Tick> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            {
+                let guard = seen.lock().await;
+                if guard.len() >= n {
+                    return guard.clone();
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the bus delivered nothing"
+            );
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[test]
+    fn a_bus_outlives_the_runtime_that_initialised_it() {
+        // The exact shape of the bug this owns a runtime to prevent: under
+        // `cargo test` the first `#[tokio::test]` to touch a global bus
+        // initialises it and then tears its own runtime down. If the bus's
+        // tasks lived on that runtime, every later test would inherit a bus
+        // attached to a dead reactor — publishing into silence, with nothing
+        // anywhere reporting an error.
+        static BUS: OnceBus<Tick> = OnceBus::new();
+
+        let first = tokio::runtime::Runtime::new().unwrap();
+        first.block_on(async {
+            BUS.init_in_process(config()).await.unwrap();
+            // Delivery works while the initialising runtime is still alive.
+            let (_handle, seen) = watch(&BUS);
+            BUS.publish(Tick(1));
+            assert_eq!(wait_for(&seen, 1).await, vec![Tick(1)]);
+        });
+        drop(first);
+
+        // A later, unrelated runtime — a second test, in the real case.
+        let second = tokio::runtime::Runtime::new().unwrap();
+        second.block_on(async {
+            let (_handle, seen) = watch(&BUS);
+            BUS.publish(Tick(2));
+            assert_eq!(wait_for(&seen, 1).await, vec![Tick(2)]);
+        });
+    }
+
+    #[test]
+    fn the_bus_runtime_is_built_once_and_shared() {
+        static BUS: OnceBus<Tick> = OnceBus::new();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            BUS.init_in_process(config()).await.unwrap();
+            BUS.init_in_process(config()).await.unwrap();
+        });
+        // One runtime, however many times `init` is called.
+        assert!(BUS.runtime.get().is_some());
     }
 
     #[test]
