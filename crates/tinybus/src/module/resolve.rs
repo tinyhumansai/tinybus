@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn a_required_dependency_no_module_provides_leaves_the_module_unresolved_and_names_the_interface()
-    {
+     {
         let manifests = [module(
             "Consumer",
             &[],
@@ -151,7 +151,10 @@ mod tests {
         )];
         let result = resolve(&manifests, &HashSet::new());
         assert!(result.order.is_empty());
-        assert_eq!(result.unresolved[0].1, "a required interface has no provider");
+        assert_eq!(
+            result.unresolved[0].1,
+            "a required interface has no provider"
+        );
     }
 
     #[test]
@@ -191,11 +194,7 @@ mod tests {
     #[test]
     fn a_module_is_initialized_after_every_module_it_depends_on() {
         let manifests = [
-            module(
-                "Consumer",
-                &[],
-                &[("ai.tinyhumans.module.Provider", false)],
-            ),
+            module("Consumer", &[], &[("ai.tinyhumans.module.Provider", false)]),
             module("Provider", &["ai.tinyhumans.module.Provider"], &[]),
         ];
         assert_eq!(resolve(&manifests, &HashSet::new()).order, [1, 0]);
