@@ -283,6 +283,7 @@ impl Router {
     /// Claim a well-known name for an attached peer identified by its unique
     /// name. Module activation uses this to make a lazy module routable before
     /// its SDK handshake has run.
+    #[cfg(feature = "modules")]
     pub(crate) fn request_name_for_unique(
         &mut self,
         unique: &BusName,
