@@ -630,14 +630,30 @@ macro_rules! module_export {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize};
+    use std::sync::{OnceLock, mpsc::SyncSender};
 
     static HOST_SEND_CODE: AtomicI32 = AtomicI32::new(TB_OK);
     static HOST_WAKES: AtomicUsize = AtomicUsize::new(0);
     static HOST_READY: AtomicBool = AtomicBool::new(false);
     static HOST_FAULTED: AtomicBool = AtomicBool::new(false);
+    static START_OUTGOING: OnceLock<StdMutex<Option<SyncSender<Vec<u8>>>>> = OnceLock::new();
 
     unsafe extern "C" fn host_send(_: *mut c_void, _: *const u8, _: usize) -> i32 {
         HOST_SEND_CODE.load(Ordering::Acquire)
+    }
+
+    unsafe extern "C" fn capture_host_send(_: *mut c_void, ptr: *const u8, len: usize) -> i32 {
+        let Some(sender) = START_OUTGOING
+            .get()
+            .expect("startup capture is initialized")
+            .lock()
+            .expect("startup capture lock")
+            .clone()
+        else {
+            return TB_CLOSED;
+        };
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();
+        sender.send(bytes).map_or(TB_CLOSED, |_| TB_OK)
     }
 
     unsafe extern "C" fn host_wake(_: *mut c_void) {
@@ -853,7 +869,11 @@ mod tests {
         HOST_SEND_CODE.store(TB_OK, Ordering::Release);
         HOST_FAULTED.store(false, Ordering::Release);
         let config = br#"{"answer":42}"#;
-        let host = host(config);
+        let (outgoing_tx, outgoing_rx) = std::sync::mpsc::sync_channel(2);
+        let capture = START_OUTGOING.get_or_init(|| StdMutex::new(None));
+        *capture.lock().expect("startup capture lock") = Some(outgoing_tx);
+        let mut host = host(config);
+        host.send = capture_host_send;
         let mut out = TbModuleVtable::default();
         let code = unsafe {
             start_module_with_config::<serde_json::Value, _, _>(
@@ -868,6 +888,15 @@ mod tests {
             )
         };
         assert_eq!(code, TB_OK);
+        let hello: Message = serde_json::from_slice(
+            &outgoing_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("module did not send Hello"),
+        )
+        .unwrap();
+        let reply = Message::method_return(&hello.header, serde_json::Value::String(":module.1".to_string()));
+        let reply = serde_json::to_vec(&reply).unwrap();
+        assert_eq!(unsafe { (out.deliver)(out.module_ctx, reply.as_ptr(), reply.len()) }, TB_OK);
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
         while !HOST_READY.load(Ordering::Acquire) {
             assert!(
