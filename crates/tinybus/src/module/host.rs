@@ -1256,7 +1256,9 @@ mod tests {
         unsafe { host.attach_raw("clock.so", descriptor, manifest(), init_that_must_not_run) }
             .unwrap_err();
 
-        let connection = Connection::connect(bus.connect().await.unwrap()).await.unwrap();
+        let connection = Connection::connect(bus.connect().await.unwrap())
+            .await
+            .unwrap();
         let proxy = connection
             .proxy(
                 "ai.tinyhumans.module.Clock",
@@ -1265,7 +1267,10 @@ mod tests {
             )
             .unwrap();
         let error = proxy.call::<()>("Call", ()).await.unwrap_err();
-        assert_eq!(error.wire_name(), "ai.tinyhumans.tinybus.Error.ModuleUnavailable");
+        assert_eq!(
+            error.wire_name(),
+            "ai.tinyhumans.tinybus.Error.ModuleUnavailable"
+        );
         assert!(error.to_string().contains("rejected"), "{error}");
         broker_task.abort();
     }
