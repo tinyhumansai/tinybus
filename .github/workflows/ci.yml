@@ -73,15 +73,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build example module
-        run: cargo build --locked --example module_clock --example module_clock_two --example module_wrong_target --features modules,macros
+        run: cargo build --locked --example module_clock --example module_clock_two --example module_wrong_target --no-default-features --features modules,macros
       - name: Exercise the real loader (Unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
+          set -euo pipefail
           module=$(find target/debug/examples -maxdepth 1 -type f \( -name 'libmodule_clock.so' -o -name 'libmodule_clock.dylib' \) -print -quit)
           module_two=$(find target/debug/examples -maxdepth 1 -type f \( -name 'libmodule_clock_two.so' -o -name 'libmodule_clock_two.dylib' \) -print -quit)
           wrong_target=$(find target/debug/examples -maxdepth 1 -type f \( -name 'libmodule_wrong_target.so' -o -name 'libmodule_wrong_target.dylib' \) -print -quit)
-          TINYBUS_TEST_MODULE="$PWD/$module" TINYBUS_TEST_MODULE_TWO="$PWD/$module_two" TINYBUS_TEST_WRONG_TARGET="$PWD/$wrong_target" cargo test --locked --features modules,macros -- --ignored
+          for artifact in "$module" "$module_two" "$wrong_target"; do
+            if [ -z "$artifact" ] || [ ! -f "$artifact" ]; then
+              echo "a module example artifact is missing; the loader tests would not exercise it" >&2
+              exit 1
+            fi
+          done
+          TINYBUS_TEST_MODULE="$PWD/$module" TINYBUS_TEST_MODULE_TWO="$PWD/$module_two" TINYBUS_TEST_WRONG_TARGET="$PWD/$wrong_target" cargo test --locked --no-default-features --features modules,macros -- --ignored
       - name: Exercise the real loader (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
