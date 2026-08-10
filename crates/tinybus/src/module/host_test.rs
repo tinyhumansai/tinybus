@@ -949,16 +949,25 @@ async fn scanning_loading_rescanning_and_shutting_down_a_module_directory_are_co
 #[tokio::test]
 #[ignore = "requires TINYBUS_TEST_MODULE to point at the built cdylib"]
 async fn duplicate_module_declarations_are_reported_without_attaching_either_copy() {
-    let source = PathBuf::from(std::env::var_os("TINYBUS_TEST_MODULE").expect("TINYBUS_TEST_MODULE"));
+    let source =
+        PathBuf::from(std::env::var_os("TINYBUS_TEST_MODULE").expect("TINYBUS_TEST_MODULE"));
     let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
     for name in ["one", "two"] {
         let extension = source.extension().expect("module extension");
-        std::fs::copy(&source, directory.path().join(name).with_extension(extension)).unwrap();
+        std::fs::copy(
+            &source,
+            directory.path().join(name).with_extension(extension),
+        )
+        .unwrap();
     }
     let host = ModuleHost::new(Broker::new());
     let scanned = host.scan_dir(directory.path()).unwrap();
     assert_eq!(scanned.len(), 2);
-    assert!(scanned.iter().all(|info| matches!(info.state, ModuleState::Unresolved { .. })));
+    assert!(
+        scanned
+            .iter()
+            .all(|info| matches!(info.state, ModuleState::Unresolved { .. }))
+    );
     let loaded = host.load_dir(directory.path()).unwrap();
     assert_eq!(loaded.len(), 2);
     assert!(loaded.iter().all(Result::is_err));
