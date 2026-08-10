@@ -497,6 +497,8 @@ mod tests {
         let address = dir.path().join("bus");
         let listener = UnixListenerAdapter::bind(&address).await.unwrap();
         let broker = Broker::new();
+        // The broker retains only a weak module control, so callers must keep
+        // this host bound while they issue module commands.
         let host = ModuleHost::new(broker.clone());
         broker.spawn(listener);
         (dir, address, host)
@@ -626,7 +628,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn module_commands_and_invalid_json_fail_with_a_running_broker() {
+    async fn module_commands_report_errors_and_valid_commands_succeed() {
         let (_dir, address, _host) = broker_with_module_host().await;
         let commands = [
             ModulesCommand::Show {

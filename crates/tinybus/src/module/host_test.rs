@@ -808,7 +808,22 @@ fn module_host_helpers_preserve_safe_names_states_and_allowlist_decisions() {
         ModuleState::Stopped,
         ModuleState::Disabled,
     ];
-    assert_eq!(states.iter().map(state_name).collect::<Vec<_>>().len(), 11);
+    assert_eq!(
+        states.iter().map(state_name).collect::<Vec<_>>(),
+        [
+            "discovered",
+            "rejected",
+            "unresolved",
+            "resolved",
+            "initializing",
+            "ready",
+            "serving",
+            "faulted",
+            "failed",
+            "stopped",
+            "disabled",
+        ]
+    );
     assert_eq!(state_detail(&states[1]), Some("no"));
     assert_eq!(state_detail(&states[2]), Some("no"));
     assert_eq!(state_detail(&states[0]), None);
@@ -830,6 +845,13 @@ fn module_host_helpers_preserve_safe_names_states_and_allowlist_decisions() {
     })));
     assert!(!has_library_extension(Path::new("clock.txt")));
 
+    let search_paths = ModuleHost::search_paths();
+    #[cfg(windows)]
+    assert!(!search_paths.is_empty() || {
+        unsafe { std::env::set_var("LOCALAPPDATA", tempfile::tempdir().unwrap().path()) };
+        false
+    });
+    #[cfg(windows)]
     let search_paths = ModuleHost::search_paths();
     assert!(
         search_paths
