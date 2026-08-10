@@ -705,6 +705,12 @@ mod tests {
                 path: PathBuf::from("/not/a/module"),
                 config: "{}".into(),
             },
+            ModulesCommand::LoadGithub {
+                release_url: "https://example.com/not-github".into(),
+                asset: "module.tar.gz".into(),
+                sha256: "0".repeat(64),
+                config: "{}".into(),
+            },
             ModulesCommand::Stop {
                 name: "missing".into(),
                 deadline_ms: 1_000,
@@ -734,6 +740,25 @@ mod tests {
         )
         .await
         .unwrap();
+
+        let asset = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(asset.path(), b"release asset").unwrap();
+        let manifest = tempfile::NamedTempFile::new().unwrap();
+        run_modules(
+            &address,
+            Duration::from_secs(2),
+            ModulesCommand::Checksum {
+                paths: vec![asset.path().to_path_buf()],
+                output: Some(manifest.path().to_path_buf()),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            std::fs::read_to_string(manifest.path())
+                .unwrap()
+                .contains("[sha256]")
+        );
         run_modules(&address, Duration::from_secs(2), ModulesCommand::Doctor)
             .await
             .unwrap();
