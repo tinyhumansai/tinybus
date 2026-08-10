@@ -748,18 +748,33 @@ mod tests {
 
     #[test]
     fn deliver_and_shutdown_validate_their_arguments_and_closed_state() {
-        assert_eq!(unsafe { deliver(std::ptr::null_mut(), std::ptr::null(), 0) }, TB_BAD_ARGUMENT);
-        assert_eq!(unsafe { shutdown(std::ptr::null_mut(), 1) }, TB_BAD_ARGUMENT);
+        assert_eq!(
+            unsafe { deliver(std::ptr::null_mut(), std::ptr::null(), 0) },
+            TB_BAD_ARGUMENT
+        );
+        assert_eq!(
+            unsafe { shutdown(std::ptr::null_mut(), 1) },
+            TB_BAD_ARGUMENT
+        );
         let state = RuntimeState {
             inbound: StdMutex::new(None),
             runtime: StdMutex::new(None),
         };
         let bytes = b"{}";
         assert_eq!(
-            unsafe { deliver(std::ptr::from_ref(&state).cast_mut().cast(), bytes.as_ptr(), bytes.len()) },
+            unsafe {
+                deliver(
+                    std::ptr::from_ref(&state).cast_mut().cast(),
+                    bytes.as_ptr(),
+                    bytes.len(),
+                )
+            },
             TB_CLOSED
         );
-        assert_eq!(unsafe { shutdown(std::ptr::from_ref(&state).cast_mut().cast(), 1) }, TB_CLOSED);
+        assert_eq!(
+            unsafe { shutdown(std::ptr::from_ref(&state).cast_mut().cast(), 1) },
+            TB_CLOSED
+        );
     }
 
     #[tokio::test]
@@ -776,7 +791,14 @@ mod tests {
             (TB_BAD_ARGUMENT, "module host refused a frame"),
         ] {
             HOST_SEND_CODE.store(code, Ordering::Release);
-            assert!(transport.send(message()).await.unwrap_err().to_string().contains(expected));
+            assert!(
+                transport
+                    .send(message())
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains(expected)
+            );
         }
         HOST_SEND_CODE.store(TB_OK, Ordering::Release);
         HOST_FAULTED.store(false, Ordering::Release);
@@ -785,7 +807,10 @@ mod tests {
         transport.send(panic_message).await.unwrap();
         assert!(HOST_FAULTED.load(Ordering::Acquire));
         HOST_WAKES.store(0, Ordering::Release);
-        sender.send(serde_json::to_vec(&message()).unwrap()).await.unwrap();
+        sender
+            .send(serde_json::to_vec(&message()).unwrap())
+            .await
+            .unwrap();
         assert_eq!(transport.recv().await.unwrap().unwrap(), message());
         assert_eq!(HOST_WAKES.load(Ordering::Acquire), 1);
         transport.close().await.unwrap();
@@ -810,7 +835,13 @@ mod tests {
         let invalid_config = host(config);
         assert_eq!(
             unsafe {
-                start_module_with_config::<u32, _, _>(&invalid_config, &mut out, 1, true, |_, _| async { Ok(()) })
+                start_module_with_config::<u32, _, _>(
+                    &invalid_config,
+                    &mut out,
+                    1,
+                    true,
+                    |_, _| async { Ok(()) },
+                )
             },
             TB_BAD_ARGUMENT
         );
