@@ -49,6 +49,8 @@ pub struct ModuleInfo {
     pub rustc_version: String,
     /// Whether this module's toolchain differs from the host.
     pub rustc_mismatch: bool,
+    /// Whether discovery should admit this module on future scans.
+    pub enabled: bool,
 }
 
 struct LoadedModule {
@@ -58,33 +60,54 @@ struct LoadedModule {
 
 /// Loads trusted cdylib modules into one embedded broker.
 pub struct ModuleHost {
+    inner: Arc<ModuleHostInner>,
+}
+
+struct ModuleHostInner {
     broker: Broker,
     strict: bool,
     loaded: Mutex<Vec<LoadedModule>>,
+    directories: Mutex<Vec<PathBuf>>,
     warned: AtomicBool,
+}
+
+/// The broker's private control hook. Kept behind a weak pointer so an unused
+/// broker does not keep a module host alive.
+pub(crate) trait ModuleControl: Send + Sync {
+    fn list(&self) -> Vec<ModuleInfo>;
+    fn load(self: Arc<Self>, path: PathBuf) -> Result<ModuleInfo>;
+    fn stop(&self, name: &str, deadline: Duration) -> Result<ModuleInfo>;
+    fn enable(&self, name: &str, enabled: bool) -> Result<ModuleInfo>;
+    fn rescan(self: Arc<Self>) -> Result<Vec<ModuleInfo>>;
 }
 
 impl ModuleHost {
     /// Create a host. Loading is permissive about rustc drift by default.
     pub fn new(broker: Broker) -> Self {
-        Self {
-            broker,
+        let inner = Arc::new(ModuleHostInner {
+            broker: broker.clone(),
             strict: false,
             loaded: Mutex::new(Vec::new()),
+            directories: Mutex::new(Vec::new()),
             warned: AtomicBool::new(false),
-        }
+        });
+        let control: Arc<dyn ModuleControl> = inner.clone();
+        broker.set_module_control(Arc::downgrade(&control));
+        Self { inner }
     }
 
     /// Refuse modules built by a different rustc release.
     #[must_use]
     pub fn strict(mut self, strict: bool) -> Self {
-        self.strict = strict;
+        Arc::get_mut(&mut self.inner)
+            .expect("strict mode is set before sharing the host")
+            .strict = strict;
         self
     }
 
     /// Snapshot all admitted modules.
     pub fn list(&self) -> Vec<ModuleInfo> {
-        self.loaded
+        self.inner.loaded
             .lock()
             .expect("module list lock")
             .iter()
@@ -108,6 +131,11 @@ impl ModuleHost {
     pub fn load_dir(&self, directory: impl AsRef<Path>) -> Result<Vec<Result<ModuleInfo>>> {
         let directory = directory.as_ref();
         check_directory(directory)?;
+        let mut directories = self.inner.directories.lock().expect("module directory lock");
+        if !directories.iter().any(|known| known == directory) {
+            directories.push(directory.to_path_buf());
+        }
+        drop(directories);
         let mut paths = std::fs::read_dir(directory)?
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
             .filter(|path| has_library_extension(path))
@@ -181,7 +209,7 @@ impl ModuleHost {
     /// Stop every module within the supplied deadline per module.
     pub async fn shutdown(&self, deadline: Duration) {
         let transports = self
-            .loaded
+            .inner.loaded
             .lock()
             .expect("module list lock")
             .iter()
@@ -190,7 +218,7 @@ impl ModuleHost {
         for transport in transports {
             let _ = tokio::task::spawn_blocking(move || transport.shutdown_sync(deadline)).await;
         }
-        for module in self.loaded.lock().expect("module list lock").iter_mut() {
+        for module in self.inner.loaded.lock().expect("module list lock").iter_mut() {
             module.info.state = ModuleState::Stopped;
         }
     }
@@ -198,7 +226,7 @@ impl ModuleHost {
     fn activate(&self, path: &Path, artifact: LoadedArtifact) -> Result<ModuleInfo> {
         let admitted = self.validate(path, &artifact.descriptor, &artifact.manifest)?;
         if self
-            .loaded
+            .inner.loaded
             .lock()
             .expect("module list lock")
             .iter()
@@ -218,15 +246,15 @@ impl ModuleHost {
             .map_err(|_| Error::module_refused(path, "module returned an invalid vtable"))?;
 
         let transport_for_broker: Arc<dyn Transport> = transport.clone();
-        self.broker.attach(transport_for_broker);
-        if !self.warned.swap(true, Ordering::AcqRel) {
+        self.inner.broker.attach(transport_for_broker);
+        if !self.inner.warned.swap(true, Ordering::AcqRel) {
             tracing::warn!(
                 modules = 1,
                 "in-process modules are inside the host trust boundary"
             );
         }
         tracing::info!(module = %admitted.name, "module loaded");
-        self.loaded
+        self.inner.loaded
             .lock()
             .expect("module list lock")
             .push(LoadedModule {
@@ -274,7 +302,7 @@ impl ModuleHost {
             .ok_or_else(|| refuse("descriptor identity is invalid"))?;
         let rustc_mismatch =
             field_bytes(&descriptor.rustc_version) != build_info::RUSTC_VERSION.as_bytes();
-        if self.strict && rustc_mismatch {
+        if self.inner.strict && rustc_mismatch {
             return Err(refuse("rustc version does not match in strict mode"));
         }
         if rustc_mismatch {
@@ -297,6 +325,7 @@ impl ModuleHost {
             manifest: manifest.clone(),
             rustc_version: rustc,
             rustc_mismatch,
+            enabled: true,
         })
     }
 
@@ -316,7 +345,7 @@ impl ModuleHost {
     }
 
     fn provided_interfaces(&self) -> HashSet<String> {
-        self.loaded
+        self.inner.loaded
             .lock()
             .expect("module list lock")
             .iter()
