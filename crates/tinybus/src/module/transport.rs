@@ -25,6 +25,8 @@ struct HostContext {
     config: StdMutex<Vec<u8>>,
     faulted: AtomicBool,
     init_failed: AtomicBool,
+    init_started: AtomicBool,
+    init_notify: Notify,
     ready: AtomicBool,
     ready_notify: Notify,
 }
@@ -56,6 +58,8 @@ impl ModuleTransport {
             config: StdMutex::new(config),
             faulted: AtomicBool::new(false),
             init_failed: AtomicBool::new(false),
+            init_started: AtomicBool::new(false),
+            init_notify: Notify::new(),
             ready: AtomicBool::new(false),
             ready_notify: Notify::new(),
         }));
@@ -110,6 +114,8 @@ impl ModuleTransport {
         let result = self
             .init_result
             .get_or_init(|| async {
+                self.context.init_started.store(true, Ordering::Release);
+                self.context.init_notify.notify_waiters();
                 let Some((init, host)) = self
                     .initializer
                     .lock()
@@ -161,6 +167,16 @@ impl ModuleTransport {
 
     pub(crate) fn init_failed(&self) -> bool {
         self.context.init_failed.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn init_started(&self) -> bool {
+        self.context.init_started.load(Ordering::Acquire)
+    }
+
+    pub(crate) async fn wait_initializing(&self) {
+        while !self.init_started() {
+            self.context.init_notify.notified().await;
+        }
     }
 
     async fn deliver_now(&self, message: Message) -> Result<()> {
