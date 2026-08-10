@@ -704,9 +704,12 @@ mod tests {
     async fn host_callbacks_accept_messages_and_make_the_transport_closed_on_fault() {
         let (transport, host) = ModuleTransport::new("callbacks".to_string(), Vec::new());
         let outgoing = serde_json::to_vec(&call()).unwrap();
+        let host_ctx = host.host_ctx as usize;
+        let send = host.send;
+        let outbound = outgoing.clone();
         assert_eq!(
             tokio::task::spawn_blocking(move || unsafe {
-                (host.send)(host.host_ctx, outgoing.as_ptr(), outgoing.len())
+                send(host_ctx as *mut c_void, outbound.as_ptr(), outbound.len())
             })
             .await
             .unwrap(),
