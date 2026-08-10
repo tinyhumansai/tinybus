@@ -448,7 +448,6 @@ impl Broker {
                         .collect(),
                 ))
             }
-            _ => unreachable!("known module member was checked above"),
         }
         })();
         Some(match outcome {
