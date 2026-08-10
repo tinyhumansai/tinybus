@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::Duration;
 
@@ -29,6 +29,7 @@ struct HostContext {
     init_notify: Notify,
     ready: AtomicBool,
     ready_notify: Notify,
+    inflight: AtomicUsize,
 }
 
 /// The broker-facing side of one loaded module.
@@ -62,6 +63,7 @@ impl ModuleTransport {
             init_notify: Notify::new(),
             ready: AtomicBool::new(false),
             ready_notify: Notify::new(),
+            inflight: AtomicUsize::new(0),
         }));
         let transport = Arc::new_cyclic(|self_ref| Self {
             self_ref: self_ref.clone(),
@@ -177,6 +179,10 @@ impl ModuleTransport {
         self.context.init_started.load(Ordering::Acquire)
     }
 
+    pub(crate) fn inflight(&self) -> usize {
+        self.context.inflight.load(Ordering::Acquire)
+    }
+
     pub(crate) async fn wait_initializing(&self) {
         loop {
             let notified = self.context.init_notify.notified();
@@ -277,6 +283,10 @@ impl Transport for ModuleTransport {
             }
             return Err(Error::ConnectionClosed);
         }
+        let is_call = message.header.kind == MessageKind::MethodCall;
+        if is_call {
+            self.context.inflight.fetch_add(1, Ordering::AcqRel);
+        }
         if message.header.kind == MessageKind::MethodCall && !self.is_ready() {
             self.pending.lock().await.push_back(message);
             if !self.drain_started.swap(true, Ordering::AcqRel) {
@@ -285,7 +295,11 @@ impl Transport for ModuleTransport {
             }
             return Ok(());
         }
-        self.deliver_now(message).await
+        let result = self.deliver_now(message).await;
+        if result.is_err() && is_call {
+            self.context.inflight.fetch_sub(1, Ordering::AcqRel);
+        }
+        result
     }
 
     async fn recv(&self) -> Result<Option<Message>> {
@@ -293,7 +307,16 @@ impl Transport for ModuleTransport {
         let Some(bytes) = bytes else {
             return Ok(None);
         };
-        Ok(Some(serde_json::from_slice(&bytes)?))
+        let message: Message = serde_json::from_slice(&bytes)?;
+        if matches!(message.header.kind, MessageKind::MethodReturn | MessageKind::Error) {
+            let _ = self
+                .context
+                .inflight
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                    count.checked_sub(1)
+                });
+        }
+        Ok(Some(message))
     }
 
     async fn close(&self) -> Result<()> {

@@ -111,7 +111,17 @@ impl LoadedModule {
                 ModuleState::Resolved | ModuleState::Initializing
             )
         {
-            info.state = ModuleState::Ready;
+            info.state = if self.transport.inflight() == 0 {
+                ModuleState::Ready
+            } else {
+                ModuleState::Serving
+            };
+        } else if matches!(info.state, ModuleState::Ready | ModuleState::Serving) {
+            info.state = if self.transport.inflight() == 0 {
+                ModuleState::Ready
+            } else {
+                ModuleState::Serving
+            };
         } else if self.transport.init_started() && matches!(info.state, ModuleState::Resolved) {
             info.state = ModuleState::Initializing;
         }
