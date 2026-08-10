@@ -1069,10 +1069,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stopped.state, ModuleState::Stopped);
-        let state_change = tokio::time::timeout(Duration::from_secs(2), state_changes.recv())
-            .await
-            .unwrap()
-            .unwrap();
+        let state_change = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let message = state_changes.recv().await.unwrap();
+                if message.header.member.as_ref().map(|member| member.as_str())
+                    == Some("ModuleStateChanged")
+                {
+                    break message;
+                }
+            }
+        })
+        .await
+        .unwrap();
         assert_eq!(
             state_change.body["state"], "stopped",
             "{}",
