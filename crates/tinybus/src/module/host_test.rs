@@ -829,7 +829,11 @@ async fn one_refused_module_does_not_stop_the_others_in_the_directory_from_loadi
     let host = ModuleHost::new(Broker::new());
     let outcomes = host.load_dir(directory.path()).unwrap();
     assert_eq!(outcomes.len(), 2);
-    assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+    assert_eq!(
+        outcomes.iter().filter(|outcome| outcome.is_ok()).count(),
+        1,
+        "{outcomes:?}"
+    );
     assert_eq!(
         outcomes.iter().filter(|outcome| outcome.is_err()).count(),
         1
