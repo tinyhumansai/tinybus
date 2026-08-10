@@ -433,6 +433,6 @@ mod tests {
         let Error::ModuleRefused { reason, .. } = error else {
             panic!("expected module refusal");
         };
-        assert_eq!(reason, "loaderexposedsecretpathandspace");
+        assert_eq!(reason, "loaderexposedsecretpathandspaces");
     }
 }
