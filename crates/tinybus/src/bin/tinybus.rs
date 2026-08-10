@@ -337,9 +337,13 @@ async fn run_modules(
             println!("{}", serde_json::to_string_pretty(&module)?);
             Ok(())
         }
-        ModulesCommand::Enable { name } | ModulesCommand::Disable { name } => {
-            let enabled = matches!(command, ModulesCommand::Enable { .. });
-            let module: serde_json::Value = bus.call("EnableModule", (name, enabled)).await?;
+        ModulesCommand::Enable { name } => {
+            let module: serde_json::Value = bus.call("EnableModule", (name, true)).await?;
+            println!("{}", serde_json::to_string_pretty(&module)?);
+            Ok(())
+        }
+        ModulesCommand::Disable { name } => {
+            let module: serde_json::Value = bus.call("EnableModule", (name, false)).await?;
             println!("{}", serde_json::to_string_pretty(&module)?);
             Ok(())
         }
