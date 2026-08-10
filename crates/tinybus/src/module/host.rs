@@ -333,9 +333,9 @@ impl ModuleHost {
         let mut outcomes = Vec::new();
         let mut pending = Vec::new();
         for path in paths {
-            match check_file(&path).and_then(|()| {
-                loader::load(&path, self.inner.strict.load(Ordering::Acquire))
-            }) {
+            match check_file(&path)
+                .and_then(|()| loader::load(&path, self.inner.strict.load(Ordering::Acquire)))
+            {
                 Ok(artifact) => pending.push((path, artifact)),
                 Err(error) => outcomes.push(Err(error)),
             }
@@ -404,7 +404,10 @@ impl ModuleHost {
     /// Load every existing directory in [`ModuleHost::search_paths`] order.
     pub fn load_search_paths(&self) -> Vec<Result<ModuleInfo>> {
         let mut outcomes = Vec::new();
-        for path in Self::search_paths().into_iter().filter(|path| path.is_dir()) {
+        for path in Self::search_paths()
+            .into_iter()
+            .filter(|path| path.is_dir())
+        {
             match self.load_dir(path) {
                 Ok(results) => outcomes.extend(results),
                 Err(error) => outcomes.push(Err(error)),
@@ -1829,9 +1832,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires TINYBUS_TEST_MODULE and TINYBUS_TEST_WRONG_TARGET"]
     async fn one_refused_module_does_not_stop_the_others_in_the_directory_from_loading() {
-        let valid = PathBuf::from(
-            std::env::var_os("TINYBUS_TEST_MODULE").expect("TINYBUS_TEST_MODULE"),
-        );
+        let valid =
+            PathBuf::from(std::env::var_os("TINYBUS_TEST_MODULE").expect("TINYBUS_TEST_MODULE"));
         let invalid = PathBuf::from(
             std::env::var_os("TINYBUS_TEST_WRONG_TARGET").expect("TINYBUS_TEST_WRONG_TARGET"),
         );
@@ -1845,7 +1847,10 @@ mod tests {
         let outcomes = host.load_dir(directory.path()).unwrap();
         assert_eq!(outcomes.len(), 2);
         assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
-        assert_eq!(outcomes.iter().filter(|outcome| outcome.is_err()).count(), 1);
+        assert_eq!(
+            outcomes.iter().filter(|outcome| outcome.is_err()).count(),
+            1
+        );
     }
 }
 

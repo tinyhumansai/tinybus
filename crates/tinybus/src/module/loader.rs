@@ -3,12 +3,12 @@
 use std::path::Path;
 
 use crate::error::{Error, Result};
-use crate::{build_info, version::Version};
 use crate::module::abi::{
     ABI_MAGIC, ABI_REVISION, DESCRIPTOR_PREFIX_SIZE, MAX_DESCRIPTOR_SIZE, TbAbiDescriptor,
     TbModuleInit, TbSlice, field_bytes,
 };
 use crate::module::manifest::ModuleManifest;
+use crate::{build_info, version::Version};
 
 type ManifestFn = unsafe extern "C" fn() -> TbSlice;
 
