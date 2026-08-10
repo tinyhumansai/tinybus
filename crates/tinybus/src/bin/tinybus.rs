@@ -647,7 +647,11 @@ mod tests {
             ModulesCommand::Doctor,
         ];
         for command in commands {
-            assert!(run_modules(&address, Duration::from_secs(2), command).await.is_err());
+            assert!(
+                run_modules(&address, Duration::from_secs(2), command)
+                    .await
+                    .is_err()
+            );
         }
 
         for command in [
@@ -665,13 +669,15 @@ mod tests {
                 args: "not json".into(),
             },
         ] {
-            assert!(run(Cli {
-                address: Some(address.clone()),
-                timeout: 1,
-                command,
-            })
-            .await
-            .is_err());
+            assert!(
+                run(Cli {
+                    address: Some(address.clone()),
+                    timeout: 1,
+                    command,
+                })
+                .await
+                .is_err()
+            );
         }
     }
 
