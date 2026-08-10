@@ -43,6 +43,8 @@ tinybus_module::module_export! {
     config = ClockConfig,
     worker_threads = 1,
     provides = ["ai.tinyhumans.openhuman.Clock"],
+    methods = ["Now", "Panic"],
+    signals = [],
     requires = [],
     optional = [],
     lazy = false,

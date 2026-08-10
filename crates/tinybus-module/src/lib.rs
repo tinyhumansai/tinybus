@@ -30,6 +30,8 @@ pub fn manifest_slice(
     name: &str,
     version: &str,
     provides: &[&str],
+    methods: &[&str],
+    signals: &[&str],
     requires: &[&str],
     optional: &[&str],
     lazy: bool,
@@ -42,13 +44,27 @@ pub fn manifest_slice(
 
     let bytes = MANIFEST_BYTES.get_or_init(|| {
         let package_version = Version::parse(version).expect("package version is semver");
-        let provided = |interface: &&str| ProvidedInterface {
+        let provided = |(index, interface): (usize, &&str)| ProvidedInterface {
             version: InterfaceVersion::provided(
                 InterfaceName::new(*interface).expect("provided interface is valid"),
                 package_version.clone(),
             ),
-            methods: Vec::new(),
-            signals: Vec::new(),
+            methods: if index == 0 {
+                methods
+                    .iter()
+                    .map(|member| tinybus::MemberName::new(*member).expect("method is valid"))
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            signals: if index == 0 {
+                signals
+                    .iter()
+                    .map(|member| tinybus::MemberName::new(*member).expect("signal is valid"))
+                    .collect()
+            } else {
+                Vec::new()
+            },
         };
         let dependency = |interface: &&str, optional| Dependency {
             interface: InterfaceVersion::consumed(
@@ -74,7 +90,7 @@ pub fn manifest_slice(
             },
             bus_name: BusName::new(bus_name).expect("provided interface is a bus name"),
             object_path: ObjectPath::new(object_path).expect("derived object path is valid"),
-            provides: provides.iter().map(provided).collect(),
+            provides: provides.iter().enumerate().map(provided).collect(),
             requires: requires
                 .iter()
                 .map(|interface| dependency(interface, false))
@@ -443,6 +459,8 @@ macro_rules! module_export {
         config = $config:ty,
         worker_threads = $threads:expr,
         provides = [$($provides:literal),* $(,)?],
+        methods = [$($methods:literal),* $(,)?],
+        signals = [$($signals:literal),* $(,)?],
         requires = [$($requires:literal),* $(,)?],
         optional = [$($optional:literal),* $(,)?],
         lazy = $lazy:expr $(,)?
@@ -460,6 +478,8 @@ macro_rules! module_export {
                 env!("CARGO_PKG_NAME"),
                 env!("CARGO_PKG_VERSION"),
                 &[$($provides),*],
+                &[$($methods),*],
+                &[$($signals),*],
                 &[$($requires),*],
                 &[$($optional),*],
                 $lazy,
@@ -488,6 +508,8 @@ macro_rules! module_export {
             setup = $setup,
             worker_threads = $threads,
             provides = [],
+            methods = [],
+            signals = [],
             requires = [],
             optional = [],
             lazy = false,
@@ -497,6 +519,8 @@ macro_rules! module_export {
         setup = $setup:path,
         worker_threads = $threads:expr,
         provides = [$($provides:literal),* $(,)?],
+        methods = [$($methods:literal),* $(,)?],
+        signals = [$($signals:literal),* $(,)?],
         requires = [$($requires:literal),* $(,)?],
         optional = [$($optional:literal),* $(,)?],
         lazy = $lazy:expr $(,)?
@@ -514,6 +538,8 @@ macro_rules! module_export {
                 env!("CARGO_PKG_NAME"),
                 env!("CARGO_PKG_VERSION"),
                 &[$($provides),*],
+                &[$($methods),*],
+                &[$($signals),*],
                 &[$($requires),*],
                 &[$($optional),*],
                 $lazy,
