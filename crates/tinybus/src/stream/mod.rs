@@ -508,25 +508,6 @@ impl StreamRegistry {
     }
 }
 
-/// Tokio's `Mutex` has no blocking lock outside a blocking context, and `close`
-/// is synchronous. The gate is only ever held across one `send`, so a failed
-/// try-lock means a chunk is mid-flight; waiting a moment for it is correct and
-/// cannot deadlock, since the holder is not waiting on us.
-trait GateLock {
-    fn blocking_lock_fallback(&self) -> tokio::sync::MutexGuard<'_, Gate>;
-}
-
-impl GateLock for Mutex<Gate> {
-    fn blocking_lock_fallback(&self) -> tokio::sync::MutexGuard<'_, Gate> {
-        loop {
-            if let Ok(guard) = self.try_lock() {
-                return guard;
-            }
-            std::thread::yield_now();
-        }
-    }
-}
-
 /// The receiving half of a stream: chunks, in order, as they land.
 ///
 /// Reading incrementally is the point — a receiver writing a payload to disk
