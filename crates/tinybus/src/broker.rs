@@ -704,6 +704,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn malformed_bus_arguments_are_replied_to_without_hanging() {
+        let (_bus, _service, client) = bus().await;
+        let invalid = Message::method_call(
+            BusName::new(crate::BUS_NAME).unwrap(),
+            ObjectPath::new(crate::BUS_PATH).unwrap(),
+            InterfaceName::new(crate::BUS_INTERFACE).unwrap(),
+            MemberName::new("AddMatch").unwrap(),
+            serde_json::json!([42]),
+        );
+        let error = client
+            .call_raw(invalid, Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert_eq!(error.wire_name(), "ai.tinyhumans.tinybus.Error.BadArguments");
+    }
+
+    #[tokio::test]
     async fn calling_an_integration_that_is_not_running_fails_fast_and_names_it() {
         let (_bus, _service, client) = bus().await;
         let absent = client
