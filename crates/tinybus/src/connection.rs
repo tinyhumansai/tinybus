@@ -717,10 +717,7 @@ impl Connection {
         bytes: &[u8],
     ) -> Result<R> {
         let mut writer = self
-            .open_stream(
-                &destination,
-                StreamDescriptor::with_len(bytes.len() as u64),
-            )
+            .open_stream(&destination, StreamDescriptor::with_len(bytes.len() as u64))
             .await?;
         let message = Message::method_call(
             destination,
@@ -730,20 +727,13 @@ impl Connection {
             to_body(&args(&writer.stream_ref()))?,
         );
 
-        // Both halves at once, and the first failure wins: if the callee
-        // rejects the call there is no point finishing the upload, and if the
-        // upload dies the callee's reply is not worth waiting the full deadline
-        // for.
-        let reply = tokio::select! {
-            written = async {
-                writer.write(bytes).await?;
-                writer.finish().await.map(|_| ())
-            } => {
-                written?;
-                self.call_raw(message, DEFAULT_TIMEOUT).await?
-            }
-            reply = self.call_raw(message.clone(), DEFAULT_TIMEOUT) => reply?,
-        };
+        // Both halves at once, and the first failure wins: the callee is
+        // reading the stream while it answers, so waiting for either one before
+        // starting the other is a deadlock, not a slow path.
+        let (reply, ()) = tokio::try_join!(self.call_raw(message, DEFAULT_TIMEOUT), async {
+            writer.write(bytes).await?;
+            writer.finish().await.map(|_| ())
+        })?;
         Ok(serde_json::from_value(reply)?)
     }
 
