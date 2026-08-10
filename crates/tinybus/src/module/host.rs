@@ -1253,6 +1253,20 @@ mod tests {
     }
 
     #[test]
+    fn a_module_needing_a_feature_the_host_lacks_is_refused_and_names_the_feature() {
+        let host = ModuleHost::new(Broker::new());
+        let mut descriptor = TbAbiDescriptor::current("clock", "0.1.0");
+        descriptor.tinybus_feature_bits |= 1 << 63;
+        let error = host
+            .validate(Path::new("clock.so"), &descriptor, &manifest())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("unavailable tinybus feature"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn a_module_built_against_an_incompatible_tinybus_is_refused_and_names_both_versions() {
         let host = ModuleHost::new(Broker::new());
         let mut descriptor = TbAbiDescriptor::current("clock", "0.1.0");
@@ -1300,7 +1314,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_artifact_is_listed_without_exposing_its_directory() {
+    fn a_refusal_names_the_file_but_never_the_path_or_the_descriptor_bytes() {
         let directory = tempfile::tempdir().unwrap();
         let extension = if cfg!(windows) {
             "dll"
@@ -1324,6 +1338,45 @@ mod tests {
             listed[0].state,
             ModuleState::Rejected { ref reason } if !reason.is_empty()
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_world_writable_module_directory_is_refused_before_any_dlopen() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        let error = check_directory(directory.path()).unwrap_err();
+        assert!(error.to_string().contains("writable by another user"));
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_regular_file_is_skipped() {
+        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let error = check_file(directory.path()).unwrap_err();
+        assert!(error.to_string().contains("not a regular file"));
+    }
+
+    #[test]
+    fn an_allowlist_with_a_mismatched_hash_refuses_the_file() {
+        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let extension = if cfg!(windows) {
+            "dll"
+        } else if cfg!(target_os = "macos") {
+            "dylib"
+        } else {
+            "so"
+        };
+        let path = directory.path().join(format!("clock.{extension}"));
+        std::fs::write(&path, b"not a module").unwrap();
+        std::fs::write(
+            directory.path().join("modules.toml"),
+            format!("clock.{extension} = \"{}\"\n", "0".repeat(64)),
+        )
+        .unwrap();
+        let error = check_file(&path).unwrap_err();
+        assert!(error.to_string().contains("hash does not match"), "{error}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
