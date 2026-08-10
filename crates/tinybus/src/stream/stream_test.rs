@@ -981,3 +981,45 @@ async fn a_receiver_does_not_reserve_memory_for_a_length_the_sender_merely_claim
         bytes.len()
     );
 }
+
+#[tokio::test]
+async fn reaping_an_idle_stream_wakes_the_sender_parked_against_its_window() {
+    // Reaping is only half a rescue if the peer stalled against the window is
+    // left waiting on a stream that no longer exists. It should learn at the
+    // reap, not at its own deadline.
+    let (client, service) = bus().await;
+    service.set_stream_limits(StreamLimits {
+        window_chunks: 1,
+        idle_timeout: Duration::ZERO,
+        ..StreamLimits::default()
+    });
+    let destination = BusName::new(SINK).unwrap();
+    let mut stalled = client
+        .open_stream_with_timeout(
+            &destination,
+            StreamDescriptor::default(),
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+    stalled.write_chunk(b"fills the window").await.unwrap();
+
+    // This write parks: the window is full and nobody is reading. The reap runs
+    // on the next `Open`, and awaiting the parked write is what waits for it.
+    let parked = tokio::spawn(async move { stalled.write_chunk(b"parks").await });
+    let _sweep = client
+        .open_stream(&destination, StreamDescriptor::default())
+        .await
+        .unwrap();
+
+    let error = tokio::time::timeout(Duration::from_secs(5), parked)
+        .await
+        .expect("the reaper must wake a parked write, not leave it to time out")
+        .unwrap()
+        .unwrap_err();
+    assert_ne!(
+        error.wire_name(),
+        "ai.tinyhumans.tinybus.Error.Timeout",
+        "the write should fail because the stream was reaped, not on its deadline: {error}"
+    );
+}
