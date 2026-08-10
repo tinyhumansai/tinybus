@@ -471,7 +471,7 @@ async fn root_catalogs_and_awaited_publishing_keep_the_same_wire_shape() {
     );
     assert_eq!(root_bus.path_for("cron").unwrap().as_str(), "/cron");
     assert_eq!(root_bus.config().root, root_config.root);
-    assert_eq!(root_bus.connection().unique_name().as_str(), ":1.0");
+    assert!(root_bus.connection().unique_name().is_none());
 }
 
 #[test]
