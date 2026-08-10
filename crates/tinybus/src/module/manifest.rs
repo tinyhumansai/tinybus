@@ -185,8 +185,15 @@ mod tests {
                 optional: false,
                 reason: String::new(),
             }],
-            environment: vec![EnvSpec { name: "TOKEN".to_string(), required: true, description: String::new() }],
-            capabilities: vec![Capability { name: "network".to_string(), description: String::new() }],
+            environment: vec![EnvSpec {
+                name: "TOKEN".to_string(),
+                required: true,
+                description: String::new(),
+            }],
+            capabilities: vec![Capability {
+                name: "network".to_string(),
+                description: String::new(),
+            }],
             lazy_init: false,
             worker_threads: 1,
             on_panic: PanicPolicy::Detach,
@@ -199,7 +206,10 @@ mod tests {
         let json = serde_json::to_value(&value).unwrap();
         assert!(json["module"].get("description").is_none());
         assert!(json["module"].get("homepage").is_none());
-        assert_eq!(serde_json::from_value::<ModuleManifest>(json).unwrap(), value);
+        assert_eq!(
+            serde_json::from_value::<ModuleManifest>(json).unwrap(),
+            value
+        );
     }
 
     #[test]
@@ -209,7 +219,8 @@ mod tests {
             "module": { "name": "example", "version": "1.0.0" },
             "bus_name": "ai.tinyhumans.Example",
             "object_path": "/ai/tinyhumans/Example"
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(manifest.provides.is_empty());
         assert!(manifest.requires.is_empty());
         assert_eq!(manifest.worker_threads, 1);
@@ -220,7 +231,15 @@ mod tests {
     fn peer_manifest_and_interface_lookup_follow_the_declaration() {
         let manifest = manifest();
         assert_eq!(manifest.peer_manifest().name, "example");
-        assert!(manifest.provided(&InterfaceName::new("ai.tinyhumans.Example").unwrap()).is_some());
-        assert!(manifest.provided(&InterfaceName::new("ai.tinyhumans.Missing").unwrap()).is_none());
+        assert!(
+            manifest
+                .provided(&InterfaceName::new("ai.tinyhumans.Example").unwrap())
+                .is_some()
+        );
+        assert!(
+            manifest
+                .provided(&InterfaceName::new("ai.tinyhumans.Missing").unwrap())
+                .is_none()
+        );
     }
 }
