@@ -922,6 +922,7 @@ fn an_allowlist_with_a_mismatched_hash_refuses_the_file() {
     assert!(error.to_string().contains("hash does not match"), "{error}");
 }
 
+#[cfg(not(windows))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires TINYBUS_TEST_MODULE to point at the built cdylib"]
 async fn a_real_cdylib_loads_and_serves_a_call() {
@@ -1033,6 +1034,7 @@ async fn a_real_cdylib_loads_and_serves_a_call() {
     task.abort();
 }
 
+#[cfg(not(windows))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires TINYBUS_TEST_MODULE to point at the built cdylib"]
 async fn scanning_loading_rescanning_and_shutting_down_a_module_directory_are_consistent() {
@@ -1067,6 +1069,7 @@ async fn scanning_loading_rescanning_and_shutting_down_a_module_directory_are_co
     task.abort();
 }
 
+#[cfg(not(windows))]
 #[tokio::test]
 #[ignore = "requires TINYBUS_TEST_MODULE to point at the built cdylib"]
 async fn duplicate_module_declarations_are_reported_without_attaching_either_copy() {
