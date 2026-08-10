@@ -7,6 +7,7 @@
 use std::ffi::c_void;
 use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 
@@ -79,6 +80,64 @@ impl HostCalls {
 
     fn log(&self, level: u32, message: &[u8]) {
         unsafe { (self.0.log)(self.0.host_ctx, level, message.as_ptr(), message.len()) }
+    }
+}
+
+struct HostSubscriber {
+    host: HostCalls,
+    next_span: AtomicU64,
+}
+
+impl tracing::Subscriber for HostSubscriber {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(self.next_span.fetch_add(1, Ordering::Relaxed))
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        use std::fmt::Write as _;
+
+        let metadata = event.metadata();
+        let mut visitor = LogVisitor(String::new());
+        event.record(&mut visitor);
+        let mut line = String::new();
+        let _ = write!(line, "{} {}", metadata.target(), visitor.0);
+        let level = match *metadata.level() {
+            tracing::Level::ERROR => 1,
+            tracing::Level::WARN => 2,
+            tracing::Level::INFO => 3,
+            tracing::Level::DEBUG => 4,
+            tracing::Level::TRACE => 5,
+        };
+        self.host.log(level, line.as_bytes());
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+struct LogVisitor(String);
+
+impl tracing::field::Visit for LogVisitor {
+    fn record_debug(
+        &mut self,
+        field: &tracing::field::Field,
+        value: &dyn std::fmt::Debug,
+    ) {
+        use std::fmt::Write as _;
+
+        if !self.0.is_empty() {
+            self.0.push(' ');
+        }
+        let _ = write!(self.0, "{}={value:?}", field.name());
     }
 }
 
@@ -191,6 +250,11 @@ where
         if host.0.size < size_of::<TbHostVtable>() as u32 {
             return TB_BAD_ARGUMENT;
         }
+
+        let _ = tracing::subscriber::set_global_default(HostSubscriber {
+            host,
+            next_span: AtomicU64::new(1),
+        });
 
         let panic_host = host;
         std::panic::set_hook(Box::new(move |panic| {
