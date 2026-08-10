@@ -33,11 +33,6 @@ pub(crate) fn resolve(
         }
     }
 
-    let declared = pending
-        .iter()
-        .flat_map(|index| manifests[*index].provides.iter())
-        .map(|provided| provided.version.interface.to_string())
-        .collect::<HashSet<_>>();
     let mut available = initially_available.clone();
     let mut order = Vec::new();
     while !pending.is_empty() {
@@ -60,7 +55,26 @@ pub(crate) fn resolve(
             continue;
         }
 
-        for index in pending.drain(..) {
+        // Remove genuinely blocked providers first. Their interfaces then stop
+        // masking missing dependencies in consumers behind them; only a fixed
+        // point with no absent provider is a real cycle.
+        let declared = pending
+            .iter()
+            .flat_map(|index| manifests[*index].provides.iter())
+            .map(|provided| provided.version.interface.to_string())
+            .collect::<HashSet<_>>();
+        let blocked = pending.iter().position(|index| {
+            manifests[*index]
+                .requires
+                .iter()
+                .filter(|dependency| !dependency.optional)
+                .any(|dependency| {
+                    !available.contains(dependency.interface.interface.as_str())
+                        && !declared.contains(dependency.interface.interface.as_str())
+                })
+        });
+        if let Some(position) = blocked {
+            let index = pending.remove(position);
             let missing = manifests[index]
                 .requires
                 .iter()
@@ -68,18 +82,19 @@ pub(crate) fn resolve(
                 .find(|dependency| {
                     !available.contains(dependency.interface.interface.as_str())
                         && !declared.contains(dependency.interface.interface.as_str())
-                });
+                })
+                .expect("blocked module has a missing dependency");
             unresolved.push((
                 index,
-                if let Some(dependency) = missing {
-                    format!(
-                        "required interface {} has no provider",
-                        dependency.interface.interface
-                    )
-                } else {
-                    "module dependency cycle detected".to_string()
-                },
+                format!(
+                    "required interface {} has no provider",
+                    missing.interface.interface
+                ),
             ));
+            continue;
+        }
+        for index in pending.drain(..) {
+            unresolved.push((index, "module dependency cycle detected".to_string()));
         }
     }
     Resolution { order, unresolved }
@@ -195,6 +210,30 @@ mod tests {
                 .unresolved
                 .iter()
                 .all(|(_, reason)| reason == "module dependency cycle detected")
+        );
+    }
+
+    #[test]
+    fn a_module_blocked_behind_an_unresolved_provider_is_not_reported_as_a_cycle() {
+        let manifests = [
+            module(
+                "Consumer",
+                &[],
+                &[("ai.tinyhumans.module.Provider", false)],
+            ),
+            module(
+                "Provider",
+                &["ai.tinyhumans.module.Provider"],
+                &[("ai.tinyhumans.module.Missing", false)],
+            ),
+        ];
+        let result = resolve(&manifests, &HashSet::new());
+        assert!(result.order.is_empty());
+        assert!(
+            result
+                .unresolved
+                .iter()
+                .all(|(_, reason)| reason.contains("has no provider"))
         );
     }
 
