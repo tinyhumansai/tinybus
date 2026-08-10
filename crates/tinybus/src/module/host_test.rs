@@ -840,7 +840,8 @@ async fn a_real_cdylib_loads_and_serves_a_call() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires TINYBUS_TEST_MODULE to point at the built cdylib"]
 async fn scanning_loading_rescanning_and_shutting_down_a_module_directory_are_consistent() {
-    let source = PathBuf::from(std::env::var_os("TINYBUS_TEST_MODULE").expect("TINYBUS_TEST_MODULE"));
+    let source =
+        PathBuf::from(std::env::var_os("TINYBUS_TEST_MODULE").expect("TINYBUS_TEST_MODULE"));
     let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
     let file_name = source.file_name().expect("module filename");
     let module = directory.path().join(file_name);
