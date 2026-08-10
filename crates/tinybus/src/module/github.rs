@@ -78,8 +78,13 @@ pub(crate) fn acquire(
         ));
     }
     extract(asset_name, &archive_path, temp.path())?;
-    let module = find_module(temp.path())?;
+    let module = canonical_module(find_module(temp.path())?)?;
     Ok((temp, module))
+}
+
+fn canonical_module(path: PathBuf) -> Result<PathBuf> {
+    std::fs::canonicalize(path)
+        .map_err(|_| refused("release module path could not be canonicalized"))
 }
 
 fn parse_release_url(url: &str) -> Result<(&str, &str, &str)> {
@@ -271,5 +276,21 @@ mod tests {
             parse_checksums("checksum.json", json.as_bytes()).unwrap()["module.tar.gz"],
             "b".repeat(64)
         );
+    }
+
+    #[test]
+    fn module_paths_are_canonicalized_before_admission() {
+        let directory = tempfile::tempdir().unwrap();
+        let module = directory.path().join(if cfg!(windows) {
+            "module.dll"
+        } else if cfg!(target_os = "macos") {
+            "module.dylib"
+        } else {
+            "module.so"
+        });
+        std::fs::write(&module, b"module").unwrap();
+
+        let canonical = canonical_module(module.clone()).unwrap();
+        assert_eq!(canonical, std::fs::canonicalize(module).unwrap());
     }
 }

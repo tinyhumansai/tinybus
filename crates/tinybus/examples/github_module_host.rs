@@ -4,7 +4,8 @@ use std::env;
 
 use tinybus::{broker::Broker, module::ModuleHost};
 
-fn main() -> tinybus::Result<()> {
+#[tokio::main]
+async fn main() -> tinybus::Result<()> {
     let mut args = env::args().skip(1);
     let release_url = args.next().ok_or_else(|| {
         tinybus::Error::failed(
