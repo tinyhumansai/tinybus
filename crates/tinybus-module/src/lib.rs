@@ -177,17 +177,25 @@ impl tracing::field::Visit for LogVisitor {
 struct ModuleTransport {
     host: HostCalls,
     inbound: Mutex<mpsc::Receiver<Vec<u8>>>,
+    detach_on_panic: bool,
 }
 
 #[async_trait]
 impl Transport for ModuleTransport {
     async fn send(&self, message: Message) -> Result<()> {
+        let panicked = message.header.error_name.as_deref()
+            == Some("ai.tinyhumans.tinybus.Error.ModulePanicked");
         let bytes = serde_json::to_vec(&message)?;
         if bytes.len() > MAX_FRAME_LEN {
             return Err(Error::protocol("module frame exceeds the size cap"));
         }
         match self.host.send(&bytes) {
-            TB_OK => Ok(()),
+            TB_OK => {
+                if panicked && self.detach_on_panic {
+                    self.host.fault();
+                }
+                Ok(())
+            }
             TB_BACKPRESSURE => Err(Error::Backpressure),
             TB_CLOSED => Err(Error::ConnectionClosed),
             _ => Err(Error::transport("module host refused a frame")),
@@ -269,6 +277,7 @@ pub unsafe fn start_module<F, Fut>(
     host: *const TbHostVtable,
     out: *mut TbModuleVtable,
     worker_threads: usize,
+    detach_on_panic: bool,
     setup: F,
 ) -> i32
 where
@@ -290,6 +299,8 @@ where
         });
 
         let panic_host = host;
+        let panic_location = std::sync::Arc::new(StdMutex::new(None::<String>));
+        let hook_location = panic_location.clone();
         std::panic::set_hook(Box::new(move |panic| {
             let location = panic.location().map_or_else(
                 || "module panicked at an unknown location".to_string(),
@@ -308,8 +319,8 @@ where
             );
             // The payload is intentionally neither formatted nor forwarded:
             // it may contain arguments, credentials, or recovery material.
+            *hook_location.lock().expect("panic location lock") = Some(location.clone());
             panic_host.log(1, location.as_bytes());
-            panic_host.fault();
         }));
 
         let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -324,11 +335,25 @@ where
         let transport = Box::new(ModuleTransport {
             host,
             inbound: Mutex::new(inbound_rx),
+            detach_on_panic,
         });
 
         runtime.spawn(async move {
             let outcome = match Connection::connect(transport).await {
-                Ok(connection) => setup(connection).await,
+                Ok(connection) => {
+                    connection.__set_panic_handler(std::sync::Arc::new(move || {
+                        let location = panic_location
+                            .lock()
+                            .expect("panic location lock")
+                            .take()
+                            .unwrap_or_else(|| "an unknown location".to_string());
+                        Error::MethodFailed {
+                            name: "ai.tinyhumans.tinybus.Error.ModulePanicked".to_string(),
+                            message: format!("a module method panicked at {location}"),
+                        }
+                    }));
+                    setup(connection).await
+                }
                 Err(error) => Err(error),
             };
             if let Err(error) = outcome {
@@ -364,6 +389,7 @@ pub unsafe fn start_module_with_config<C, F, Fut>(
     host: *const TbHostVtable,
     out: *mut TbModuleVtable,
     worker_threads: usize,
+    detach_on_panic: bool,
     setup: F,
 ) -> i32
 where
@@ -395,9 +421,13 @@ where
         Err(_) => return TB_PANICKED,
     };
     unsafe {
-        start_module(host, out, worker_threads, move |connection| {
-            setup(connection, config)
-        })
+        start_module(
+            host,
+            out,
+            worker_threads,
+            detach_on_panic,
+            move |connection| setup(connection, config),
+        )
     }
 }
 
@@ -447,6 +477,7 @@ macro_rules! module_export {
                     host,
                     out,
                     $threads,
+                    true,
                     $setup,
                 )
             }
@@ -495,7 +526,7 @@ macro_rules! module_export {
             host: *const ::tinybus::module::abi::TbHostVtable,
             out: *mut ::tinybus::module::abi::TbModuleVtable,
         ) -> i32 {
-            unsafe { $crate::start_module(host, out, $threads, $setup) }
+            unsafe { $crate::start_module(host, out, $threads, true, $setup) }
         }
     };
 }
