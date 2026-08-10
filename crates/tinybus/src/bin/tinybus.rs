@@ -450,6 +450,7 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
+    use tinybus::module::ModuleHost;
     use tinybus::name::{BusName, InterfaceName, MemberName, ObjectPath};
     use tinybus::service::Interface;
 
@@ -489,6 +490,16 @@ mod tests {
             .await
             .unwrap();
         (dir, address, service)
+    }
+
+    async fn broker_with_module_host() -> (tempfile::TempDir, PathBuf, ModuleHost) {
+        let dir = tempfile::tempdir().unwrap();
+        let address = dir.path().join("bus");
+        let listener = UnixListenerAdapter::bind(&address).await.unwrap();
+        let broker = Broker::new();
+        let host = ModuleHost::new(broker.clone());
+        broker.spawn(listener);
+        (dir, address, host)
     }
 
     #[test]
