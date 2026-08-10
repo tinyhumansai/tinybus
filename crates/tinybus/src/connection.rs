@@ -283,6 +283,89 @@ impl Connection {
         Ok(serde_json::from_value(value)?)
     }
 
+    /// Every module known to the embedded host.
+    #[cfg(feature = "modules")]
+    pub async fn list_modules(&self) -> Result<Vec<crate::module::ModuleInfo>> {
+        let value = self.call_bus("ListModules", serde_json::json!([])).await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Inspect one module by stable module name.
+    #[cfg(feature = "modules")]
+    pub async fn module(&self, name: impl AsRef<str>) -> Result<Option<crate::module::ModuleInfo>> {
+        let value = self
+            .call_bus("GetModule", serde_json::json!([name.as_ref()]))
+            .await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Read one module's declared manifest without initializing it.
+    #[cfg(feature = "modules")]
+    pub async fn module_manifest(
+        &self,
+        name: impl AsRef<str>,
+    ) -> Result<Option<crate::module::manifest::ModuleManifest>> {
+        let value = self
+            .call_bus("GetModuleManifest", serde_json::json!([name.as_ref()]))
+            .await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Dynamically install one module, passing JSON setup configuration.
+    #[cfg(feature = "modules")]
+    pub async fn load_module(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        config: serde_json::Value,
+    ) -> Result<crate::module::ModuleInfo> {
+        let value = self
+            .call_bus(
+                "LoadModule",
+                serde_json::json!([path.as_ref().to_string_lossy(), config]),
+            )
+            .await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Stop one module. Its library remains mapped until process exit.
+    #[cfg(feature = "modules")]
+    pub async fn stop_module(
+        &self,
+        name: impl AsRef<str>,
+        deadline: Duration,
+    ) -> Result<crate::module::ModuleInfo> {
+        let value = self
+            .call_bus(
+                "StopModule",
+                serde_json::json!([name.as_ref(), deadline.as_millis() as u64]),
+            )
+            .await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Enable or disable a known module for subsequent scans.
+    #[cfg(feature = "modules")]
+    pub async fn enable_module(
+        &self,
+        name: impl AsRef<str>,
+        enabled: bool,
+    ) -> Result<crate::module::ModuleInfo> {
+        let value = self
+            .call_bus(
+                "EnableModule",
+                serde_json::json!([name.as_ref(), enabled]),
+            )
+            .await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Rescan the host's configured module directories.
+    #[cfg(feature = "modules")]
+    pub async fn rescan_modules(&self) -> Result<Vec<crate::module::ModuleInfo>> {
+        let value = self.call_bus("RescanModules", serde_json::json!([])).await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
     /// Check whether this peer can call `interface` on `destination`.
     ///
     /// `local` is this peer's own manifest. Returns the verdict rather than an
