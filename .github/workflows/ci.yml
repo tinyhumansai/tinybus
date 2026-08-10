@@ -46,6 +46,21 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  coverage:
+    name: Per-file coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Enforce 90% line coverage per source file
+        run: cargo llvm-cov --workspace --all-features --fail-under-file-lines 90
+
   # The bus is meant to be embeddable on every platform OpenHuman ships on. The
   # socket adapter remains Unix-only, while the in-process module transport
   # and dynamic loader are portable and run on both non-Linux targets.
