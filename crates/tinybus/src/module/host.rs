@@ -967,8 +967,10 @@ mod tests {
         );
         let listed = host.list();
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].state, ModuleState::Rejected);
-        assert!(listed[0].reason.is_some());
+        assert!(matches!(
+            listed[0].state,
+            ModuleState::Rejected { ref reason } if !reason.is_empty()
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
