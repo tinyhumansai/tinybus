@@ -3,6 +3,10 @@
 use std::process::Command;
 
 fn main() {
+    // `cargo llvm-cov` enables this cfg while collecting coverage. The port
+    // traits only declare contracts, so their abstract methods have no
+    // executable coverage to measure.
+    println!("cargo::rustc-check-cfg=cfg(coverage)");
     println!("cargo::rerun-if-env-changed=TARGET");
     let target = std::env::var("TARGET").expect("Cargo always sets TARGET");
     println!("cargo::rustc-env=TINYBUS_TARGET={target}");
