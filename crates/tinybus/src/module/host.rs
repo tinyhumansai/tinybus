@@ -838,10 +838,67 @@ fn check_file(path: &Path) -> Result<()> {
             "artifact is not a regular file",
         ));
     }
+    if metadata.len() > 512 * 1024 * 1024 {
+        return Err(Error::module_refused(
+            path,
+            "artifact exceeds the 512 MiB size cap",
+        ));
+    }
     if !has_library_extension(path) {
         return Err(Error::module_refused(
             path,
             "artifact extension is not loadable",
+        ));
+    }
+    check_allowlist(path)
+}
+
+fn check_allowlist(path: &Path) -> Result<()> {
+    let Some(directory) = path.parent() else {
+        return Ok(());
+    };
+    let allowlist = directory.join("modules.toml");
+    if !allowlist.exists() {
+        return Ok(());
+    }
+    let source = std::fs::read_to_string(&allowlist)
+        .map_err(|_| Error::module_refused(path, "module allowlist is unreadable"))?;
+    let file_name = path.file_name().and_then(|value| value.to_str()).unwrap_or("");
+    let file_stem = path.file_stem().and_then(|value| value.to_str()).unwrap_or("");
+    let expected = source.lines().find_map(|line| {
+        let line = line.split('#').next()?.trim();
+        if line.is_empty() || line.starts_with('[') {
+            return None;
+        }
+        let (key, value) = line.split_once('=')?;
+        let key = key.trim().trim_matches(['"', '\'']);
+        (key == file_name || key == file_stem).then(|| {
+            value
+                .trim()
+                .trim_matches(['"', '\''])
+                .to_ascii_lowercase()
+        })
+    });
+    let Some(expected) = expected else {
+        return Err(Error::module_refused(
+            path,
+            "artifact is absent from the module allowlist",
+        ));
+    };
+    if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(Error::module_refused(
+            path,
+            "module allowlist contains an invalid hash",
+        ));
+    }
+    let file = std::fs::File::open(path)
+        .map_err(|_| Error::module_refused(path, "artifact is unreadable"))?;
+    let actual = crate::module::hash::file_hex(file)
+        .map_err(|_| Error::module_refused(path, "artifact hash could not be read"))?;
+    if actual != expected {
+        return Err(Error::module_refused(
+            path,
+            "artifact hash does not match the module allowlist",
         ));
     }
     Ok(())
@@ -866,25 +923,35 @@ fn check_directory(path: &Path) -> Result<()> {
         fn getuid() -> u32;
     }
 
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|_| Error::module_refused(path, "module directory is unavailable"))?;
-    if !metadata.file_type().is_dir() {
-        return Err(Error::module_refused(
-            path,
-            "module search path is not a directory",
-        ));
-    }
-    if metadata.uid() != unsafe { getuid() } {
-        return Err(Error::module_refused(
-            path,
-            "module directory is owned by another user",
-        ));
-    }
-    if metadata.mode() & 0o022 != 0 {
-        return Err(Error::module_refused(
-            path,
-            "module directory is writable by another user",
-        ));
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|_| Error::module_refused(path, "module directory is unavailable"))?
+            .join(path)
+    };
+    let uid = unsafe { getuid() };
+    for component in absolute.ancestors() {
+        let metadata = std::fs::symlink_metadata(component)
+            .map_err(|_| Error::module_refused(path, "module directory is unavailable"))?;
+        if !metadata.file_type().is_dir() {
+            return Err(Error::module_refused(
+                path,
+                "module search path contains a non-directory component",
+            ));
+        }
+        if metadata.uid() != uid && metadata.uid() != 0 {
+            return Err(Error::module_refused(
+                path,
+                "module directory is owned by another user",
+            ));
+        }
+        if metadata.mode() & 0o022 != 0 {
+            return Err(Error::module_refused(
+                path,
+                "module directory is writable by another user",
+            ));
+        }
     }
     Ok(())
 }
