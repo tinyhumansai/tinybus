@@ -775,14 +775,16 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(run_modules(
-            &address,
-            timeout,
-            ModulesCommand::Disable {
-                name: "tinybus".into(),
-            },
-        )
-        .await
-        .is_err());
+        assert!(
+            run_modules(
+                &address,
+                timeout,
+                ModulesCommand::Disable {
+                    name: "tinybus".into(),
+                },
+            )
+            .await
+            .is_err()
+        );
     }
 }
