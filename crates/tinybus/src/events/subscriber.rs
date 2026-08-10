@@ -226,11 +226,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handlers_and_closures_can_be_called_through_the_trait() {
+        Handler.handle(&TestEvent).await;
+        let closure = FnSubscriber {
+            name: "closure".to_string(),
+            handler: |_| async {},
+            _event: std::marker::PhantomData::<fn() -> TestEvent>,
+        };
+        assert_eq!(closure.name(), "closure");
+        closure.handle(&TestEvent).await;
+    }
+
+    #[tokio::test]
     async fn a_handle_exposes_its_name_and_cancels_its_task() {
         let task = tokio::spawn(std::future::pending::<()>());
         let handle = SubscriptionHandle::new("test::pending".to_string(), task);
         assert_eq!(handle.name(), "test::pending");
         handle.cancel();
+    }
+
+    #[tokio::test]
+    async fn forgetting_a_completed_handle_leaves_its_task_alone() {
+        let task = tokio::spawn(async {});
+        tokio::task::yield_now().await;
+        SubscriptionHandle::new("test::permanent".to_string(), task).forget();
     }
 
     #[tokio::test]
@@ -241,6 +260,25 @@ mod tests {
         let handle = spawn(receiver, config, Arc::new(Handler));
         assert_eq!(handle.name(), "subscriber::test");
         tokio::task::yield_now().await;
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn malformed_and_lagged_messages_do_not_end_the_dispatch_loop() {
+        let (sender, receiver) = broadcast::channel(1);
+        let config = EventBusConfig::new("/events", "ai.tinyhumans.Events").unwrap();
+        let message = Message::signal(
+            crate::ObjectPath::new("/events/test").unwrap(),
+            crate::InterfaceName::new("ai.tinyhumans.Other").unwrap(),
+            crate::MemberName::new("Published").unwrap(),
+            serde_json::json!([TestEvent]),
+        );
+        sender.send(message.clone()).unwrap();
+        sender.send(message).unwrap();
+        let handle = spawn(receiver, config, Arc::new(Handler));
+        tokio::task::yield_now().await;
+        assert_eq!(handle.name(), "subscriber::test");
+        drop(sender);
         drop(handle);
     }
 }
