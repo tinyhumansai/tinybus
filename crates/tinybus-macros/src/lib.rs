@@ -319,13 +319,19 @@ mod tests {
             "impl Example { async fn missing_result(&self) {} }",
             "impl Example { async fn destructure(&self, (a, b): (u32, u32)) -> tinybus::Result<()> { Ok(()) } }",
         ] {
-            assert!(expand(name.clone(), implementation(source)).is_err(), "{source}");
+            assert!(
+                expand(name.clone(), implementation(source)).is_err(),
+                "{source}"
+            );
         }
     }
 
     #[test]
     fn attributes_and_interface_names_are_validated() {
-        assert_eq!(interface_name(&args("name = \"ai.tinyhumans.Example\"")), "ai.tinyhumans.Example");
+        assert_eq!(
+            interface_name(&args("name = \"ai.tinyhumans.Example\"")),
+            "ai.tinyhumans.Example"
+        );
         assert!(interface_name(&args("other = \"value\"")).is_err());
 
         let method = match &implementation(
