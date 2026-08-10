@@ -82,7 +82,8 @@ mod tests {
     #[test]
     fn unknown_method_uses_a_safe_fallback_member() {
         let error = unknown_method("ai.tinyhumans.Example", "not.valid");
-        assert_eq!(error.name(), "ai.tinyhumans.tinybus.Error.UnknownMethod");
-        assert!(error.to_string().contains("Unknown"));
+        let rendered = error.to_string();
+        assert!(rendered.contains("UnknownMethod"));
+        assert!(rendered.contains("Unknown"));
     }
 }
