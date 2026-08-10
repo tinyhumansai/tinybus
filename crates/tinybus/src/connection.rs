@@ -809,7 +809,8 @@ async fn dispatch(inner: &Inner, header: &Header, body: Value) -> Result<Value> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::memory::MemoryTransport;
+    use crate::broker::Broker;
+    use crate::transport::memory::{MemoryBus, MemoryTransport};
     use async_trait::async_trait;
 
     /// A service that answers `Echo` and fails `Boom`.
@@ -1014,5 +1015,65 @@ mod tests {
         )
         .unwrap();
         assert_eq!(MatchRule::parse(&rule_to_wire(&rule)).unwrap(), rule);
+    }
+
+    #[tokio::test]
+    async fn broker_introspection_and_name_lifecycle_use_the_typed_helpers() {
+        let transport = MemoryBus::new();
+        Broker::new().spawn(transport.clone());
+        let connection = Connection::connect(transport.connect().await.unwrap())
+            .await
+            .unwrap();
+        let unique = connection.unique_name().unwrap();
+
+        assert!(connection.list_names().await.unwrap().contains(&unique));
+        assert_eq!(connection.name_owner(&unique).await.unwrap(), Some(unique.clone()));
+        connection.request_name("ai.tinyhumans.TestService").await.unwrap();
+        assert_eq!(
+            connection
+                .name_owner("ai.tinyhumans.TestService")
+                .await
+                .unwrap(),
+            Some(unique.clone())
+        );
+        connection.release_name("ai.tinyhumans.TestService").await.unwrap();
+        assert!(connection
+            .name_owner("ai.tinyhumans.TestService")
+            .await
+            .unwrap()
+            .is_none());
+
+        let manifest = PeerManifest::new("connection-test");
+        connection.announce(&manifest).await.unwrap();
+        assert_eq!(connection.manifest_of(&unique).await.unwrap(), Some(manifest));
+        assert_eq!(connection.peers().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn module_management_helpers_forward_their_requests_to_the_broker() {
+        let transport = MemoryBus::new();
+        Broker::new().spawn(transport.clone());
+        let connection = Connection::connect(transport.connect().await.unwrap())
+            .await
+            .unwrap();
+
+        assert!(connection.list_modules().await.unwrap().is_empty());
+        assert!(connection.module("missing").await.unwrap().is_none());
+        assert!(connection.module_manifest("missing").await.unwrap().is_none());
+        assert!(connection.rescan_modules().await.unwrap().is_empty());
+        assert!(connection
+            .scan_modules([std::path::Path::new("/definitely/not/a/module")], true)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(connection
+            .load_module("/definitely/not/a/module", serde_json::json!({}))
+            .await
+            .is_err());
+        assert!(connection
+            .stop_module("missing", Duration::from_millis(1))
+            .await
+            .is_err());
+        assert!(connection.enable_module("missing", true).await.is_err());
     }
 }
