@@ -47,21 +47,23 @@ Deliberately **not** on this list: `tinyagents`, `tinycortex`, `tinyflows`,
 crates. Moving them behind a bus would add latency and a serialisation boundary
 to the hot path and remove nothing.
 
-## M3 — activation
+## M3 — trusted in-process modules
 
-Right now a service must already be running. Activation makes the broker start
-one on demand: a call to a name nobody owns consults a service file, launches
-the process, waits for it to claim the name, and then delivers the call.
+OpenHuman may embed the broker and load selected integrations as `cdylib`
+modules. Each module is an ordinary peer connected at the `Transport` seam,
+with its own runtime and bounded queues. The ABI gate rejects incompatible
+artifacts before calling their initialization entrypoint.
 
-This is what turns "the integration is not installed" into a non-error for the
-common case, and it is what makes lazily-paid dependencies real — an
-integration that is never used is a process that never starts.
+This is deployment convenience, not process isolation. Loading a library runs
+arbitrary code with the host's privileges and puts it inside the host's memory
+and crash boundary. Integrations that hold especially sensitive material or
+need fault containment remain separate processes.
 
-- [ ] Service files: name, exec line, environment, timeout
-- [ ] Launch, wait for `RequestName`, deliver the queued call
-- [ ] Refuse to relaunch a service that is crash-looping, with a clear error
-      rather than a fork bomb
-- [ ] `tinybus list --activatable`
+- [x] Versioned, C-shaped descriptor and manifest ABI
+- [x] Module-side runtime and export macro
+- [x] Host transport bridge, admission gate, dependency ordering and loader
+- [x] Linux, macOS and Windows loader implementations
+- [x] Bus and CLI module inspection/control surface
 
 ## M4 — the security boundary
 
@@ -95,6 +97,14 @@ sender is responsible for the file's lifetime.
       something other than Rust
 - [ ] A TypeScript client, because some integrations genuinely want the Node
       ecosystem and shelling out to it is worse than speaking the protocol
+
+## M7 — external service activation
+
+The trusted-module loader is not a replacement for activating isolated service
+processes. A later milestone must define service-file discovery, process
+launching, delivery of calls queued during startup, crash-loop prevention, and
+how activatable names appear in inspection APIs before bus-driven activation is
+safe to claim.
 
 ## Not planned
 

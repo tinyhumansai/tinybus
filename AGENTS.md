@@ -107,3 +107,10 @@ discussion in the pull request:
   best-effort signal delivery, and an accept loop that survives a bad client are
   all this invariant. Any change that lets one peer's slowness reach another's
   latency is a bug, not a tuning question.
+- **In-process modules are inside the trust boundary, not outside it.** The
+  misbehaving-peer invariant applies to peers reached across a real transport
+  boundary. A module loaded with `dlopen` shares the host address space and is
+  trusted exactly as much as the host's own code. Bounded queues, deadlines and
+  caught panics bound misbehaviour; they cannot contain a segfault, abort, heap
+  corruption, OOM, or deliberate memory access. An integration whose crash or
+  compromise must not reach the kernel belongs in a separate process.

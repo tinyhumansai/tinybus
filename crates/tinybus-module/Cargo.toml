@@ -1,0 +1,15 @@
+[package]
+name = "tinybus-module"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Module-side runtime and export macro for trusted tinybus cdylibs."
+
+[dependencies]
+async-trait.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+tinybus.workspace = true
+tokio.workspace = true
+tracing.workspace = true

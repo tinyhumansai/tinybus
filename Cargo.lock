@@ -471,6 +471,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tinybus-macros",
+ "tinybus-module",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -483,6 +484,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "tinybus-module"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tinybus",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

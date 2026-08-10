@@ -23,8 +23,11 @@
 //! remote work — tinybus cannot — it stops waiting and frees the caller.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -77,6 +80,7 @@ struct Inner {
     /// the sender on a locally looped-back signal without an await.
     unique_name: std::sync::RwLock<Option<BusName>>,
     signals: broadcast::Sender<Message>,
+    panic_handler: std::sync::RwLock<Option<Arc<dyn Fn() -> Error + Send + Sync>>>,
 }
 
 /// Closes the transport when the last [`Connection`] handle goes away.
@@ -168,6 +172,7 @@ impl Connection {
             objects: RwLock::new(ObjectTree::new()),
             unique_name: std::sync::RwLock::new(None),
             signals,
+            panic_handler: std::sync::RwLock::new(None),
         });
         tokio::spawn(writer_loop(inner.transport.clone(), outbound));
         tokio::spawn(dispatch_loop(inner.clone()));
@@ -280,6 +285,104 @@ impl Connection {
     /// Every peer that has announced, with the names it owns.
     pub async fn peers(&self) -> Result<Vec<PeerRecord>> {
         let value = self.call_bus("ListPeers", serde_json::json!([])).await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Every module known to the embedded host.
+    #[cfg(feature = "modules")]
+    pub async fn list_modules(&self) -> Result<Vec<crate::module::ModuleInfo>> {
+        let value = self.call_bus("ListModules", serde_json::json!([])).await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Inspect one module by stable module name.
+    #[cfg(feature = "modules")]
+    pub async fn module(&self, name: impl AsRef<str>) -> Result<Option<crate::module::ModuleInfo>> {
+        let value = self
+            .call_bus("GetModule", serde_json::json!([name.as_ref()]))
+            .await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Read one module's declared manifest without initializing it.
+    #[cfg(feature = "modules")]
+    pub async fn module_manifest(
+        &self,
+        name: impl AsRef<str>,
+    ) -> Result<Option<crate::module::manifest::ModuleManifest>> {
+        let value = self
+            .call_bus("GetModuleManifest", serde_json::json!([name.as_ref()]))
+            .await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Dynamically install one module, passing JSON setup configuration.
+    #[cfg(feature = "modules")]
+    pub async fn load_module(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        config: serde_json::Value,
+    ) -> Result<crate::module::ModuleInfo> {
+        let value = self
+            .call_bus(
+                "LoadModule",
+                serde_json::json!([path.as_ref().to_string_lossy(), config]),
+            )
+            .await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Stop one module. Its library remains mapped until process exit.
+    #[cfg(feature = "modules")]
+    pub async fn stop_module(
+        &self,
+        name: impl AsRef<str>,
+        deadline: Duration,
+    ) -> Result<crate::module::ModuleInfo> {
+        let value = self
+            .call_bus(
+                "StopModule",
+                serde_json::json!([name.as_ref(), deadline.as_millis() as u64]),
+            )
+            .await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Enable or disable a known module for subsequent scans.
+    #[cfg(feature = "modules")]
+    pub async fn enable_module(
+        &self,
+        name: impl AsRef<str>,
+        enabled: bool,
+    ) -> Result<crate::module::ModuleInfo> {
+        let value = self
+            .call_bus("EnableModule", serde_json::json!([name.as_ref(), enabled]))
+            .await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Rescan the host's configured module directories.
+    #[cfg(feature = "modules")]
+    pub async fn rescan_modules(&self) -> Result<Vec<crate::module::ModuleInfo>> {
+        self.scan_modules(std::iter::empty::<&std::path::Path>(), false)
+            .await
+    }
+
+    /// Scan explicit module directories, optionally without initializing any
+    /// admitted artifact.
+    #[cfg(feature = "modules")]
+    pub async fn scan_modules<P: AsRef<std::path::Path>>(
+        &self,
+        paths: impl IntoIterator<Item = P>,
+        dry_run: bool,
+    ) -> Result<Vec<crate::module::ModuleInfo>> {
+        let paths = paths
+            .into_iter()
+            .map(|path| path.as_ref().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let value = self
+            .call_bus("RescanModules", serde_json::json!([paths, dry_run]))
+            .await?;
         Ok(serde_json::from_value(value)?)
     }
 
@@ -511,6 +614,21 @@ impl Connection {
         self.inner.transport.close().await
     }
 
+    /// Install module-boundary panic conversion for dispatched methods.
+    ///
+    /// Hidden because ordinary process peers intentionally keep the existing
+    /// policy that a panic is fatal to the service. The module SDK uses this to
+    /// turn an unwind into a redacted error reply before applying its manifest
+    /// panic policy.
+    #[doc(hidden)]
+    pub fn __set_panic_handler(&self, handler: Arc<dyn Fn() -> Error + Send + Sync>) {
+        *self
+            .inner
+            .panic_handler
+            .write()
+            .expect("panic handler lock") = Some(handler);
+    }
+
     /// Call a method on the broker's own interface.
     async fn call_bus(&self, member: &str, args: Value) -> Result<Value> {
         let message = Message::method_call(
@@ -629,7 +747,19 @@ async fn dispatch_loop(inner: Arc<Inner>) {
 /// Run one inbound method call and send its reply.
 async fn handle_call(inner: Arc<Inner>, message: Message) {
     let header = message.header.clone();
-    let result = dispatch(&inner, &header, message.body).await;
+    let panic_handler = inner
+        .panic_handler
+        .read()
+        .expect("panic handler lock")
+        .clone();
+    let result = if let Some(panic_handler) = panic_handler {
+        match CatchUnwind::new(dispatch(&inner, &header, message.body)).await {
+            Ok(result) => result,
+            Err(()) => Err(panic_handler()),
+        }
+    } else {
+        dispatch(&inner, &header, message.body).await
+    };
 
     let mut reply = match result {
         Ok(value) => Message::method_return(&header, value),
@@ -638,6 +768,31 @@ async fn handle_call(inner: Arc<Inner>, message: Message) {
     reply.header.serial = inner.serial.fetch_add(1, Ordering::Relaxed);
     if let Err(e) = inner.outbox.send(reply).await {
         tracing::debug!(error = %e, "could not reply; the caller will time out");
+    }
+}
+
+struct CatchUnwind<F> {
+    future: Pin<Box<F>>,
+}
+
+impl<F> CatchUnwind<F> {
+    fn new(future: F) -> Self {
+        Self {
+            future: Box::pin(future),
+        }
+    }
+}
+
+impl<F: Future> Future for CatchUnwind<F> {
+    type Output = std::result::Result<F::Output, ()>;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let future = self.get_mut().future.as_mut();
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| future.poll(context))) {
+            Ok(Poll::Ready(value)) => Poll::Ready(Ok(value)),
+            Ok(Poll::Pending) => Poll::Pending,
+            Err(_) => Poll::Ready(Err(())),
+        }
     }
 }
 
@@ -670,6 +825,7 @@ mod tests {
             vec![
                 MemberName::new("Echo").unwrap(),
                 MemberName::new("Boom").unwrap(),
+                MemberName::new("Panic").unwrap(),
                 MemberName::new("Hang").unwrap(),
             ]
         }
@@ -678,6 +834,7 @@ mod tests {
             match member.as_str() {
                 "Echo" => Ok(args),
                 "Boom" => Err(Error::failed("as requested")),
+                "Panic" => panic!("secret panic payload"),
                 "Hang" => {
                     tokio::time::sleep(Duration::from_secs(3600)).await;
                     Ok(Value::Null)
@@ -730,6 +887,43 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.wire_name(), Error::FAILED);
         assert!(err.to_string().contains("as requested"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_panicking_module_method_becomes_an_error_reply_rather_than_an_abort() {
+        let (client, service) = pair().await;
+        service.__set_panic_handler(Arc::new(|| Error::MethodFailed {
+            name: "ai.tinyhumans.tinybus.Error.ModulePanicked".to_string(),
+            message: "module panicked at fixture.rs:12:3".to_string(),
+        }));
+        let error = client
+            .call_raw(call("Panic", serde_json::json!([])), DEFAULT_TIMEOUT)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.wire_name(),
+            "ai.tinyhumans.tinybus.Error.ModulePanicked"
+        );
+        let reply = client
+            .call_raw(call("Echo", serde_json::json!(["alive"])), DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_eq!(reply, serde_json::json!(["alive"]));
+    }
+
+    #[tokio::test]
+    async fn a_panic_reply_carries_the_location_but_never_the_payload() {
+        let (client, service) = pair().await;
+        service.__set_panic_handler(Arc::new(|| Error::MethodFailed {
+            name: "ai.tinyhumans.tinybus.Error.ModulePanicked".to_string(),
+            message: "module panicked at fixture.rs:12:3".to_string(),
+        }));
+        let error = client
+            .call_raw(call("Panic", serde_json::json!([])), DEFAULT_TIMEOUT)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("fixture.rs:12:3"));
+        assert!(!error.to_string().contains("secret panic payload"));
     }
 
     #[tokio::test]

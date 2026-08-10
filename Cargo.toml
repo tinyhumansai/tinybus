@@ -1,13 +1,12 @@
 [workspace]
-# Two crates, and there is a reason it is not one. `tinybus-macros` is a
+# Three crates, and there is a reason they are not one. `tinybus-macros` is a
 # proc-macro crate, which means it compiles for the *host* even when the bus
 # itself is cross-compiled; keeping it separate is the only way to have
 # `#[interface]` without forcing that split on every downstream target.
-# Integrations themselves are never workspace members — the whole point is that
-# an integration is a separate process (or a separate crate in its own repo)
-# that speaks the wire protocol. Adding an integration here would re-create the
-# dependency blob we are trying to delete from the kernel.
-members = ["crates/tinybus", "crates/tinybus-macros"]
+# `tinybus-module` is the module-side half of the C ABI. It is versioned here in
+# lockstep with the host ABI so the two definitions cannot drift. Integrations
+# themselves remain separate repositories and are never workspace members.
+members = ["crates/tinybus", "crates/tinybus-macros", "crates/tinybus-module"]
 resolver = "3"
 
 [workspace.package]
@@ -17,8 +16,10 @@ license = "GPL-3.0-only"
 repository = "https://github.com/tinyhumansai/tinybus"
 
 [workspace.dependencies]
-tinybus = { path = "crates/tinybus", version = "0.1.0" }
+tinybus = { path = "crates/tinybus", version = "0.1.0", default-features = false }
 tinybus-macros = { path = "crates/tinybus-macros", version = "0.1.0" }
+tinybus-module = { path = "crates/tinybus-module", version = "0.1.0" }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }

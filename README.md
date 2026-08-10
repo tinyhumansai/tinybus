@@ -90,6 +90,11 @@ crates/tinybus/          the bus: protocol, broker, connection, proxy
   src/name/              validated addresses (bus name, path, interface, member)
   src/ports/             the two seams: Transport and Listener
   src/transport/         in-memory (always) and Unix socket (feature `uds`)
+  src/module/            stable module ABI and optional dynamic loader
+  src/events/            bounded in-process domain event fan-out
+  src/global.rs          process-wide one-time bus installation
+  src/native.rs          typed in-process request registry
+  src/version.rs         peer and interface compatibility declarations
   src/router.rs          the routing table and match rules
   src/broker.rs          the daemon
   src/connection.rs      a peer's link: calls out, dispatch in
@@ -97,6 +102,7 @@ crates/tinybus/          the bus: protocol, broker, connection, proxy
   src/service/           the Interface trait and the object tree
   src/bin/tinybus.rs     the CLI
 crates/tinybus-macros/   #[interface]
+crates/tinybus-module/   module-side runtime and export macro
 docs/modules/            one document per module
 ```
 
@@ -107,6 +113,7 @@ docs/modules/            one document per module
 | `uds` | yes | Unix-socket transport — the production one |
 | `macros` | yes | `#[tinybus::interface]` |
 | `cli` | yes | the `tinybus` binary |
+| `modules` | no | trusted in-process `cdylib` discovery and loading |
 
 `--no-default-features` leaves the protocol, the router, the broker and the
 in-memory transport: no sockets, no proc-macro build step, no CLI. That is the
@@ -114,10 +121,12 @@ configuration a slim kernel build embeds.
 
 ## Status
 
-Milestone 1. The core protocol, broker, connection, proxy, macro, Unix
-transport and CLI are implemented and tested. Service activation, file-descriptor
-passing, per-peer authorisation policy and the Windows named-pipe backend are
-not — see `ROADMAP.md`.
+The core protocol, broker, connection, proxy, macro, Unix transport and CLI are
+implemented and tested. Trusted in-process modules support lazy activation
+behind the non-default `modules` feature; read the module trust-boundary notes
+before enabling it. External service-process or bus-driven activation remains
+unimplemented. File-descriptor passing, per-peer authorisation policy and the
+Windows named-pipe backend are also not implemented — see `ROADMAP.md`.
 
 ## Licence
 

@@ -98,16 +98,36 @@ interface `ai.tinyhumans.tinybus.Bus`.
 | `RequestName` | `[name]` | `true`, or an error if taken |
 | `ReleaseName` | `[name]` | `true` |
 | `ListNames` | `[]` | every owned name, unique names included |
+| `Announce` | `[manifest]` | `true`; records this peer's interface versions |
+| `GetManifest` | `[name]` | that peer's manifest, or `null` |
+| `ListPeers` | `[]` | unique names, owned names, and peer manifests |
 | `GetNameOwner` | `[name]` | the owner's unique name, or `null` |
 | `AddMatch` | `[rule]` | `null` |
 | `RemoveMatch` | `[rule]` | `null` |
+| `ListModules` | `[]` | every module known to the embedded host |
+| `GetModule` | `[name]` | module identity, ABI facts and state, or `null` |
+| `GetModuleManifest` | `[name]` | the declared module manifest, or `null` |
+| `LoadModule` | `[path, config?]` | the newly loaded module record; config is JSON |
+| `StopModule` | `[name, deadline_ms]` | the stopped module record |
+| `EnableModule` | `[name, on]` | the updated module record |
+| `RescanModules` | `[]`, `[paths]`, or `[paths, dry_run]` | modules loaded or inspected from configured/explicit search paths; `dry_run` defaults to `false` |
 
 `ai.tinyhumans.tinybus.Bus` is reserved; `RequestName` for it always fails. So
 does `RequestName` for a unique name.
 
-The bus emits one signal, `NameOwnerChanged`, with body
-`[name, old_owner, new_owner]`, either owner being `null`. This is how a peer
-learns a service died without polling it.
+When ownership changes, the bus emits `NameOwnerChanged`, with body
+`[name, old_owner, new_owner]`, either owner being `null`. Unchanged ownership
+emits no signal. This is how a peer learns a service died without polling it.
+
+An embedded module host also exposes the additive module members above. A
+broker built without the `modules` feature returns `UnknownMethod`; a
+feature-enabled broker with no registered host returns `Failed` with "module
+host is not installed". The wire protocol version remains 1 because old peers
+can still parse every message. Module state changes are
+announced as `ModuleStateChanged` with body
+`[module, old_state, new_state, detail]`; `detail` is `null` unless the new
+state has a safe refusal or fault reason.
+Name ownership changes still announce when a module attaches or stops.
 
 ## Match rules
 

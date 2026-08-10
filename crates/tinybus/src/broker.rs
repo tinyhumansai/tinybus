@@ -21,6 +21,8 @@
 //! service pass credentials over the bus without them being logged, cached, or
 //! parsed by a process that has no business seeing them.
 
+#[cfg(feature = "modules")]
+use std::sync::Weak;
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
@@ -43,6 +45,11 @@ pub const PEER_QUEUE_CAPACITY: usize = 256;
 pub struct Broker {
     router: Arc<Mutex<Router>>,
     id: String,
+    // `Weak`, not `Arc`: the module host owns this broker, so a strong
+    // reference back would form a cycle and leak both. Callers tolerate a
+    // failed upgrade by falling back to the ordinary routing error.
+    #[cfg(feature = "modules")]
+    modules: Arc<Mutex<Option<Weak<dyn crate::module::host::ModuleControl>>>>,
 }
 
 impl Broker {
@@ -50,6 +57,8 @@ impl Broker {
     pub fn new() -> Self {
         Self {
             router: Arc::new(Mutex::new(Router::default())),
+            #[cfg(feature = "modules")]
+            modules: Arc::new(Mutex::new(None)),
             // The id changes per broker *process*, so a peer that reconnects
             // can tell "the bus restarted" (every name is gone, re-register)
             // from "my socket blipped" (state is intact).
@@ -60,6 +69,11 @@ impl Broker {
     /// This broker's id, as reported by the bus's `GetId`.
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    #[cfg(feature = "modules")]
+    pub(crate) fn set_module_control(&self, control: Weak<dyn crate::module::host::ModuleControl>) {
+        *self.modules.lock().expect("module control lock") = Some(control);
     }
 
     /// Serve until the listener stops accepting.
@@ -110,6 +124,18 @@ impl Broker {
         unique
     }
 
+    #[cfg(feature = "modules")]
+    pub(crate) fn reserve_module_name(
+        &self,
+        unique: &BusName,
+        name: BusName,
+    ) -> Result<NameChange> {
+        self.router
+            .lock()
+            .expect("router lock")
+            .request_name_for_unique(unique, name)
+    }
+
     /// Route one inbound message from peer `id`.
     async fn route(&self, from: u64, from_name: &BusName, mut message: Message) -> Result<()> {
         message.validate()?;
@@ -147,7 +173,20 @@ impl Broker {
                     .router
                     .lock()
                     .expect("router lock")
-                    .resolve(&destination)?;
+                    .resolve(&destination);
+                #[cfg(feature = "modules")]
+                let target = target.map_err(|error| {
+                    let control = self
+                        .modules
+                        .lock()
+                        .expect("module control lock")
+                        .as_ref()
+                        .and_then(Weak::upgrade);
+                    control
+                        .and_then(|control| control.unavailable_for(&destination))
+                        .unwrap_or(error)
+                });
+                let target = target?;
                 target
                     .send(message)
                     .await
@@ -169,7 +208,9 @@ impl Broker {
             .clone()
             .ok_or_else(|| Error::protocol("bus call has no member"))?;
 
-        let (result, changes) = self.bus_method(from, from_name, &member, message.body);
+        let (result, changes, module_states) = self
+            .bus_method(from, from_name, &member, message.body)
+            .await;
 
         let reply = match result {
             Ok(value) => Message::method_return(&header, value),
@@ -186,20 +227,33 @@ impl Broker {
         let _ = outbox.send(reply).await;
 
         for change in changes {
-            self.announce_name_change(change).await;
+            if change.old_owner != change.new_owner {
+                self.announce_name_change(change).await;
+            }
         }
+        #[cfg(feature = "modules")]
+        for module_state in module_states {
+            self.announce_module_state(module_state).await;
+        }
+        #[cfg(not(feature = "modules"))]
+        let _ = module_states;
         Ok(())
     }
 
-    /// The bus's own interface. Synchronous: it only touches the routing table,
-    /// and holding the lock across an await is exactly what this design avoids.
-    fn bus_method(
+    /// The bus's own interface. Module stop may await a blocking callback; the
+    /// ordinary table still holds no lock across an await.
+    async fn bus_method(
         &self,
         from: u64,
         from_name: &BusName,
         member: &MemberName,
         body: Value,
-    ) -> (Result<Value>, Vec<NameChange>) {
+    ) -> (Result<Value>, Vec<NameChange>, Vec<Value>) {
+        #[cfg(feature = "modules")]
+        if let Some((result, module_states)) = self.module_method(member, body.clone()).await {
+            return (result, Vec::new(), module_states);
+        }
+
         let mut changes = Vec::new();
         let mut router = self.router.lock().expect("router lock");
 
@@ -257,7 +311,158 @@ impl Broker {
             }
         })();
 
-        (result, changes)
+        (result, changes, Vec::new())
+    }
+
+    #[cfg(feature = "modules")]
+    async fn module_method(
+        &self,
+        member: &MemberName,
+        body: Value,
+    ) -> Option<(Result<Value>, Vec<Value>)> {
+        use std::path::PathBuf;
+        use std::time::Duration;
+
+        enum ModuleMember {
+            List,
+            Get,
+            GetManifest,
+            Load,
+            Stop,
+            Enable,
+            Rescan,
+        }
+        let operation = match member.as_str() {
+            "ListModules" => ModuleMember::List,
+            "GetModule" => ModuleMember::Get,
+            "GetModuleManifest" => ModuleMember::GetManifest,
+            "LoadModule" => ModuleMember::Load,
+            "StopModule" => ModuleMember::Stop,
+            "EnableModule" => ModuleMember::Enable,
+            "RescanModules" => ModuleMember::Rescan,
+            _ => return None,
+        };
+        let control = self
+            .modules
+            .lock()
+            .expect("module control lock")
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| Error::failed("module host is not installed"));
+        let control = match control {
+            Ok(control) => control,
+            Err(error) => return Some((Err(error), Vec::new())),
+        };
+        if matches!(operation, ModuleMember::Stop) {
+            let parsed = parse_args::<(String, u64)>(member, body);
+            let result = match parsed {
+                Ok((name, deadline_ms)) => control
+                    .stop(&name, Duration::from_millis(deadline_ms))
+                    .await
+                    .and_then(|info| serde_json::to_value(info).map_err(Error::from)),
+                Err(error) => Err(error),
+            };
+            return Some((result, Vec::new()));
+        }
+
+        let outcome = (|| -> Result<(Value, Vec<Value>)> {
+            match operation {
+                ModuleMember::List => Ok((serde_json::to_value(control.list())?, Vec::new())),
+                ModuleMember::Get => {
+                    let (name,): (String,) = parse_args(member, body)?;
+                    Ok((
+                        serde_json::to_value(
+                            control
+                                .list()
+                                .into_iter()
+                                .find(|module| module.name == name),
+                        )?,
+                        Vec::new(),
+                    ))
+                }
+                ModuleMember::GetManifest => {
+                    let (name,): (String,) = parse_args(member, body)?;
+                    Ok((
+                        serde_json::to_value(
+                            control
+                                .list()
+                                .into_iter()
+                                .find(|module| module.name == name)
+                                .map(|module| module.manifest),
+                        )?,
+                        Vec::new(),
+                    ))
+                }
+                ModuleMember::Load => {
+                    let arguments = body.as_array().ok_or_else(|| {
+                        Error::bad_arguments(member.clone(), "expected a positional array")
+                    })?;
+                    let path: String = arguments
+                        .first()
+                        .cloned()
+                        .ok_or_else(|| Error::bad_arguments(member.clone(), "missing path"))
+                        .and_then(|value| {
+                            serde_json::from_value(value)
+                                .map_err(|error| Error::bad_arguments(member.clone(), error))
+                        })?;
+                    let config = arguments
+                        .get(1)
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({}));
+                    if arguments.len() > 2 {
+                        return Err(Error::bad_arguments(
+                            member.clone(),
+                            "expected path and optional configuration",
+                        ));
+                    }
+                    let (info, transition) = control.load(PathBuf::from(path), config)?;
+                    Ok((
+                        serde_json::to_value(info)?,
+                        module_state_body(transition).into_iter().collect(),
+                    ))
+                }
+                ModuleMember::Stop => Err(Error::failed("module stop dispatch failed")),
+                ModuleMember::Enable => {
+                    let (name, enabled): (String, bool) = parse_args(member, body)?;
+                    let (info, transition) = control.enable(&name, enabled)?;
+                    Ok((
+                        serde_json::to_value(info)?,
+                        module_state_body(transition).into_iter().collect(),
+                    ))
+                }
+                ModuleMember::Rescan => {
+                    let arguments = body.as_array().ok_or_else(|| {
+                        Error::bad_arguments(member.clone(), "expected a positional array")
+                    })?;
+                    let paths = arguments
+                        .first()
+                        .cloned()
+                        .map(serde_json::from_value::<Vec<PathBuf>>)
+                        .transpose()
+                        .map_err(|error| Error::bad_arguments(member.clone(), error))?
+                        .unwrap_or_default();
+                    let dry_run = arguments.get(1).and_then(Value::as_bool).unwrap_or(false);
+                    if arguments.len() > 2 {
+                        return Err(Error::bad_arguments(
+                            member.clone(),
+                            "expected optional paths and dry-run flag",
+                        ));
+                    }
+                    let (infos, transitions) = control.rescan(paths, dry_run)?;
+                    Ok((
+                        serde_json::to_value(infos)?,
+                        transitions
+                            .into_iter()
+                            .filter_map(|transition| module_state_body(Some(transition)))
+                            .collect(),
+                    ))
+                }
+            }
+        })();
+        Some(match outcome {
+            Ok((value, states)) => (Ok(value), states),
+            Err(error) => (Err(error), Vec::new()),
+        })
     }
 
     /// Broadcast `NameOwnerChanged`.
@@ -266,7 +471,20 @@ impl Broker {
     /// signal would be a call timing out thirty seconds later, by which point a
     /// user has been staring at a spinner. Subscribers still have to have asked
     /// for it; the broker does not push it at peers that did not.
-    async fn announce_name_change(&self, change: NameChange) {
+    pub(crate) async fn announce_name_change(&self, change: NameChange) {
+        self.broadcast_bus_signal(
+            "NameOwnerChanged",
+            serde_json::json!([change.name, change.old_owner, change.new_owner]),
+        )
+        .await;
+    }
+
+    #[cfg(feature = "modules")]
+    pub(crate) async fn announce_module_state(&self, body: Value) {
+        self.broadcast_bus_signal("ModuleStateChanged", body).await;
+    }
+
+    async fn broadcast_bus_signal(&self, member: &str, body: Value) {
         let signal = Message {
             header: crate::message::Header {
                 kind: MessageKind::Signal,
@@ -283,14 +501,11 @@ impl Broker {
                     InterfaceName::new(crate::BUS_INTERFACE)
                         .expect("the bus interface constant is valid"),
                 ),
-                member: Some(
-                    MemberName::new("NameOwnerChanged").expect("literal is a valid member"),
-                ),
+                member: Some(MemberName::new(member).expect("literal is a valid member")),
                 error_name: None,
             },
-            body: serde_json::json!([change.name, change.old_owner, change.new_owner]),
+            body,
         };
-
         let targets = self
             .router
             .lock()
@@ -300,6 +515,20 @@ impl Broker {
             let _ = target.try_send(signal.clone());
         }
     }
+}
+
+#[cfg(feature = "modules")]
+fn module_state_body(transition: Option<crate::module::host::ModuleTransition>) -> Option<Value> {
+    use crate::module::host::{state_detail, state_name};
+
+    transition.map(|(module, old, new)| {
+        serde_json::json!([
+            module,
+            state_name(&old),
+            state_name(&new),
+            state_detail(&new)
+        ])
+    })
 }
 
 impl Default for Broker {
@@ -354,6 +583,25 @@ async fn reader_task(broker: Broker, transport: Arc<dyn Transport>, id: u64, nam
     let changes = broker.router.lock().expect("router lock").detach(id);
     for change in changes {
         broker.announce_name_change(change).await;
+    }
+    #[cfg(feature = "modules")]
+    {
+        let control = broker
+            .modules
+            .lock()
+            .expect("module control lock")
+            .as_ref()
+            .and_then(Weak::upgrade);
+        if let Some((module, old, new)) = control.and_then(|control| control.peer_detached(&name)) {
+            broker
+                .announce_module_state(serde_json::json!([
+                    module,
+                    crate::module::host::state_name(&old),
+                    crate::module::host::state_name(&new),
+                    crate::module::host::state_detail(&new)
+                ]))
+                .await;
+        }
     }
 }
 

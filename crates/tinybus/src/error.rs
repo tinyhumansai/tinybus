@@ -178,6 +178,29 @@ pub enum Error {
     #[error("{0} requires the `{1}` feature; rebuild with --features {1}")]
     FeatureDisabled(&'static str, &'static str),
 
+    /// A dynamic module failed a fixed admission rule.
+    ///
+    /// `file` is a basename only and `reason` is selected by the host. Neither
+    /// field may contain a path or attacker-controlled descriptor bytes.
+    #[error("module `{file}` refused: {reason}")]
+    ModuleRefused {
+        /// Sanitized artifact basename.
+        file: String,
+        /// Fixed admission failure phrase.
+        reason: String,
+    },
+
+    /// A known module cannot serve calls in its terminal/current state.
+    #[error("module `{module}` is unavailable ({state}): {detail}")]
+    ModuleUnavailable {
+        /// Stable module identity.
+        module: String,
+        /// Closed lifecycle state name.
+        state: String,
+        /// Safe state detail, never a body or environment value.
+        detail: String,
+    },
+
     /// Filesystem or socket I/O failed.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
@@ -209,6 +232,24 @@ impl Error {
             path: path.into(),
             message: message.to_string(),
         }
+    }
+
+    /// Build a redacted module refusal from an artifact path.
+    pub fn module_refused(path: &std::path::Path, reason: impl Into<String>) -> Self {
+        let file = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(sanitize_untrusted)
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "module".to_string());
+        let reason = reason.into();
+        let reason = reason
+            .split_whitespace()
+            .map(sanitize_untrusted)
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        Self::ModuleRefused { file, reason }
     }
 
     /// Build an [`Error::BadArguments`] from a serde failure, with the
@@ -278,6 +319,8 @@ impl Error {
             Self::InvalidDomain { .. } => "ai.tinyhumans.tinybus.Error.InvalidDomain",
             Self::Timeout { .. } => "ai.tinyhumans.tinybus.Error.Timeout",
             Self::IncompatibleVersion { .. } => "ai.tinyhumans.tinybus.Error.IncompatibleVersion",
+            Self::ModuleRefused { .. } => "ai.tinyhumans.tinybus.Error.ModuleRefused",
+            Self::ModuleUnavailable { .. } => "ai.tinyhumans.tinybus.Error.ModuleUnavailable",
             Self::Path { .. } => "ai.tinyhumans.tinybus.Error.Path",
             Self::FeatureDisabled(_, _) => "ai.tinyhumans.tinybus.Error.FeatureDisabled",
             Self::Json(_) => "ai.tinyhumans.tinybus.Error.Json",
@@ -311,6 +354,15 @@ pub fn redact_values(message: &str) -> String {
         }
     }
     out
+}
+
+/// Keep only log-safe descriptor characters and cap their length.
+pub(crate) fn sanitize_untrusted(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'))
+        .take(32)
+        .collect()
 }
 
 /// The crate-wide result alias.
@@ -374,5 +426,17 @@ mod tests {
             err.to_string(),
             "no peer owns the name `ai.tinyhumans.openhuman.Voice`"
         );
+    }
+
+    #[test]
+    fn module_refusal_sanitizes_an_untrusted_reason() {
+        let error = Error::module_refused(
+            std::path::Path::new("module.so"),
+            "loader exposed /secret/path and spaces",
+        );
+        let Error::ModuleRefused { reason, .. } = error else {
+            panic!("expected module refusal");
+        };
+        assert_eq!(reason, "loader exposed secretpath and spaces");
     }
 }

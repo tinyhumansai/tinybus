@@ -1,8 +1,9 @@
 # Module documentation
 
-One document per module in `crates/tinybus/src/`. Each answers the questions a
-rustdoc page cannot: why the module exists, what it deliberately does not do,
-and which of its behaviours other modules are relying on.
+One design reference per module in `crates/tinybus/src/`: a focused README when
+the rationale exceeds source rustdoc, otherwise the module-level rustdoc itself.
+Each records why the module exists, what it deliberately does not do, and which
+behaviours other modules rely on.
 
 | Module | Document |
 | --- | --- |
@@ -15,6 +16,11 @@ and which of its behaviours other modules are relying on.
 | `connection` | [connection/README.md](connection/README.md) |
 | `proxy` | [proxy/README.md](proxy/README.md) |
 | `service` | [service/README.md](service/README.md) |
+| `events` | source rustdoc (bounded domain-event fan-out) |
+| `global` | source rustdoc (one-time process-wide bus) |
+| `native` | source rustdoc (typed in-process request registry) |
+| `version` | source rustdoc (interface compatibility records) |
+| `module` | [module/README.md](module/README.md) |
 
-See also [protocol.md](protocol.md) for the wire format as a specification
+See also [protocol.md](../protocol.md) for the wire format as a specification
 rather than as Rust.
