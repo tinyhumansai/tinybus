@@ -166,18 +166,6 @@ impl Broker {
                     return self.handle_bus_call(from, from_name, message).await;
                 }
 
-                #[cfg(feature = "modules")]
-                if let Some(error) = self
-                    .modules
-                    .lock()
-                    .expect("module control lock")
-                    .as_ref()
-                    .and_then(Weak::upgrade)
-                    .and_then(|control| control.unavailable_for(&destination))
-                {
-                    return Err(error);
-                }
-
                 let target = self
                     .router
                     .lock()
