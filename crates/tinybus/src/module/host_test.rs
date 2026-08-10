@@ -531,21 +531,20 @@ async fn module_control_tracks_disable_stop_detach_and_unavailable_states() {
 async fn admission_rejects_duplicate_names_bad_initializers_collisions_and_missing_dependencies() {
     let host = ModuleHost::new(Broker::new());
     let descriptor = TbAbiDescriptor::current("clock", "0.1.0");
-    unsafe {
-        host.attach_raw("clock.so", descriptor, manifest(), lazy_echo_init)
-    }
-    .unwrap();
-    assert!(unsafe {
-        host.attach_raw(
-            "again.so",
-            TbAbiDescriptor::current("clock", "0.1.0"),
-            manifest(),
-            lazy_echo_init,
-        )
-    }
-    .unwrap_err()
-    .to_string()
-    .contains("already loaded"));
+    unsafe { host.attach_raw("clock.so", descriptor, manifest(), lazy_echo_init) }.unwrap();
+    assert!(
+        unsafe {
+            host.attach_raw(
+                "again.so",
+                TbAbiDescriptor::current("clock", "0.1.0"),
+                manifest(),
+                lazy_echo_init,
+            )
+        }
+        .unwrap_err()
+        .to_string()
+        .contains("already loaded")
+    );
 
     let failed = unsafe {
         host.attach_raw(
@@ -580,19 +579,22 @@ async fn admission_rejects_duplicate_names_bad_initializers_collisions_and_missi
     assert!(collision.to_string().contains("already owned"));
 
     let mut dependency = named_manifest("dependent", "Dependent");
-    dependency.requires.push(crate::module::manifest::Dependency {
-        interface: crate::version::InterfaceVersion::consumed(
-            "ai.tinyhumans.module.Missing".parse().unwrap(),
-            Version::new(1, 0, 0),
-        ),
-        optional: false,
-        reason: String::new(),
-    });
-    assert!(host
-        .ensure_dependencies(&dependency, Path::new("dependent.so"))
-        .unwrap_err()
-        .to_string()
-        .contains("no provider"));
+    dependency
+        .requires
+        .push(crate::module::manifest::Dependency {
+            interface: crate::version::InterfaceVersion::consumed(
+                "ai.tinyhumans.module.Missing".parse().unwrap(),
+                Version::new(1, 0, 0),
+            ),
+            optional: false,
+            reason: String::new(),
+        });
+    assert!(
+        host.ensure_dependencies(&dependency, Path::new("dependent.so"))
+            .unwrap_err()
+            .to_string()
+            .contains("no provider")
+    );
 }
 
 #[test]
