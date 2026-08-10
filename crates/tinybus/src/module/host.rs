@@ -1052,7 +1052,7 @@ mod tests {
             .await
             .unwrap();
 
-        let panic_error = clock.call::<_, ()>("Panic", ()).await.unwrap_err();
+        let panic_error = clock.call::<()>("Panic", ()).await.unwrap_err();
         let panic_text = panic_error.to_string();
         assert!(panic_text.contains("ModulePanicked"), "{panic_text}");
         assert!(panic_text.contains("module_clock.rs"), "{panic_text}");
