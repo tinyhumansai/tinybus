@@ -895,7 +895,13 @@ impl ModuleControl for ModuleHostInner {
         {
             return None;
         }
-        let old = if module.transport.init_started()
+        let old = if module.transport.is_ready() {
+            if module.transport.inflight() == 0 {
+                ModuleState::Ready
+            } else {
+                ModuleState::Serving
+            }
+        } else if module.transport.init_started()
             && matches!(module.info.state, ModuleState::Resolved)
         {
             ModuleState::Initializing
