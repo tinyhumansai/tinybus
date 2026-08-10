@@ -65,6 +65,14 @@ struct SendModuleVtable(TbModuleVtable);
 unsafe impl Send for SendHostVtable {}
 unsafe impl Send for SendModuleVtable {}
 
+impl SendHostVtable {
+    fn initialize(self, init: crate::module::abi::TbModuleInit) -> (i32, SendModuleVtable) {
+        let mut module = TbModuleVtable::default();
+        let code = unsafe { init(&self.0, &mut module) };
+        (code, SendModuleVtable(module))
+    }
+}
+
 impl ModuleTransport {
     pub(crate) fn new(label: String, config: Vec<u8>) -> (Arc<Self>, TbHostVtable) {
         let (inbound_tx, inbound_rx) = mpsc::channel(HOST_QUEUE_CAPACITY);
@@ -152,11 +160,7 @@ impl ModuleTransport {
                 let host = SendHostVtable(host);
                 let initialized = tokio::time::timeout(
                     MODULE_INIT_DEADLINE,
-                    tokio::task::spawn_blocking(move || {
-                        let mut module = TbModuleVtable::default();
-                        let code = unsafe { init(&host.0, &mut module) };
-                        (code, SendModuleVtable(module))
-                    }),
+                    tokio::task::spawn_blocking(move || host.initialize(init)),
                 )
                 .await;
                 let (code, module) = match initialized {
