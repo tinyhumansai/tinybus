@@ -380,7 +380,29 @@ impl Broker {
                 let (name, enabled): (String, bool) = parse_args(member, body)?;
                 Ok(serde_json::to_value(control.enable(&name, enabled)?)?)
             }
-            "RescanModules" => Ok(serde_json::to_value(control.rescan()?)?),
+            "RescanModules" => {
+                let arguments = body.as_array().ok_or_else(|| {
+                    Error::bad_arguments(member.clone(), "expected a positional array")
+                })?;
+                let paths = arguments
+                    .first()
+                    .cloned()
+                    .map(serde_json::from_value::<Vec<PathBuf>>)
+                    .transpose()
+                    .map_err(|error| Error::bad_arguments(member.clone(), error))?
+                    .unwrap_or_default();
+                let dry_run = arguments
+                    .get(1)
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                if arguments.len() > 2 {
+                    return Err(Error::bad_arguments(
+                        member.clone(),
+                        "expected optional paths and dry-run flag",
+                    ));
+                }
+                Ok(serde_json::to_value(control.rescan(paths, dry_run)?)?)
+            }
             _ => unreachable!("caller filters module members"),
         }
     }

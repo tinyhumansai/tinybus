@@ -364,8 +364,24 @@ impl Connection {
     /// Rescan the host's configured module directories.
     #[cfg(feature = "modules")]
     pub async fn rescan_modules(&self) -> Result<Vec<crate::module::ModuleInfo>> {
+        self.scan_modules(std::iter::empty::<&std::path::Path>(), false)
+            .await
+    }
+
+    /// Scan explicit module directories, optionally without initializing any
+    /// admitted artifact.
+    #[cfg(feature = "modules")]
+    pub async fn scan_modules<P: AsRef<std::path::Path>>(
+        &self,
+        paths: impl IntoIterator<Item = P>,
+        dry_run: bool,
+    ) -> Result<Vec<crate::module::ModuleInfo>> {
+        let paths = paths
+            .into_iter()
+            .map(|path| path.as_ref().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
         let value = self
-            .call_bus("RescanModules", serde_json::json!([]))
+            .call_bus("RescanModules", serde_json::json!([paths, dry_run]))
             .await?;
         Ok(serde_json::from_value(value)?)
     }

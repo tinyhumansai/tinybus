@@ -107,8 +107,15 @@ enum ModulesCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Ask the running host to rescan its configured module directories.
-    Scan,
+    /// Ask the running host to scan module directories.
+    Scan {
+        /// Directory to inspect. Repeat to scan several paths.
+        #[arg(long = "path")]
+        paths: Vec<PathBuf>,
+        /// Report admissions without initializing or attaching modules.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Load one newly installed dynamic library.
     Load {
         /// Path to the `.so`, `.dylib`, or `.dll`.
@@ -317,8 +324,13 @@ async fn run_modules(address: &PathBuf, timeout: Duration, command: ModulesComma
             }
             Ok(())
         }
-        ModulesCommand::Scan => {
-            let modules: Vec<serde_json::Value> = bus.call("RescanModules", ()).await?;
+        ModulesCommand::Scan { paths, dry_run } => {
+            let paths = paths
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            let modules: Vec<serde_json::Value> =
+                bus.call("RescanModules", (paths, dry_run)).await?;
             println!("{}", serde_json::to_string_pretty(&modules)?);
             Ok(())
         }

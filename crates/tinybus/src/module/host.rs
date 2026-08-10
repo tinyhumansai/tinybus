@@ -133,7 +133,11 @@ pub(crate) trait ModuleControl: Send + Sync {
     fn load(self: Arc<Self>, path: PathBuf, config: serde_json::Value) -> Result<ModuleInfo>;
     fn stop(&self, name: &str, deadline: Duration) -> Result<ModuleInfo>;
     fn enable(&self, name: &str, enabled: bool) -> Result<ModuleInfo>;
-    fn rescan(self: Arc<Self>) -> Result<Vec<ModuleInfo>>;
+    fn rescan(
+        self: Arc<Self>,
+        paths: Vec<PathBuf>,
+        dry_run: bool,
+    ) -> Result<Vec<ModuleInfo>>;
     fn peer_detached(&self, unique_name: &BusName) -> Option<(String, ModuleState, ModuleState)>;
 }
 
@@ -402,6 +406,61 @@ impl ModuleHost {
         Ok(outcomes)
     }
 
+    /// Search paths in precedence order for the current platform.
+    pub fn search_paths() -> Vec<PathBuf> {
+        let mut paths = std::env::var_os("OPENHUMAN_MODULE_PATH")
+            .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+            .unwrap_or_default();
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(path) = std::env::var_os("XDG_DATA_HOME") {
+                paths.push(PathBuf::from(path).join("openhuman/modules"));
+            } else if let Some(path) = std::env::var_os("HOME") {
+                paths.push(PathBuf::from(path).join(".local/share/openhuman/modules"));
+            }
+            paths.push(PathBuf::from("/usr/lib/openhuman/modules"));
+        }
+        #[cfg(target_os = "macos")]
+        paths.push(PathBuf::from("/usr/local/lib/openhuman/modules"));
+        #[cfg(windows)]
+        if let Some(path) = std::env::var_os("LOCALAPPDATA") {
+            paths.push(PathBuf::from(path).join("openhuman/modules"));
+        }
+        paths
+    }
+
+    /// Inspect a directory without initializing or attaching any module.
+    pub fn scan_dir(&self, directory: impl AsRef<Path>) -> Result<Vec<ModuleInfo>> {
+        let directory = directory.as_ref();
+        check_directory(directory)?;
+        let mut paths = std::fs::read_dir(directory)?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| has_library_extension(path))
+            .collect::<Vec<_>>();
+        paths.sort();
+        Ok(paths
+            .into_iter()
+            .map(|path| {
+                let inspected = check_file(&path)
+                    .and_then(|()| loader::load(&path))
+                    .and_then(|artifact| {
+                        let mut info =
+                            self.validate(&path, &artifact.descriptor, &artifact.manifest)?;
+                        if let Err(error) = self.ensure_dependencies(&artifact.manifest, &path) {
+                            info.state = ModuleState::Unresolved {
+                                reason: error.to_string(),
+                            };
+                        }
+                        Ok(info)
+                    });
+                match inspected {
+                    Ok(info) => info,
+                    Err(error) => rejection_info(&error),
+                }
+            })
+            .collect())
+    }
+
     /// Stop every module within the supplied deadline per module.
     pub async fn shutdown(&self, deadline: Duration) {
         let transports = self
@@ -631,37 +690,7 @@ impl ModuleHost {
         let Error::ModuleRefused { file, reason } = error else {
             return;
         };
-        let info = ModuleInfo {
-            name: file.clone(),
-            version: String::new(),
-            file: file.clone(),
-            state: ModuleState::Rejected {
-                reason: reason.clone(),
-            },
-            manifest: ModuleManifest {
-                schema: MANIFEST_SCHEMA,
-                module: ModuleIdentity {
-                    name: file.clone(),
-                    version: Version::new(0, 0, 0),
-                    description: String::new(),
-                    homepage: None,
-                    license: String::new(),
-                },
-                bus_name: BusName::new("ai.tinyhumans.module.Rejected").expect("literal bus name"),
-                object_path: ObjectPath::new("/ai/tinyhumans/module/Rejected")
-                    .expect("literal object path"),
-                provides: Vec::new(),
-                requires: Vec::new(),
-                environment: Vec::new(),
-                capabilities: Vec::new(),
-                lazy_init: false,
-                worker_threads: 1,
-                on_panic: PanicPolicy::Detach,
-            },
-            rustc_version: String::new(),
-            rustc_mismatch: false,
-            enabled: false,
-        };
+        let info = rejection_info(error);
         let mut rejected = self
             .inner
             .rejected
@@ -728,15 +757,22 @@ impl ModuleControl for ModuleHostInner {
         Ok(module.snapshot())
     }
 
-    fn rescan(self: Arc<Self>) -> Result<Vec<ModuleInfo>> {
-        let directories = self
-            .directories
-            .lock()
-            .expect("module directory lock")
-            .clone();
+    fn rescan(self: Arc<Self>, paths: Vec<PathBuf>, dry_run: bool) -> Result<Vec<ModuleInfo>> {
+        let directories = if paths.is_empty() {
+            self.directories
+                .lock()
+                .expect("module directory lock")
+                .clone()
+        } else {
+            paths
+        };
         let host = ModuleHost { inner: self };
         let mut loaded = Vec::new();
         for directory in directories {
+            if dry_run {
+                loaded.extend(host.scan_dir(directory)?);
+                continue;
+            }
             for outcome in host.load_dir(directory)? {
                 match outcome {
                     Ok(info) => loaded.push(info),
@@ -766,6 +802,42 @@ impl ModuleControl for ModuleHostInner {
         };
         module.info.state = new.clone();
         Some((module.info.name.clone(), old, new))
+    }
+}
+
+fn rejection_info(error: &Error) -> ModuleInfo {
+    let (file, reason) = match error {
+        Error::ModuleRefused { file, reason } => (file.clone(), reason.clone()),
+        _ => ("module".to_string(), "module inspection failed".to_string()),
+    };
+    ModuleInfo {
+        name: file.clone(),
+        version: String::new(),
+        file: file.clone(),
+        state: ModuleState::Rejected { reason },
+        manifest: ModuleManifest {
+            schema: MANIFEST_SCHEMA,
+            module: ModuleIdentity {
+                name: file,
+                version: Version::new(0, 0, 0),
+                description: String::new(),
+                homepage: None,
+                license: String::new(),
+            },
+            bus_name: BusName::new("ai.tinyhumans.module.Rejected").expect("literal bus name"),
+            object_path: ObjectPath::new("/ai/tinyhumans/module/Rejected")
+                .expect("literal object path"),
+            provides: Vec::new(),
+            requires: Vec::new(),
+            environment: Vec::new(),
+            capabilities: Vec::new(),
+            lazy_init: false,
+            worker_threads: 1,
+            on_panic: PanicPolicy::Detach,
+        },
+        rustc_version: String::new(),
+        rustc_mismatch: false,
+        enabled: false,
     }
 }
 
