@@ -893,11 +893,13 @@ mod tests {
         println!("captured hello: {}", captured.is_ok());
         let hello: Message =
             serde_json::from_slice(&captured.expect("module did not send Hello")).unwrap();
+        println!("hello: {hello:?}");
         let reply = Message::method_return(
             &hello.header,
             serde_json::Value::String(":module.1".to_string()),
         );
         let reply = serde_json::to_vec(&reply).unwrap();
+        println!("reply: {}", String::from_utf8_lossy(&reply));
         assert_eq!(
             unsafe { (out.deliver)(out.module_ctx, reply.as_ptr(), reply.len()) },
             TB_OK
