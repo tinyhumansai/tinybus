@@ -41,6 +41,12 @@
 //! without a runtime. Dispatch is **async**, and takes care to clone the
 //! handler's `Arc` and drop the lock *before* awaiting, so a slow handler never
 //! blocks an unrelated dispatch.
+//!
+//! A dynamically loaded module cannot use this registry to cross the `dlopen`
+//! boundary. It links its own copy of this static and Rust does not promise
+//! `TypeId` identity across separately loaded artifacts. Module-to-host and
+//! module-to-module calls therefore go through the framed module transport;
+//! no `Any`, `TypeId`, or native-registry pointer appears in the module ABI.
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
