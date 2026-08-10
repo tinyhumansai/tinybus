@@ -270,11 +270,7 @@ async fn run(cli: Cli) -> Result<()> {
     }
 }
 
-async fn run_modules(
-    address: &PathBuf,
-    timeout: Duration,
-    command: ModulesCommand,
-) -> Result<()> {
+async fn run_modules(address: &PathBuf, timeout: Duration, command: ModulesCommand) -> Result<()> {
     let connection = connect(address).await?;
     let bus = connection
         .proxy(tinybus::BUS_NAME, tinybus::BUS_PATH, tinybus::BUS_INTERFACE)?
@@ -310,11 +306,11 @@ async fn run_modules(
                 println!("version   {}", module["version"].as_str().unwrap_or("?"));
                 println!("state     {}", module["state"].as_str().unwrap_or("?"));
                 println!("artifact  {}", module["file"].as_str().unwrap_or("?"));
-                println!("rustc     {}", module["rustc_version"].as_str().unwrap_or("?"));
                 println!(
-                    "manifest  {}",
-                    serde_json::to_string(&module["manifest"])?
+                    "rustc     {}",
+                    module["rustc_version"].as_str().unwrap_or("?")
                 );
+                println!("manifest  {}", serde_json::to_string(&module["manifest"])?);
             }
             Ok(())
         }
