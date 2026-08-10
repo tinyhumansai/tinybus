@@ -642,14 +642,18 @@ mod tests {
             "Changed".parse().unwrap(),
             serde_json::Value::Null,
         );
-        assert!(matches!(transport.send(signal).await, Err(Error::ConnectionClosed)));
+        assert!(matches!(
+            transport.send(signal).await,
+            Err(Error::ConnectionClosed)
+        ));
     }
 
     #[tokio::test]
     async fn deferred_initialization_waits_for_ready_then_delivers_pending_calls() {
         DELIVERY_CODE.store(TB_OK, Ordering::Release);
         DELIVERIES.store(0, Ordering::Release);
-        let (transport, host) = ModuleTransport::new("deferred".to_string(), br#"{"key":1}"#.to_vec());
+        let (transport, host) =
+            ModuleTransport::new("deferred".to_string(), br#"{"key":1}"#.to_vec());
         transport.defer_initialize(initialize_ok, host);
         transport.send(call()).await.unwrap();
         transport.wait_initializing().await;
@@ -672,7 +676,10 @@ mod tests {
         let (transport, host) = ModuleTransport::new("fails-init".to_string(), Vec::new());
         transport.defer_initialize(initialize_fails, host);
         transport.send(call()).await.unwrap();
-        assert_eq!(transport.recv().await.unwrap().unwrap().header.kind, MessageKind::Error);
+        assert_eq!(
+            transport.recv().await.unwrap().unwrap().header.kind,
+            MessageKind::Error
+        );
         assert!(transport.init_failed());
     }
 
@@ -697,12 +704,21 @@ mod tests {
     async fn host_callbacks_accept_messages_and_make_the_transport_closed_on_fault() {
         let (transport, host) = ModuleTransport::new("callbacks".to_string(), Vec::new());
         let outgoing = serde_json::to_vec(&call()).unwrap();
-        assert_eq!(unsafe { (host.send)(host.host_ctx, outgoing.as_ptr(), outgoing.len()) }, TB_OK);
+        assert_eq!(
+            unsafe { (host.send)(host.host_ctx, outgoing.as_ptr(), outgoing.len()) },
+            TB_OK
+        );
         assert_eq!(transport.recv().await.unwrap().unwrap(), call());
-        assert_eq!(unsafe { (host.send)(host.host_ctx, std::ptr::null(), 1) }, TB_BAD_ARGUMENT);
+        assert_eq!(
+            unsafe { (host.send)(host.host_ctx, std::ptr::null(), 1) },
+            TB_BAD_ARGUMENT
+        );
         unsafe { (host.fault)(host.host_ctx, std::ptr::null(), 0) };
         assert!(transport.is_faulted());
         assert!(transport.recv().await.unwrap().is_none());
-        assert_eq!(unsafe { (host.send)(host.host_ctx, outgoing.as_ptr(), outgoing.len()) }, TB_CLOSED);
+        assert_eq!(
+            unsafe { (host.send)(host.host_ctx, outgoing.as_ptr(), outgoing.len()) },
+            TB_CLOSED
+        );
     }
 }
