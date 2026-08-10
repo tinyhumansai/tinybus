@@ -221,7 +221,31 @@ impl ModuleTransport {
 #[async_trait]
 impl Transport for ModuleTransport {
     async fn send(&self, message: Message) -> Result<()> {
-        self.ensure_initialized().await?;
+        if self.ensure_initialized().await.is_err() {
+            self.context.faulted.store(true, Ordering::Release);
+            self.context.ready_notify.notify_waiters();
+            if message.header.kind == MessageKind::MethodCall {
+                let error = Error::ModuleUnavailable {
+                    module: self.label.clone(),
+                    state: "failed".to_string(),
+                    detail: "module initialization failed".to_string(),
+                };
+                let reply = Message::error_reply(&message.header, &error);
+                if let Ok(bytes) = serde_json::to_vec(&reply) {
+                    let sender = self
+                        .context
+                        .inbound
+                        .lock()
+                        .expect("host inbound lock")
+                        .take();
+                    if let Some(sender) = sender {
+                        let _ = sender.try_send(bytes);
+                    }
+                }
+                return Ok(());
+            }
+            return Err(Error::ConnectionClosed);
+        }
         if message.header.kind == MessageKind::MethodCall && !self.is_ready() {
             self.pending.lock().await.push_back(message);
             if !self.drain_started.swap(true, Ordering::AcqRel) {
