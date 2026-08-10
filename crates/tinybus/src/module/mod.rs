@@ -8,7 +8,7 @@ pub mod abi;
 pub mod manifest;
 
 #[cfg(feature = "modules")]
-mod host;
+pub(crate) mod host;
 #[cfg(feature = "modules")]
 mod loader;
 #[cfg(feature = "modules")]
