@@ -22,6 +22,7 @@ use tinybus::{Connection, Error, Result, Transport};
 use tokio::sync::{Mutex, mpsc};
 
 const MODULE_QUEUE_CAPACITY: usize = 256;
+const MODULE_PANIC_ERROR: &str = "ai.tinyhumans.tinybus.Error.ModulePanicked";
 static MANIFEST_BYTES: OnceLock<Vec<u8>> = OnceLock::new();
 
 /// Build and retain the exported manifest bytes for the process lifetime.
@@ -41,6 +42,15 @@ pub struct ManifestDeclaration<'a> {
 /// Build and retain the exported manifest bytes for the process lifetime.
 #[doc(hidden)]
 pub fn manifest_slice(declaration: ManifestDeclaration<'_>) -> tinybus::module::abi::TbSlice {
+    catch_unwind(AssertUnwindSafe(|| build_manifest_slice(declaration))).unwrap_or(
+        tinybus::module::abi::TbSlice {
+            ptr: std::ptr::null(),
+            len: 0,
+        },
+    )
+}
+
+fn build_manifest_slice(declaration: ManifestDeclaration<'_>) -> tinybus::module::abi::TbSlice {
     use tinybus::module::manifest::{
         Dependency, MANIFEST_SCHEMA, ModuleIdentity, ModuleManifest, PanicPolicy, ProvidedInterface,
     };
@@ -162,11 +172,16 @@ impl HostCalls {
 struct HostSubscriber {
     host: HostCalls,
     next_span: AtomicU64,
+    max_level: tracing::level_filters::LevelFilter,
 }
 
 impl tracing::Subscriber for HostSubscriber {
-    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-        true
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        self.max_level >= *metadata.level()
+    }
+
+    fn max_level_hint(&self) -> Option<tracing::metadata::LevelFilter> {
+        Some(self.max_level)
     }
 
     fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
@@ -222,8 +237,7 @@ struct ModuleTransport {
 #[async_trait]
 impl Transport for ModuleTransport {
     async fn send(&self, message: Message) -> Result<()> {
-        let panicked = message.header.error_name.as_deref()
-            == Some("ai.tinyhumans.tinybus.Error.ModulePanicked");
+        let panicked = message.header.error_name.as_deref() == Some(MODULE_PANIC_ERROR);
         let bytes = serde_json::to_vec(&message)?;
         if bytes.len() > MAX_FRAME_LEN {
             return Err(Error::protocol("module frame exceeds the size cap"));
@@ -303,7 +317,7 @@ unsafe extern "C" fn shutdown(ctx: *mut c_void, deadline_ms: u64) -> i32 {
         }
     })) {
         Ok(code) => code,
-        Err(_) => TB_TIMEOUT,
+        Err(_) => TB_PANICKED,
     }
 }
 
@@ -327,15 +341,26 @@ where
         if host.is_null() || out.is_null() || worker_threads == 0 {
             return TB_BAD_ARGUMENT;
         }
-        let host = HostCalls(unsafe { *host });
-        if host.0.size < size_of::<TbHostVtable>() as u32 {
+        // `size` is the frozen prefix field; do not copy the full vtable until
+        // the host has proved that all v1 fields are present.
+        if unsafe { host.cast::<u32>().read() } < size_of::<TbHostVtable>() as u32 {
             return TB_BAD_ARGUMENT;
         }
+        let host = HostCalls(unsafe { *host });
 
-        let _ = tracing::subscriber::set_global_default(HostSubscriber {
+        // A cdylib carries its own statically linked `tracing` and `std` state;
+        // this registration is global to the module's copy, not the embedding
+        // host's. Failure therefore means this module runtime was initialized
+        // more than once and cannot safely replace the existing subscriber.
+        if tracing::subscriber::set_global_default(HostSubscriber {
             host,
             next_span: AtomicU64::new(1),
-        });
+            max_level: tracing::level_filters::LevelFilter::TRACE,
+        })
+        .is_err()
+        {
+            return TB_CLOSED;
+        }
 
         let panic_host = host;
         let panic_location = std::sync::Arc::new(StdMutex::new(None::<String>));
@@ -387,7 +412,7 @@ where
                             .take()
                             .unwrap_or_else(|| "an unknown location".to_string());
                         Error::MethodFailed {
-                            name: "ai.tinyhumans.tinybus.Error.ModulePanicked".to_string(),
+                            name: MODULE_PANIC_ERROR.to_string(),
                             message: format!("a module method panicked at {location}"),
                         }
                     }));
@@ -451,9 +476,11 @@ where
         if host.is_null() {
             return Err(TB_BAD_ARGUMENT);
         }
+        if unsafe { host.cast::<u32>().read() } < size_of::<TbHostVtable>() as u32 {
+            return Err(TB_BAD_ARGUMENT);
+        }
         let host_ref = unsafe { &*host };
-        if host_ref.size < size_of::<TbHostVtable>() as u32
-            || host_ref.config.len > 1024 * 1024
+        if host_ref.config.len > 1024 * 1024
             || (host_ref.config.ptr.is_null() && host_ref.config.len != 0)
         {
             return Err(TB_BAD_ARGUMENT);
