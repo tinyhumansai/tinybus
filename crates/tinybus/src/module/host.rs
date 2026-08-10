@@ -415,9 +415,9 @@ fn check_directory(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Connection;
     use crate::module::abi::TbAbiDescriptor;
     use crate::transport::memory::MemoryBus;
-    use crate::Connection;
 
     fn manifest() -> ModuleManifest {
         ModuleManifest {
