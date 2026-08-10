@@ -121,6 +121,18 @@ impl Broker {
         unique
     }
 
+    #[cfg(feature = "modules")]
+    pub(crate) fn reserve_module_name(
+        &self,
+        unique: &BusName,
+        name: BusName,
+    ) -> Result<NameChange> {
+        self.router
+            .lock()
+            .expect("router lock")
+            .request_name_for_unique(unique, name)
+    }
+
     /// Route one inbound message from peer `id`.
     async fn route(&self, from: u64, from_name: &BusName, mut message: Message) -> Result<()> {
         message.validate()?;
@@ -205,7 +217,9 @@ impl Broker {
         let _ = outbox.send(reply).await;
 
         for change in changes {
-            self.announce_name_change(change).await;
+            if change.old_owner != change.new_owner {
+                self.announce_name_change(change).await;
+            }
         }
         #[cfg(feature = "modules")]
         if let Some(module_state) = module_state {
@@ -378,7 +392,7 @@ impl Broker {
     /// signal would be a call timing out thirty seconds later, by which point a
     /// user has been staring at a spinner. Subscribers still have to have asked
     /// for it; the broker does not push it at peers that did not.
-    async fn announce_name_change(&self, change: NameChange) {
+    pub(crate) async fn announce_name_change(&self, change: NameChange) {
         let signal = Message {
             header: crate::message::Header {
                 kind: MessageKind::Signal,

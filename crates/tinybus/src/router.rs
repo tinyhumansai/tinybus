@@ -280,6 +280,21 @@ impl Router {
         }
     }
 
+    /// Claim a well-known name for an attached peer identified by its unique
+    /// name. Module activation uses this to make a lazy module routable before
+    /// its SDK handshake has run.
+    pub(crate) fn request_name_for_unique(
+        &mut self,
+        unique: &BusName,
+        name: BusName,
+    ) -> Result<NameChange> {
+        let id = *self
+            .names
+            .get(unique)
+            .ok_or_else(|| Error::NameHasNoOwner(unique.clone()))?;
+        self.request_name(id, name)
+    }
+
     /// Give up a well-known name. Releasing a name you do not own is an error,
     /// not a no-op — it always means the caller's model of the bus is wrong.
     pub fn release_name(&mut self, id: u64, name: &BusName) -> Result<NameChange> {
