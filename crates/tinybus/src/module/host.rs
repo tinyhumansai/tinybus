@@ -1297,13 +1297,13 @@ mod tests {
             )
         }
         .unwrap();
-        let connection = Connection::connect(bus.connect().await.unwrap()).await.unwrap();
+        let connection = Connection::connect(bus.connect().await.unwrap())
+            .await
+            .unwrap();
         let _signals = connection
             .add_match(
-                crate::router::MatchRule::parse(
-                    "type=signal,sender=ai.tinyhumans.module.Clock",
-                )
-                .unwrap(),
+                crate::router::MatchRule::parse("type=signal,sender=ai.tinyhumans.module.Clock")
+                    .unwrap(),
             )
             .await
             .unwrap();
@@ -1331,7 +1331,9 @@ mod tests {
             }
             .unwrap();
         }
-        let connection = Connection::connect(bus.connect().await.unwrap()).await.unwrap();
+        let connection = Connection::connect(bus.connect().await.unwrap())
+            .await
+            .unwrap();
         let proxy = |surface_name: &str| {
             connection
                 .proxy(
@@ -1341,8 +1343,14 @@ mod tests {
                 )
                 .unwrap()
         };
-        assert_eq!(proxy("One").call::<String>("Echo", ("one",)).await.unwrap(), "one");
-        assert_eq!(proxy("Two").call::<String>("Echo", ("two",)).await.unwrap(), "two");
+        assert_eq!(
+            proxy("One").call::<String>("Echo", ("one",)).await.unwrap(),
+            "one"
+        );
+        assert_eq!(
+            proxy("Two").call::<String>("Echo", ("two",)).await.unwrap(),
+            "two"
+        );
         connection
             .stop_module("one", Duration::from_secs(1))
             .await
@@ -1354,8 +1362,14 @@ mod tests {
                 .unwrap(),
             "still serving"
         );
-        let stopped = proxy("One").call::<()>("Echo", ("stopped",)).await.unwrap_err();
-        assert_eq!(stopped.wire_name(), "ai.tinyhumans.tinybus.Error.ModuleUnavailable");
+        let stopped = proxy("One")
+            .call::<()>("Echo", ("stopped",))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            stopped.wire_name(),
+            "ai.tinyhumans.tinybus.Error.ModuleUnavailable"
+        );
         broker_task.abort();
     }
 
