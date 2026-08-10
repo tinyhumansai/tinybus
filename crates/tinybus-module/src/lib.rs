@@ -660,7 +660,11 @@ mod tests {
         HOST_WAKES.fetch_add(1, Ordering::AcqRel);
     }
 
-    unsafe extern "C" fn host_log(_: *mut c_void, _: u32, _: *const u8, _: usize) {}
+    unsafe extern "C" fn host_log(_: *mut c_void, _: u32, ptr: *const u8, len: usize) {
+        if !ptr.is_null() {
+            println!("host log: {}", String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(ptr, len) }));
+        }
+    }
 
     unsafe extern "C" fn host_fault(_: *mut c_void, _: *const u8, _: usize) {
         HOST_FAULTED.store(true, Ordering::Release);
