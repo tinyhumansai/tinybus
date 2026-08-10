@@ -539,7 +539,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicI32;
 
-    use crate::names::{BusName, InterfaceName, MemberName, ObjectPath};
+    use crate::{BusName, InterfaceName, MemberName, ObjectPath};
 
     static DELIVERY_CODE: AtomicI32 = AtomicI32::new(TB_OK);
     static DELIVERIES: AtomicUsize = AtomicUsize::new(0);
