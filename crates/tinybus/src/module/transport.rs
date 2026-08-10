@@ -149,10 +149,10 @@ impl ModuleTransport {
                 // worker threads and bound how long the broker waits; a timed
                 // out blocking task may remain wedged, so its borrowed config
                 // remains allocated rather than being invalidated underneath it.
+                let host = SendHostVtable(host);
                 let initialized = tokio::time::timeout(
                     MODULE_INIT_DEADLINE,
                     tokio::task::spawn_blocking(move || {
-                        let host = SendHostVtable(host);
                         let mut module = TbModuleVtable::default();
                         let code = unsafe { init(&host.0, &mut module) };
                         (code, SendModuleVtable(module))
