@@ -209,6 +209,11 @@ impl ModuleHost {
     /// This is the testable seam beneath `dlopen`: callers must ensure `init`
     /// and every pointer reachable through it remain valid for the process
     /// lifetime, exactly as the real loader does by leaking its handle.
+    ///
+    /// # Safety
+    ///
+    /// `init` and every function pointer or context it returns must remain
+    /// valid and thread-safe until process exit.
     pub unsafe fn attach_raw(
         &self,
         file: impl AsRef<Path>,
@@ -222,6 +227,11 @@ impl ModuleHost {
     }
 
     /// Configured form of [`ModuleHost::attach_raw`].
+    ///
+    /// # Safety
+    ///
+    /// The caller must uphold the lifetime and thread-safety contract stated
+    /// on [`ModuleHost::attach_raw`].
     pub unsafe fn attach_raw_with_config(
         &self,
         file: impl AsRef<Path>,
