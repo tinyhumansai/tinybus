@@ -713,7 +713,16 @@ impl ModuleControl for ModuleHostInner {
             .find(|module| module.info.name == name)
             .ok_or_else(|| Error::failed("module is not known"))?;
         module.info.enabled = enabled;
-        Ok(module.info.clone())
+        module.info.state = if enabled {
+            if module.transport.is_ready() {
+                ModuleState::Ready
+            } else {
+                ModuleState::Resolved
+            }
+        } else {
+            ModuleState::Disabled
+        };
+        Ok(module.snapshot())
     }
 
     fn rescan(self: Arc<Self>) -> Result<Vec<ModuleInfo>> {
