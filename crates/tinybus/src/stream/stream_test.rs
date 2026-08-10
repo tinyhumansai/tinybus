@@ -913,7 +913,6 @@ async fn one_peers_open_streams_do_not_consume_another_peers_slots() {
     });
     let destination = BusName::new(SINK).unwrap();
 
-    let bus_handle = MemoryBus::new();
     let _hog = client
         .open_stream(&destination, StreamDescriptor::default())
         .await
@@ -925,7 +924,6 @@ async fn one_peers_open_streams_do_not_consume_another_peers_slots() {
             .await
             .is_err()
     );
-    drop(bus_handle);
 
     // …while a different peer is unaffected by the first one's spending.
     let other = service
