@@ -340,18 +340,49 @@ impl StreamRegistry {
             let live = stream.idle_for() < limits.idle_timeout;
             if !live {
                 stream.finish(Outcome::Aborted("the stream went idle and was reaped"));
+                stream.seal();
             }
             live
         });
-        let open_for_peer = streams
-            .values()
-            .filter(|stream| stream.owner == header.sender)
-            .count();
-        if open_for_peer >= limits.max_streams_per_peer {
+
+        // A closed-but-unread stream still holds its window, so it is capped
+        // too — separately from live ones, because the two are different
+        // failures. Too many live streams is a sender running ahead of itself;
+        // too many closed ones is a receiver that is not collecting what it
+        // was sent. Evicting the oldest keeps the newest transfer — the one a
+        // call is most likely still waiting on — alive.
+        let mut live = 0usize;
+        let mut sealed: Vec<(String, Instant)> = Vec::new();
+        for (key, stream) in streams.iter() {
+            if stream.owner != header.sender {
+                continue;
+            }
+            if stream.writer().is_some() {
+                live += 1;
+            } else {
+                sealed.push((
+                    key.clone(),
+                    *stream.last_activity.lock().expect("stream activity lock"),
+                ));
+            }
+        }
+        if live >= limits.max_streams_per_peer {
             return Err(Error::TooManyStreams {
                 limit: limits.max_streams_per_peer,
             });
         }
+        if sealed.len() >= limits.max_streams_per_peer {
+            sealed.sort_by_key(|(_, at)| *at);
+            for (key, _) in sealed
+                .iter()
+                .take(sealed.len() + 1 - limits.max_streams_per_peer)
+            {
+                if let Some(stream) = streams.remove(key) {
+                    stream.finish(Outcome::Aborted("the receiver never collected the stream"));
+                }
+            }
+        }
+
         streams.insert(id.clone(), inbound);
         Ok(Value::String(id))
     }
