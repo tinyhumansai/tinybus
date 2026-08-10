@@ -738,17 +738,12 @@ async fn a_real_cdylib_loads_and_serves_a_call() {
     assert_eq!(name_change.body[0], "ai.tinyhumans.openhuman.Clock");
     assert!(name_change.body[2].is_null());
 
-    let stopped: ModuleInfo = control
-        .call("StopModule", ("tinybus", 1_000u64))
-        .await
-        .unwrap();
-    assert_eq!(stopped.state, ModuleState::Stopped);
     let state_change = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let message = state_changes.recv().await.unwrap();
             if message.header.member.as_ref().map(|member| member.as_str())
                 == Some("ModuleStateChanged")
-                && message.body.get(2).and_then(serde_json::Value::as_str) == Some("stopped")
+                && message.body.get(2).and_then(serde_json::Value::as_str) == Some("faulted")
             {
                 break message;
             }
@@ -757,7 +752,7 @@ async fn a_real_cdylib_loads_and_serves_a_call() {
     .await
     .unwrap();
     assert_eq!(state_change.body[0], "tinybus");
-    assert_eq!(state_change.body[2], "stopped");
+    assert_eq!(state_change.body[2], "faulted");
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             if !client

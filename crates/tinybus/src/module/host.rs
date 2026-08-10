@@ -809,7 +809,17 @@ impl ModuleControl for ModuleHostInner {
             .iter_mut()
             .find(|module| module.info.name == name)
             .ok_or_else(|| Error::failed("module is not loaded"))?;
-        module.transition_from = Some(module.snapshot().state);
+        let old = module.snapshot().state;
+        if matches!(old, ModuleState::Faulted { .. } | ModuleState::Failed { .. }) {
+            return Err(Error::ModuleUnavailable {
+                module: module.info.name.clone(),
+                state: state_name(&old).to_string(),
+                detail: state_detail(&old)
+                    .unwrap_or("module is terminal")
+                    .to_string(),
+            });
+        }
+        module.transition_from = Some(old);
         let _ = module.transport.stop_sync(deadline);
         module.info.state = ModuleState::Stopped;
         Ok(module.info.clone())
