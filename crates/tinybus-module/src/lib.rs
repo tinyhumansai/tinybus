@@ -868,10 +868,16 @@ mod tests {
         assert_eq!(code, TB_OK);
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
         while !HOST_READY.load(Ordering::Acquire) {
-            assert!(std::time::Instant::now() < deadline, "module did not become ready");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "module did not become ready"
+            );
             std::thread::yield_now();
         }
-        assert_eq!(unsafe { (out.deliver)(out.module_ctx, std::ptr::null(), 0) }, TB_BAD_ARGUMENT);
+        assert_eq!(
+            unsafe { (out.deliver)(out.module_ctx, std::ptr::null(), 0) },
+            TB_BAD_ARGUMENT
+        );
         assert_eq!(unsafe { (out.shutdown)(out.module_ctx, 10) }, TB_OK);
         assert_eq!(unsafe { (out.shutdown)(out.module_ctx, 10) }, TB_CLOSED);
     }
