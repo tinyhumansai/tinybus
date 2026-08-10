@@ -710,7 +710,11 @@ mod tests {
         std::fs::write(&path, b"not a dynamic library").unwrap();
         let host = ModuleHost::new(Broker::new());
         let error = host.load_file(&path).unwrap_err();
-        assert!(!error.to_string().contains(&directory.path().display().to_string()));
+        assert!(
+            !error
+                .to_string()
+                .contains(&directory.path().display().to_string())
+        );
         let listed = host.list();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].state, ModuleState::Rejected);
