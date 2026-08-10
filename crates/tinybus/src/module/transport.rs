@@ -705,7 +705,11 @@ mod tests {
         let (transport, host) = ModuleTransport::new("callbacks".to_string(), Vec::new());
         let outgoing = serde_json::to_vec(&call()).unwrap();
         assert_eq!(
-            unsafe { (host.send)(host.host_ctx, outgoing.as_ptr(), outgoing.len()) },
+            tokio::task::spawn_blocking(move || unsafe {
+                (host.send)(host.host_ctx, outgoing.as_ptr(), outgoing.len())
+            })
+            .await
+            .unwrap(),
             TB_OK
         );
         assert_eq!(transport.recv().await.unwrap().unwrap(), call());
