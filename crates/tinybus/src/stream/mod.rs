@@ -345,6 +345,12 @@ impl StreamRegistry {
             if !live {
                 stream.finish(Outcome::Aborted("the stream went idle and was reaped"));
                 stream.seal();
+                // Same reason `kill` does it: dropping the reading half is what
+                // wakes a chunk write parked against a full window. Without
+                // this, reaping an abandoned stream leaves its sender parked
+                // until its own deadline expires — the stream is gone but the
+                // peer is still waiting on it.
+                drop(stream.reader.lock().expect("stream reader lock").take());
             }
             live
         });
