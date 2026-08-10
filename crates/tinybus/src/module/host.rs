@@ -152,10 +152,11 @@ struct ModuleHostInner {
 
 /// The broker's private control hook. Kept behind a weak pointer so an unused
 /// broker does not keep a module host alive.
+#[async_trait::async_trait]
 pub(crate) trait ModuleControl: Send + Sync {
     fn list(&self) -> Vec<ModuleInfo>;
     fn load(self: Arc<Self>, path: PathBuf, config: serde_json::Value) -> Result<ModuleInfo>;
-    fn stop(&self, name: &str, deadline: Duration) -> Result<ModuleInfo>;
+    async fn stop(&self, name: &str, deadline: Duration) -> Result<ModuleInfo>;
     fn enable(&self, name: &str, enabled: bool) -> Result<ModuleInfo>;
     fn rescan(self: Arc<Self>, paths: Vec<PathBuf>, dry_run: bool) -> Result<Vec<ModuleInfo>>;
     fn peer_detached(&self, unique_name: &BusName) -> Option<(String, ModuleState, ModuleState)>;
@@ -761,6 +762,7 @@ impl ModuleHost {
     }
 }
 
+#[async_trait::async_trait]
 impl ModuleControl for ModuleHostInner {
     fn list(&self) -> Vec<ModuleInfo> {
         let mut modules = self
@@ -784,27 +786,37 @@ impl ModuleControl for ModuleHostInner {
         ModuleHost { inner: self }.load_file_with_config(path, config)
     }
 
-    fn stop(&self, name: &str, deadline: Duration) -> Result<ModuleInfo> {
+    async fn stop(&self, name: &str, deadline: Duration) -> Result<ModuleInfo> {
+        let transport = {
+            let mut loaded = self.loaded.lock().expect("module list lock");
+            let module = loaded
+                .iter_mut()
+                .find(|module| module.info.name == name)
+                .ok_or_else(|| Error::failed("module is not loaded"))?;
+            let old = module.snapshot().state;
+            if matches!(
+                old,
+                ModuleState::Stopped | ModuleState::Faulted { .. } | ModuleState::Failed { .. }
+            ) {
+                return Err(Error::ModuleUnavailable {
+                    module: module.info.name.clone(),
+                    state: state_name(&old).to_string(),
+                    detail: state_detail(&old)
+                        .unwrap_or("module is terminal")
+                        .to_string(),
+                });
+            }
+            module.transition_from = Some(old);
+            module.transport.clone()
+        };
+        tokio::task::spawn_blocking(move || transport.stop_sync(deadline))
+            .await
+            .map_err(|_| Error::failed("module stop task was cancelled"))?;
         let mut loaded = self.loaded.lock().expect("module list lock");
         let module = loaded
             .iter_mut()
             .find(|module| module.info.name == name)
             .ok_or_else(|| Error::failed("module is not loaded"))?;
-        let old = module.snapshot().state;
-        if matches!(
-            old,
-            ModuleState::Faulted { .. } | ModuleState::Failed { .. }
-        ) {
-            return Err(Error::ModuleUnavailable {
-                module: module.info.name.clone(),
-                state: state_name(&old).to_string(),
-                detail: state_detail(&old)
-                    .unwrap_or("module is terminal")
-                    .to_string(),
-            });
-        }
-        module.transition_from = Some(old);
-        let _ = module.transport.stop_sync(deadline);
         module.info.state = ModuleState::Stopped;
         Ok(module.info.clone())
     }
@@ -815,6 +827,19 @@ impl ModuleControl for ModuleHostInner {
             .iter_mut()
             .find(|module| module.info.name == name)
             .ok_or_else(|| Error::failed("module is not known"))?;
+        let old = module.snapshot().state;
+        if matches!(
+            old,
+            ModuleState::Stopped | ModuleState::Failed { .. } | ModuleState::Faulted { .. }
+        ) {
+            return Err(Error::ModuleUnavailable {
+                module: module.info.name.clone(),
+                state: state_name(&old).to_string(),
+                detail: state_detail(&old)
+                    .unwrap_or("module is terminal")
+                    .to_string(),
+            });
+        }
         module.info.enabled = enabled;
         module.info.state = if enabled {
             if module.transport.is_ready() {
@@ -869,7 +894,8 @@ impl ModuleControl for ModuleHostInner {
             .iter_mut()
             .find(|module| &module.unique_name == unique_name)?;
         if let Some(old) = module.transition_from.take() {
-            return Some((module.info.name.clone(), old, module.info.state.clone()));
+            module.info.state = ModuleState::Stopped;
+            return Some((module.info.name.clone(), old, ModuleState::Stopped));
         }
         if !module.transport.is_faulted()
             || matches!(
