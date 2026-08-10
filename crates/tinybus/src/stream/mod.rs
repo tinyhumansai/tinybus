@@ -187,24 +187,44 @@ struct Inbound {
     /// Serialises the sequence check and the handoff to the reader. Without it
     /// two pipelined chunks could pass the check in order and reach the reader
     /// out of order, since each call is dispatched on its own task.
-    gate: Mutex<Gate>,
+    ///
+    /// It guards nothing but ordering: the counters beside it are atomics
+    /// precisely so that `Close` and `Abort` can read them *without* taking
+    /// this lock. A chunk write parks here while the window is full, and a peer
+    /// that could make `Close` wait on that would have found a way to wedge the
+    /// receiver from outside.
+    gate: Mutex<()>,
+    next_seq: AtomicU64,
+    received: AtomicU64,
+    /// Dropped to signal end-of-stream; the reader then consults `outcome` to
+    /// learn whether that end was a `Close` or an abort.
+    chunks: std::sync::Mutex<Option<mpsc::Sender<Vec<u8>>>>,
     /// Taken once, by whoever reads the stream.
     reader: std::sync::Mutex<Option<mpsc::Receiver<Vec<u8>>>>,
     outcome: std::sync::Mutex<Option<Outcome>>,
     last_activity: std::sync::Mutex<Instant>,
 }
 
-struct Gate {
-    next_seq: u64,
-    received: u64,
-    /// Dropped to signal end-of-stream; the reader then consults `outcome` to
-    /// learn whether that end was a `Close` or an abort.
-    chunks: Option<mpsc::Sender<Vec<u8>>>,
-}
-
 impl Inbound {
+    /// Record how the stream ended, keeping the first verdict.
+    ///
+    /// First rather than last because the first is the cause and anything after
+    /// it is a consequence — a reaped stream whose sender then aborts should
+    /// still read as reaped.
     fn finish(&self, outcome: Outcome) {
-        *self.outcome.lock().expect("stream outcome lock") = Some(outcome);
+        let mut slot = self.outcome.lock().expect("stream outcome lock");
+        if slot.is_none() {
+            *slot = Some(outcome);
+        }
+    }
+
+    /// Close the writing half, and with it the reader's channel.
+    fn seal(&self) {
+        *self.chunks.lock().expect("stream chunks lock") = None;
+    }
+
+    fn writer(&self) -> Option<mpsc::Sender<Vec<u8>>> {
+        self.chunks.lock().expect("stream chunks lock").clone()
     }
 
     fn touch(&self) {
