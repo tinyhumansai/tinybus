@@ -567,11 +567,13 @@ async fn admission_rejects_duplicate_names_bad_initializers_collisions_and_missi
     .unwrap_err();
     assert!(invalid.to_string().contains("invalid vtable"));
 
+    let mut colliding_manifest = manifest();
+    colliding_manifest.module.name = "other".to_string();
     let collision = unsafe {
         host.attach_raw(
             "other.so",
             TbAbiDescriptor::current("other", "0.1.0"),
-            manifest(),
+            colliding_manifest,
             lazy_echo_init,
         )
     }
