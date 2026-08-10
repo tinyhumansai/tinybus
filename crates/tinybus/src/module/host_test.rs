@@ -787,6 +787,7 @@ fn a_file_that_is_not_a_regular_file_is_skipped() {
 
 #[test]
 fn module_host_helpers_preserve_safe_names_states_and_allowlist_decisions() {
+    assert!(ModuleHost::search_paths().iter().any(|path| path == Path::new("/usr/lib/openhuman/modules")));
     let states = [
         ModuleState::Discovered,
         ModuleState::Rejected {
