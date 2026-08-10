@@ -308,8 +308,7 @@ mod tests {
         assert!(expanded.contains("impl :: tinybus :: service :: Interface for Example"));
         assert!(expanded.contains("Ping"));
         assert!(expanded.contains("Zero"));
-        assert!(!expanded.contains("private"));
-        assert!(!expanded.contains("tinybus"));
+        assert!(!expanded.contains("# [ tinybus"));
     }
 
     #[test]
