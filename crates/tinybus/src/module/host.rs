@@ -281,7 +281,7 @@ impl ModuleHost {
                 })?;
             }
             check_file(path)?;
-            let artifact = loader::load(path)?;
+            let artifact = loader::load(path, self.inner.strict.load(Ordering::Acquire))?;
             let rejected_manifest = artifact.manifest.clone();
             if let Err(error) = self.ensure_dependencies(&artifact.manifest, path) {
                 self.record_manifest_rejection(&error, rejected_manifest);
@@ -333,7 +333,9 @@ impl ModuleHost {
         let mut outcomes = Vec::new();
         let mut pending = Vec::new();
         for path in paths {
-            match check_file(&path).and_then(|()| loader::load(&path)) {
+            match check_file(&path).and_then(|()| {
+                loader::load(&path, self.inner.strict.load(Ordering::Acquire))
+            }) {
                 Ok(artifact) => pending.push((path, artifact)),
                 Err(error) => outcomes.push(Err(error)),
             }
@@ -424,7 +426,7 @@ impl ModuleHost {
             .into_iter()
             .map(|path| {
                 let inspected = check_file(&path)
-                    .and_then(|()| loader::load(&path))
+                    .and_then(|()| loader::load(&path, self.inner.strict.load(Ordering::Acquire)))
                     .and_then(|artifact| {
                         let mut info =
                             self.validate(&path, &artifact.descriptor, &artifact.manifest)?;
@@ -1806,8 +1808,8 @@ mod tests {
         let second = PathBuf::from(
             std::env::var_os("TINYBUS_TEST_MODULE_TWO").expect("TINYBUS_TEST_MODULE_TWO"),
         );
-        let first = loader::load(&first).unwrap();
-        let second = loader::load(&second).unwrap();
+        let first = loader::load(&first, false).unwrap();
+        let second = loader::load(&second, false).unwrap();
         assert_eq!(first.manifest.module.name, "tinybus");
         assert_eq!(second.manifest.module.name, "module-clock-two");
         assert_ne!(first.descriptor.module_name, second.descriptor.module_name);

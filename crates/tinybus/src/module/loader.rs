@@ -3,9 +3,10 @@
 use std::path::Path;
 
 use crate::error::{Error, Result};
+use crate::{build_info, version::Version};
 use crate::module::abi::{
     ABI_MAGIC, ABI_REVISION, DESCRIPTOR_PREFIX_SIZE, MAX_DESCRIPTOR_SIZE, TbAbiDescriptor,
-    TbModuleInit, TbSlice,
+    TbModuleInit, TbSlice, field_bytes,
 };
 use crate::module::manifest::ModuleManifest;
 
@@ -26,7 +27,7 @@ struct DescriptorPrefix {
     descriptor_size: u32,
 }
 
-pub(crate) fn load(path: &Path) -> Result<LoadedArtifact> {
+pub(crate) fn load(path: &Path, strict: bool) -> Result<LoadedArtifact> {
     let handle = platform::open(path)?;
     let descriptor_ptr = platform::symbol(handle, b"TINYBUS_MODULE_ABI_V1\0", path)?;
 
@@ -44,6 +45,7 @@ pub(crate) fn load(path: &Path) -> Result<LoadedArtifact> {
         return Err(Error::module_refused(path, "descriptor is too small"));
     }
     let descriptor = unsafe { descriptor_ptr.cast::<TbAbiDescriptor>().read_unaligned() };
+    gate_descriptor(path, &descriptor, strict)?;
 
     let manifest_fn: ManifestFn = unsafe {
         std::mem::transmute(platform::symbol(
@@ -68,6 +70,51 @@ pub(crate) fn load(path: &Path) -> Result<LoadedArtifact> {
         manifest,
         init,
     })
+}
+
+fn gate_descriptor(path: &Path, descriptor: &TbAbiDescriptor, strict: bool) -> Result<()> {
+    let refuse = |reason| Error::module_refused(path, reason);
+    if descriptor.pointer_width != usize::BITS {
+        return Err(refuse("pointer width does not match"));
+    }
+    if (descriptor.flags & (1 << 2) != 0) != cfg!(target_endian = "little") {
+        return Err(refuse("target endianness does not match"));
+    }
+    if field_bytes(&descriptor.target_triple) != build_info::TARGET.as_bytes() {
+        return Err(refuse("target triple does not match"));
+    }
+    if descriptor.flags & 1 == 0 {
+        return Err(refuse("module was built with panic abort"));
+    }
+    let host_version = Version::parse(crate::VERSION).expect("crate version is semver");
+    let module_version = Version::new(
+        descriptor.tinybus_major.into(),
+        descriptor.tinybus_minor.into(),
+        descriptor.tinybus_patch.into(),
+    );
+    if !host_version.compatible_series().accepts(&module_version) {
+        return Err(Error::module_refused(
+            path,
+            format!(
+                "tinybus version is incompatible: host {host_version}, module {module_version}"
+            ),
+        ));
+    }
+    let missing_features = descriptor.tinybus_feature_bits & !build_info::FEATURE_BITS;
+    if missing_features != 0 {
+        let bit = 1u64 << missing_features.trailing_zeros();
+        return Err(Error::module_refused(
+            path,
+            format!(
+                "module requires unavailable tinybus feature {}",
+                build_info::feature_name(bit)
+            ),
+        ));
+    }
+    if strict && field_bytes(&descriptor.rustc_version) != build_info::RUSTC_VERSION.as_bytes() {
+        return Err(refuse("rustc version does not match in strict mode"));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
