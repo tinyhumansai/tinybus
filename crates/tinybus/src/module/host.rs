@@ -1747,15 +1747,175 @@ mod tests {
 
 #[cfg(windows)]
 fn check_directory(path: &Path) -> Result<()> {
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|_| Error::module_refused(path, "module directory is unavailable"))?;
-    if !metadata.file_type().is_dir() {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|_| Error::module_refused(path, "module directory is unavailable"))?
+            .join(path)
+    };
+    for component in absolute.ancestors() {
+        let metadata = std::fs::symlink_metadata(component)
+            .map_err(|_| Error::module_refused(path, "module directory is unavailable"))?;
+        if !metadata.file_type().is_dir() {
+            return Err(Error::module_refused(
+                path,
+                "module search path contains a non-directory component",
+            ));
+        }
+        if windows_directory_grants_untrusted_write(component)? {
+            return Err(Error::module_refused(
+                path,
+                "module directory is writable by another user",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_directory_grants_untrusted_write(path: &Path) -> Result<bool> {
+    use std::ffi::c_void;
+    use std::os::windows::ffi::OsStrExt;
+
+    #[repr(C)]
+    struct Acl {
+        revision: u8,
+        sbz1: u8,
+        size: u16,
+        ace_count: u16,
+        sbz2: u16,
+    }
+    #[repr(C)]
+    struct AceHeader {
+        ace_type: u8,
+        ace_flags: u8,
+        ace_size: u16,
+    }
+    #[repr(C)]
+    struct AccessAllowedAce {
+        header: AceHeader,
+        mask: u32,
+        sid_start: u32,
+    }
+
+    #[link(name = "advapi32")]
+    unsafe extern "system" {
+        fn GetNamedSecurityInfoW(
+            name: *mut u16,
+            object_type: u32,
+            security_info: u32,
+            owner: *mut *mut c_void,
+            group: *mut *mut c_void,
+            dacl: *mut *mut Acl,
+            sacl: *mut *mut Acl,
+            descriptor: *mut *mut c_void,
+        ) -> u32;
+        fn GetAce(acl: *const Acl, index: u32, ace: *mut *mut c_void) -> i32;
+        fn EqualSid(first: *const c_void, second: *const c_void) -> i32;
+        fn CreateWellKnownSid(
+            kind: u32,
+            domain: *const c_void,
+            sid: *mut c_void,
+            size: *mut u32,
+        ) -> i32;
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn LocalFree(memory: *mut c_void) -> *mut c_void;
+    }
+
+    const SE_FILE_OBJECT: u32 = 1;
+    const OWNER_SECURITY_INFORMATION: u32 = 0x1;
+    const DACL_SECURITY_INFORMATION: u32 = 0x4;
+    const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+    const WIN_LOCAL_SYSTEM_SID: u32 = 22;
+    const WIN_BUILTIN_ADMINISTRATORS_SID: u32 = 26;
+    const WRITE_MASK: u32 = 0x2
+        | 0x4
+        | 0x10
+        | 0x100
+        | 0x1_0000
+        | 0x4_0000
+        | 0x8_0000
+        | 0x1000_0000
+        | 0x4000_0000;
+
+    let mut wide = path.as_os_str().encode_wide().chain([0]).collect::<Vec<_>>();
+    let mut owner = std::ptr::null_mut();
+    let mut dacl = std::ptr::null_mut();
+    let mut descriptor = std::ptr::null_mut();
+    let status = unsafe {
+        GetNamedSecurityInfoW(
+            wide.as_mut_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut owner,
+            std::ptr::null_mut(),
+            &mut dacl,
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if status != 0 || descriptor.is_null() || owner.is_null() {
+        if !descriptor.is_null() {
+            unsafe { LocalFree(descriptor) };
+        }
         return Err(Error::module_refused(
             path,
-            "module search path is not a directory",
+            "module directory ACL is unavailable",
         ));
     }
-    // The loader uses LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR. ACL enforcement is
-    // performed by the embedding application, which owns the install root.
-    Ok(())
+
+    let result = (|| {
+        if dacl.is_null() {
+            return true;
+        }
+        let mut admin_sid = [0u32; 17];
+        let mut admin_len = size_of_val(&admin_sid) as u32;
+        let mut system_sid = [0u32; 17];
+        let mut system_len = size_of_val(&system_sid) as u32;
+        if unsafe {
+            CreateWellKnownSid(
+                WIN_BUILTIN_ADMINISTRATORS_SID,
+                std::ptr::null(),
+                admin_sid.as_mut_ptr().cast(),
+                &mut admin_len,
+            )
+        } == 0
+            || unsafe {
+                CreateWellKnownSid(
+                    WIN_LOCAL_SYSTEM_SID,
+                    std::ptr::null(),
+                    system_sid.as_mut_ptr().cast(),
+                    &mut system_len,
+                )
+            } == 0
+        {
+            return true;
+        }
+        let ace_count = unsafe { (*dacl).ace_count };
+        for index in 0..u32::from(ace_count) {
+            let mut ace = std::ptr::null_mut();
+            if unsafe { GetAce(dacl, index, &mut ace) } == 0 || ace.is_null() {
+                return true;
+            }
+            let ace = ace.cast::<AccessAllowedAce>();
+            if unsafe { (*ace).header.ace_type } != ACCESS_ALLOWED_ACE_TYPE
+                || unsafe { (*ace).mask } & WRITE_MASK == 0
+            {
+                continue;
+            }
+            let sid = unsafe { std::ptr::addr_of!((*ace).sid_start) }.cast();
+            let trusted = unsafe { EqualSid(sid, owner) } != 0
+                || unsafe { EqualSid(sid, admin_sid.as_ptr().cast()) } != 0
+                || unsafe { EqualSid(sid, system_sid.as_ptr().cast()) } != 0;
+            if !trusted {
+                return true;
+            }
+        }
+        false
+    })();
+    unsafe { LocalFree(descriptor) };
+    Ok(result)
 }
