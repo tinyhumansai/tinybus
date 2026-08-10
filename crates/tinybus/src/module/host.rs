@@ -1074,8 +1074,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            state_change.body["state"],
-            "stopped",
+            state_change.body["state"], "stopped",
             "{}",
             state_change.body
         );
