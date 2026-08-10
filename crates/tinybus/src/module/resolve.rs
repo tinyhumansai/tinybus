@@ -7,7 +7,7 @@ use crate::module::manifest::ModuleManifest;
 /// Result indexes refer to the input manifest slice.
 pub(crate) struct Resolution {
     pub(crate) order: Vec<usize>,
-    pub(crate) unresolved: Vec<(usize, &'static str)>,
+    pub(crate) unresolved: Vec<(usize, String)>,
 }
 
 /// Reject collisions, ignore absent optional dependencies, and topologically
@@ -22,9 +22,12 @@ pub(crate) fn resolve(
     let mut pending = Vec::new();
     for (index, manifest) in manifests.iter().enumerate() {
         if duplicate_modules.contains(&manifest.module.name) {
-            unresolved.push((index, "two artifacts declare the same module name"));
+            unresolved.push((
+                index,
+                "two artifacts declare the same module name".to_string(),
+            ));
         } else if duplicate_bus_names.contains(&manifest.bus_name) {
-            unresolved.push((index, "two modules claim the same bus name"));
+            unresolved.push((index, "two modules claim the same bus name".to_string()));
         } else {
             pending.push(index);
         }
@@ -62,16 +65,19 @@ pub(crate) fn resolve(
                 .requires
                 .iter()
                 .filter(|dependency| !dependency.optional)
-                .any(|dependency| {
+                .find(|dependency| {
                     !available.contains(dependency.interface.interface.as_str())
                         && !declared.contains(dependency.interface.interface.as_str())
                 });
             unresolved.push((
                 index,
-                if missing {
-                    "a required interface has no provider"
+                if let Some(dependency) = missing {
+                    format!(
+                        "required interface {} has no provider",
+                        dependency.interface.interface
+                    )
                 } else {
-                    "module dependency cycle detected"
+                    "module dependency cycle detected".to_string()
                 },
             ));
         }
@@ -151,9 +157,10 @@ mod tests {
         )];
         let result = resolve(&manifests, &HashSet::new());
         assert!(result.order.is_empty());
-        assert_eq!(
-            result.unresolved[0].1,
-            "a required interface has no provider"
+        assert!(
+            result.unresolved[0]
+                .1
+                .contains("ai.tinyhumans.module.Missing")
         );
     }
 
@@ -187,7 +194,7 @@ mod tests {
             result
                 .unresolved
                 .iter()
-                .all(|(_, reason)| *reason == "module dependency cycle detected")
+                .all(|(_, reason)| reason == "module dependency cycle detected")
         );
     }
 
