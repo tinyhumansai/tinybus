@@ -465,7 +465,9 @@ async fn root_catalogs_and_awaited_publishing_keep_the_same_wire_shape() {
 
     let root_config = EventBusConfig::new("/", "ai.tinyhumans.openhuman.Events").unwrap();
     let root_bus = EventBus::<TestEvent>::without_match(
-        Connection::attach(Arc::new(crate::transport::memory::MemoryTransport::pair().0)),
+        Connection::attach(Arc::new(
+            crate::transport::memory::MemoryTransport::pair().0,
+        )),
         root_config.clone(),
     );
     assert_eq!(root_bus.path_for("cron").unwrap().as_str(), "/cron");
@@ -510,6 +512,11 @@ fn decoding_rejects_other_catalogs_and_malformed_event_bodies() {
     );
     assert!(crate::events::decode::<TestEvent>(&config, &wrong_path).is_none());
 
-    let malformed = Message::signal(path, interface, published, serde_json::json!([{"bad": true}]));
+    let malformed = Message::signal(
+        path,
+        interface,
+        published,
+        serde_json::json!([{"bad": true}]),
+    );
     assert!(crate::events::decode::<TestEvent>(&config, &malformed).is_none());
 }
