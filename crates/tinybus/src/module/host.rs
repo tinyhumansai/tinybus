@@ -999,6 +999,7 @@ mod tests {
 
     static INIT_RAN: AtomicBool = AtomicBool::new(false);
     static LAZY_INIT_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static FAILED_INIT_COUNT: AtomicUsize = AtomicUsize::new(0);
 
     struct FakeModule {
         tx: std::sync::mpsc::SyncSender<Vec<u8>>,
@@ -1073,6 +1074,14 @@ mod tests {
         TB_OK
     }
 
+    unsafe extern "C" fn failing_init(
+        _: *const crate::module::abi::TbHostVtable,
+        _: *mut TbModuleVtable,
+    ) -> i32 {
+        FAILED_INIT_COUNT.fetch_add(1, Ordering::AcqRel);
+        crate::module::abi::TB_BAD_ARGUMENT
+    }
+
     unsafe extern "C" fn init_that_must_not_run(
         _: *const crate::module::abi::TbHostVtable,
         _: *mut TbModuleVtable,
@@ -1142,6 +1151,47 @@ mod tests {
         assert_eq!(second.unwrap(), "second");
         assert_eq!(LAZY_INIT_COUNT.load(Ordering::Acquire), 1);
         assert_eq!(host.list()[0].state, ModuleState::Ready);
+        broker_task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_module_whose_init_fails_is_terminal_and_is_never_initialized_again() {
+        FAILED_INIT_COUNT.store(0, Ordering::Release);
+        let bus = MemoryBus::new();
+        let broker = Broker::new();
+        let broker_task = broker.spawn(bus.clone());
+        let host = ModuleHost::new(broker);
+        let mut lazy_manifest = manifest();
+        lazy_manifest.lazy_init = true;
+        unsafe {
+            host.attach_raw(
+                "clock.so",
+                TbAbiDescriptor::current("clock", "0.1.0"),
+                lazy_manifest,
+                failing_init,
+            )
+        }
+        .unwrap();
+        let connection = Connection::connect(bus.connect().await.unwrap()).await.unwrap();
+        let proxy = connection
+            .proxy(
+                "ai.tinyhumans.module.Clock",
+                "/ai/tinyhumans/module/Clock",
+                "ai.tinyhumans.module.Clock",
+            )
+            .unwrap();
+        let first = proxy.call::<()>("Call", ()).await.unwrap_err();
+        assert_eq!(first.wire_name(), "ai.tinyhumans.tinybus.Error.ModuleUnavailable");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !matches!(host.list()[0].state, ModuleState::Failed { .. }) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let second = proxy.call::<()>("Call", ()).await.unwrap_err();
+        assert_eq!(second.wire_name(), "ai.tinyhumans.tinybus.Error.ModuleUnavailable");
+        assert_eq!(FAILED_INIT_COUNT.load(Ordering::Acquire), 1);
         broker_task.abort();
     }
 
