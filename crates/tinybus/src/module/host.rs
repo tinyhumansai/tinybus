@@ -280,8 +280,11 @@ impl ModuleHost {
             }
             check_file(path)?;
             let artifact = loader::load(path)?;
-            self.ensure_dependencies(&artifact.manifest, path)?;
             let rejected_manifest = artifact.manifest.clone();
+            if let Err(error) = self.ensure_dependencies(&artifact.manifest, path) {
+                self.record_manifest_rejection(&error, rejected_manifest);
+                return Err(error);
+            }
             let result = self.activate(path, artifact, config);
             if let Err(error) = &result {
                 self.record_manifest_rejection(error, rejected_manifest);
