@@ -756,10 +756,14 @@ impl ModuleControl for ModuleHostInner {
         let detail = state_detail(&info.state)
             .unwrap_or("module is not accepting calls")
             .to_string();
-        (!matches!(
+        matches!(
             info.state,
-            ModuleState::Ready | ModuleState::Serving | ModuleState::Initializing
-        ))
+            ModuleState::Rejected { .. }
+                | ModuleState::Faulted { .. }
+                | ModuleState::Failed { .. }
+                | ModuleState::Stopped
+                | ModuleState::Disabled
+        )
         .then(|| Error::ModuleUnavailable {
             module: info.name,
             state: state_name(&info.state).to_string(),
