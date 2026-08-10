@@ -250,3 +250,31 @@ mod platform {
         Ok(pointer)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn descriptor_gate_rejects_invalid_size_and_endianness_declarations() {
+        let path = Path::new("module.so");
+        let mut descriptor = TbAbiDescriptor::current("module", crate::VERSION);
+        descriptor.descriptor_size = DESCRIPTOR_PREFIX_SIZE - 1;
+        assert!(gate_descriptor(path, &descriptor, false).is_err());
+
+        let mut descriptor = TbAbiDescriptor::current("module", crate::VERSION);
+        descriptor.flags ^= 1 << 2;
+        assert!(gate_descriptor(path, &descriptor, false).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_loader_refuses_missing_and_nul_containing_paths() {
+        let missing = Path::new("/definitely/not/a/tinybus-module.so");
+        assert!(load(missing, false).is_err());
+
+        use std::os::unix::ffi::OsStrExt;
+        let nul_path = Path::new(std::ffi::OsStr::from_bytes(b"module\0name"));
+        assert!(platform::open(nul_path).is_err());
+    }
+}
