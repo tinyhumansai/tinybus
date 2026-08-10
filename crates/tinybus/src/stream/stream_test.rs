@@ -658,3 +658,226 @@ async fn a_stream_call_with_no_member_is_rejected_rather_than_dispatched() {
         .unwrap_err();
     assert_eq!(error.wire_name(), "ai.tinyhumans.tinybus.Error.Protocol");
 }
+
+#[tokio::test]
+async fn a_stream_that_has_gone_idle_is_reaped_and_stops_holding_its_window() {
+    let (client, service) = bus().await;
+    // A zero idle timeout makes every existing stream idle by the time the next
+    // `Open` sweeps — the reaper's condition, expressed without waiting for a
+    // clock.
+    service.set_stream_limits(StreamLimits {
+        idle_timeout: Duration::ZERO,
+        ..StreamLimits::default()
+    });
+    let destination = BusName::new(SINK).unwrap();
+    let abandoned = client
+        .open_stream(&destination, StreamDescriptor::default())
+        .await
+        .unwrap();
+    let stream = abandoned.stream_ref();
+    let mut reader = service.accept_stream(&stream).unwrap();
+
+    // The sweep runs on the next `Open`, so that is what collects the first.
+    let _next = client
+        .open_stream(&destination, StreamDescriptor::default())
+        .await
+        .unwrap();
+
+    let error = reader.next_chunk().await.unwrap_err();
+    assert_eq!(
+        error.wire_name(),
+        "ai.tinyhumans.tinybus.Error.StreamAborted",
+        "{error}"
+    );
+    // And the sender is told, rather than writing into a stream that is gone.
+    let mut abandoned = abandoned;
+    assert!(abandoned.write_chunk(b"too late").await.is_err());
+}
+
+#[tokio::test]
+async fn a_closed_stream_nobody_collects_is_evicted_oldest_first() {
+    let (client, service) = bus().await;
+    service.set_stream_limits(StreamLimits {
+        max_streams_per_peer: 2,
+        ..StreamLimits::default()
+    });
+    let destination = BusName::new(SINK).unwrap();
+
+    // Three payloads written and closed, none ever read. A closed stream still
+    // holds its window, so the receiver must not accumulate them without bound.
+    let mut handles = Vec::new();
+    for _ in 0..3 {
+        let mut writer = client
+            .open_stream(&destination, StreamDescriptor::with_len(4))
+            .await
+            .unwrap();
+        handles.push(writer.stream_ref());
+        writer.write(b"data").await.unwrap();
+        writer.finish().await.unwrap();
+    }
+
+    // The oldest is gone; the newest — the one a call is most likely still
+    // waiting on — survives.
+    let error = service.accept_stream(&handles[0]).unwrap_err();
+    assert_eq!(
+        error.wire_name(),
+        "ai.tinyhumans.tinybus.Error.UnknownStream",
+        "{error}"
+    );
+    let mut kept = service.accept_stream(&handles[2]).unwrap();
+    assert_eq!(kept.next_chunk().await.unwrap().unwrap(), b"data");
+}
+
+#[tokio::test]
+async fn a_closed_stream_still_counts_for_nothing_against_the_live_limit() {
+    // Closing frees the slot: a peer that finishes its transfers can keep
+    // opening new ones, which is the whole difference between the live cap and
+    // the uncollected cap.
+    let (client, service) = bus().await;
+    service.set_stream_limits(StreamLimits {
+        max_streams_per_peer: 1,
+        ..StreamLimits::default()
+    });
+    let destination = BusName::new(SINK).unwrap();
+    for _ in 0..3 {
+        let mut writer = client
+            .open_stream(&destination, StreamDescriptor::with_len(2))
+            .await
+            .expect("a finished transfer must not hold its slot");
+        let stream = writer.stream_ref();
+        writer.write(b"hi").await.unwrap();
+        writer.finish().await.unwrap();
+        service.accept_stream(&stream).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn writing_after_close_is_refused_rather_than_appended() {
+    let (client, _service) = bus().await;
+    let destination = BusName::new(SINK).unwrap();
+    let mut writer = client
+        .open_stream(&destination, StreamDescriptor::with_len(4))
+        .await
+        .unwrap();
+    let id = writer.stream_ref().id;
+    writer.write(b"data").await.unwrap();
+    writer.finish().await.unwrap();
+
+    // A payload the receiver has already been told is complete must not grow.
+    let error = client
+        .call_stream_member(
+            &destination,
+            "Write",
+            serde_json::json!([id, 1, super::base64::encode(b"more")]),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.wire_name(),
+        "ai.tinyhumans.tinybus.Error.StreamAborted",
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn a_sender_is_told_when_the_receiver_drops_the_reader_mid_transfer() {
+    let (client, service) = bus().await;
+    let destination = BusName::new(SINK).unwrap();
+    let mut writer = client
+        .open_stream(&destination, StreamDescriptor::default())
+        .await
+        .unwrap();
+    let stream = writer.stream_ref();
+    let reader = service.accept_stream(&stream).unwrap();
+    writer.write_chunk(b"first").await.unwrap();
+
+    // Nobody is going to look at the rest, so pushing it is wasted work on both
+    // sides — the sender learns immediately instead of at its deadline.
+    drop(reader);
+    let error = writer.write_chunk(b"second").await.unwrap_err();
+    assert_eq!(
+        error.wire_name(),
+        "ai.tinyhumans.tinybus.Error.StreamAborted",
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn a_reader_reports_what_the_sender_declared_about_the_payload() {
+    let (client, service) = bus().await;
+    let writer = client
+        .open_stream(
+            &BusName::new(SINK).unwrap(),
+            StreamDescriptor::with_len(9).content_type("audio/wav"),
+        )
+        .await
+        .unwrap();
+    let reader = service.accept_stream(&writer.stream_ref()).unwrap();
+    assert_eq!(reader.content_type(), Some("audio/wav"));
+    assert_eq!(reader.declared_len(), Some(9));
+}
+
+#[tokio::test]
+async fn reading_past_the_callers_own_limit_is_an_error_not_a_silent_truncation() {
+    let (client, service) = bus().await;
+    let destination = BusName::new(SINK).unwrap();
+    let mut writer = client
+        .open_stream(&destination, StreamDescriptor::default())
+        .await
+        .unwrap();
+    let mut reader = service.accept_stream(&writer.stream_ref()).unwrap();
+    writer.write_chunk(&payload(64)).await.unwrap();
+
+    let error = reader.read_to_end_capped(16).await.unwrap_err();
+    assert_eq!(
+        error.wire_name(),
+        "ai.tinyhumans.tinybus.Error.StreamTooLarge",
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn a_reader_whose_connection_went_away_reports_it_rather_than_a_clean_eof() {
+    // No outcome is ever recorded when the receiving side simply disappears, and
+    // an unfinished payload must not be mistaken for a finished one.
+    let (client, service) = bus().await;
+    let writer = client
+        .open_stream(&BusName::new(SINK).unwrap(), StreamDescriptor::default())
+        .await
+        .unwrap();
+    let mut reader = service.accept_stream(&writer.stream_ref()).unwrap();
+    std::mem::forget(writer);
+    drop(service);
+
+    let error = tokio::time::timeout(Duration::from_secs(5), reader.next_chunk())
+        .await
+        .expect("a vanished connection must not leave the reader parked")
+        .unwrap_err();
+    assert_eq!(
+        error.wire_name(),
+        "ai.tinyhumans.tinybus.Error.StreamAborted",
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn neither_end_of_a_stream_prints_the_payload_when_debugged() {
+    // Both halves get printed in error paths, and what flows through them is
+    // the caller's data.
+    let (client, service) = bus().await;
+    let mut writer = client
+        .open_stream(
+            &BusName::new(SINK).unwrap(),
+            StreamDescriptor::default().content_type("text/plain"),
+        )
+        .await
+        .unwrap();
+    let reader = service.accept_stream(&writer.stream_ref()).unwrap();
+    writer.write_chunk(b"recovery-phrase").await.unwrap();
+
+    let printed = format!("{writer:?} {reader:?}");
+    assert!(!printed.contains("recovery-phrase"), "{printed}");
+    assert!(printed.contains("StreamWriter"), "{printed}");
+    assert!(printed.contains("StreamReader"), "{printed}");
+}
