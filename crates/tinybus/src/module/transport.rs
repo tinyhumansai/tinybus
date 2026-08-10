@@ -227,6 +227,7 @@ impl ModuleTransport {
                 break;
             };
             if self.deliver_now(message).await.is_err() {
+                self.context.inflight.fetch_sub(1, Ordering::AcqRel);
                 break;
             }
         }
