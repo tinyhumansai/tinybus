@@ -190,6 +190,17 @@ pub enum Error {
         reason: String,
     },
 
+    /// A known module cannot serve calls in its terminal/current state.
+    #[error("module `{module}` is unavailable ({state}): {detail}")]
+    ModuleUnavailable {
+        /// Stable module identity.
+        module: String,
+        /// Closed lifecycle state name.
+        state: String,
+        /// Safe state detail, never a body or environment value.
+        detail: String,
+    },
+
     /// Filesystem or socket I/O failed.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
@@ -305,6 +316,9 @@ impl Error {
             Self::Timeout { .. } => "ai.tinyhumans.tinybus.Error.Timeout",
             Self::IncompatibleVersion { .. } => "ai.tinyhumans.tinybus.Error.IncompatibleVersion",
             Self::ModuleRefused { .. } => "ai.tinyhumans.tinybus.Error.ModuleRefused",
+            Self::ModuleUnavailable { .. } => {
+                "ai.tinyhumans.tinybus.Error.ModuleUnavailable"
+            }
             Self::Path { .. } => "ai.tinyhumans.tinybus.Error.Path",
             Self::FeatureDisabled(_, _) => "ai.tinyhumans.tinybus.Error.FeatureDisabled",
             Self::Json(_) => "ai.tinyhumans.tinybus.Error.Json",
