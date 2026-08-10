@@ -44,6 +44,11 @@ pub extern "C" fn tinybus_module_manifest_v1() -> tinybus::module::abi::TbSlice 
 }
 
 #[unsafe(no_mangle)]
+/// Initialize through the v1 ABI after the host has admitted the descriptor.
+///
+/// # Safety
+///
+/// The host must supply valid v1 vtable pointers for the process lifetime.
 pub unsafe extern "C" fn tinybus_module_init_v1(
     host: *const tinybus::module::abi::TbHostVtable,
     out: *mut tinybus::module::abi::TbModuleVtable,

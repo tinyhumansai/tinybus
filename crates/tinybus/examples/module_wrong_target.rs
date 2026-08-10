@@ -26,6 +26,13 @@ pub extern "C" fn tinybus_module_manifest_v1() -> tinybus::module::abi::TbSlice 
 }
 
 #[unsafe(no_mangle)]
+/// Entry point that the gate must refuse to call.
+///
+/// # Safety
+///
+/// This function is an ABI fixture and accepts only valid v1 pointers, though
+/// its deliberately incompatible descriptor means a correct host never calls
+/// it.
 pub unsafe extern "C" fn tinybus_module_init_v1(
     _: *const tinybus::module::abi::TbHostVtable,
     _: *mut tinybus::module::abi::TbModuleVtable,
