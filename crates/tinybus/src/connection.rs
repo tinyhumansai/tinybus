@@ -81,6 +81,10 @@ struct Inner {
     unique_name: std::sync::RwLock<Option<BusName>>,
     signals: broadcast::Sender<Message>,
     panic_handler: std::sync::RwLock<Option<Arc<dyn Fn() -> Error + Send + Sync>>>,
+    /// Bulk streams being received. On the connection rather than in the object
+    /// tree because a chunk has to be checked against the header's stamped
+    /// `sender`, and [`Interface`] deliberately never sees a header.
+    streams: StreamRegistry,
 }
 
 /// Closes the transport when the last [`Connection`] handle goes away.
