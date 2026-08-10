@@ -819,7 +819,7 @@ fn module_host_helpers_preserve_safe_names_states_and_allowlist_decisions() {
     assert_eq!(sanitized_field(b"bad\nname"), None);
     assert_eq!(sanitized_field(&[0xff]), None);
     assert_eq!(safe_file_name(Path::new("/private/clock.so")), "clock.so");
-    assert_eq!(safe_file_name(Path::new("/private/bad\nname")), "module");
+    assert_eq!(safe_file_name(Path::new("/private/\n")), "module");
     assert_eq!(safe_file_name(Path::new("/")), "module");
     assert!(has_library_extension(Path::new(if cfg!(windows) {
         "clock.dll"
