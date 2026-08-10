@@ -638,12 +638,26 @@ mod tests {
         let listed: Vec<ModuleInfo> = control.call("ListModules", ()).await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].name, "tinybus");
+        let mut state_changes = client
+            .add_match(
+                crate::router::MatchRule::parse(
+                    "type=signal,interface=ai.tinyhumans.tinybus.Bus,member=ModuleStateChanged",
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
 
         let stopped: ModuleInfo = control
             .call("StopModule", ("tinybus", 1_000u64))
             .await
             .unwrap();
         assert_eq!(stopped.state, ModuleState::Stopped);
+        let state_change = tokio::time::timeout(Duration::from_secs(2), state_changes.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(state_change.body["state"], "stopped");
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 if !client
