@@ -770,6 +770,13 @@ fn a_world_writable_module_directory_is_refused_before_any_dlopen() {
 
 #[cfg(unix)]
 #[test]
+fn a_sticky_world_writable_module_directory_is_accepted() {
+    assert_eq!(unix_directory_refusal(0, 0o1777, 1_000), None);
+    assert_eq!(unix_directory_refusal(1_000, 0o1777, 1_000), None);
+}
+
+#[cfg(unix)]
+#[test]
 fn a_module_directory_owned_by_another_user_is_refused() {
     assert_eq!(
         unix_directory_refusal(1_001, 0o755, 1_000),

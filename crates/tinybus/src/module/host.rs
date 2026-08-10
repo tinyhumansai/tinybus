@@ -1268,7 +1268,7 @@ fn check_directory(path: &Path) -> Result<()> {
 fn unix_directory_refusal(owner: u32, mode: u32, current_uid: u32) -> Option<&'static str> {
     if owner != current_uid && owner != 0 {
         Some("module directory is owned by another user")
-    } else if mode & 0o022 != 0 {
+    } else if mode & 0o022 != 0 && mode & 0o1000 == 0 {
         Some("module directory is writable by another user")
     } else {
         None
