@@ -397,6 +397,18 @@ impl ModuleHost {
         paths
     }
 
+    /// Load every existing directory in [`ModuleHost::search_paths`] order.
+    pub fn load_search_paths(&self) -> Vec<Result<ModuleInfo>> {
+        let mut outcomes = Vec::new();
+        for path in Self::search_paths().into_iter().filter(|path| path.is_dir()) {
+            match self.load_dir(path) {
+                Ok(results) => outcomes.extend(results),
+                Err(error) => outcomes.push(Err(error)),
+            }
+        }
+        outcomes
+    }
+
     /// Inspect a directory without initializing or attaching any module.
     pub fn scan_dir(&self, directory: impl AsRef<Path>) -> Result<Vec<ModuleInfo>> {
         let directory = directory.as_ref();
@@ -783,10 +795,19 @@ impl ModuleControl for ModuleHostInner {
 
     fn rescan(self: Arc<Self>, paths: Vec<PathBuf>, dry_run: bool) -> Result<Vec<ModuleInfo>> {
         let directories = if paths.is_empty() {
-            self.directories
+            let configured = self
+                .directories
                 .lock()
                 .expect("module directory lock")
-                .clone()
+                .clone();
+            if configured.is_empty() {
+                ModuleHost::search_paths()
+                    .into_iter()
+                    .filter(|path| path.is_dir())
+                    .collect()
+            } else {
+                configured
+            }
         } else {
             paths
         };
