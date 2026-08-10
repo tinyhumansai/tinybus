@@ -1574,6 +1574,46 @@ mod tests {
         broker_task.abort();
     }
 
+    #[tokio::test]
+    async fn one_wedged_module_does_not_stall_another_modules_traffic() {
+        let _test_guard = FAKE_MODULE_TEST_LOCK.lock().await;
+        let bus = MemoryBus::new();
+        let broker = Broker::new();
+        let broker_task = broker.spawn(bus.clone());
+        let host = ModuleHost::new(broker);
+        for (module_name, surface_name) in [("one", "One"), ("two", "Two")] {
+            let mut module_manifest = named_manifest(module_name, surface_name);
+            module_manifest.lazy_init = true;
+            unsafe {
+                host.attach_raw(
+                    format!("{module_name}.so"),
+                    TbAbiDescriptor::current(module_name, "0.1.0"),
+                    module_manifest,
+                    lazy_echo_init,
+                )
+            }
+            .unwrap();
+        }
+        let connection = Connection::connect(bus.connect().await.unwrap()).await.unwrap();
+        let proxy = |surface_name: &str| {
+            connection
+                .proxy(
+                    format!("ai.tinyhumans.module.{surface_name}"),
+                    format!("/ai/tinyhumans/module/{surface_name}"),
+                    format!("ai.tinyhumans.module.{surface_name}"),
+                )
+                .unwrap()
+        };
+        let wedged = proxy("One")
+            .with_timeout(Duration::from_millis(30))
+            .call::<()>("Hang", ());
+        let healthy = proxy("Two").call::<String>("Echo", ("healthy",));
+        let (wedged, healthy) = tokio::join!(wedged, healthy);
+        assert!(matches!(wedged.unwrap_err(), Error::Timeout { .. }));
+        assert_eq!(healthy.unwrap(), "healthy");
+        broker_task.abort();
+    }
+
     #[test]
     fn a_module_compiled_with_panic_abort_is_refused_because_a_panic_would_kill_the_host() {
         let broker = Broker::new();
