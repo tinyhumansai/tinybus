@@ -133,6 +133,9 @@ pub struct ModuleHost {
 struct ModuleHostInner {
     broker: Broker,
     strict: AtomicBool,
+    // Admission spans duplicate validation through final insertion; a narrower
+    // lock lets two concurrent loads both pass the name check.
+    admission: Mutex<()>,
     loaded: Mutex<Vec<LoadedModule>>,
     rejected: Mutex<Vec<ModuleInfo>>,
     directories: Mutex<Vec<PathBuf>>,
@@ -158,6 +161,7 @@ impl ModuleHost {
         let inner = Arc::new(ModuleHostInner {
             broker: broker.clone(),
             strict: AtomicBool::new(false),
+            admission: Mutex::new(()),
             loaded: Mutex::new(Vec::new()),
             rejected: Mutex::new(Vec::new()),
             directories: Mutex::new(Vec::new()),
@@ -494,6 +498,7 @@ impl ModuleHost {
         artifact: LoadedArtifact,
         config: serde_json::Value,
     ) -> Result<ModuleInfo> {
+        let _admission = self.inner.admission.lock().expect("module admission lock");
         let mut admitted = self.validate(path, &artifact.descriptor, &artifact.manifest)?;
         if self
             .inner
