@@ -72,8 +72,24 @@ pub(crate) fn load(path: &Path, strict: bool) -> Result<LoadedArtifact> {
     })
 }
 
-fn gate_descriptor(path: &Path, descriptor: &TbAbiDescriptor, strict: bool) -> Result<()> {
+pub(crate) fn gate_descriptor(
+    path: &Path,
+    descriptor: &TbAbiDescriptor,
+    strict: bool,
+) -> Result<()> {
     let refuse = |reason| Error::module_refused(path, reason);
+    if descriptor.magic != ABI_MAGIC {
+        return Err(refuse("ABI magic does not match"));
+    }
+    if descriptor.abi_revision != ABI_REVISION {
+        return Err(refuse("ABI revision does not match"));
+    }
+    if !(DESCRIPTOR_PREFIX_SIZE..=MAX_DESCRIPTOR_SIZE).contains(&descriptor.descriptor_size) {
+        return Err(refuse("descriptor size is invalid"));
+    }
+    if descriptor.descriptor_size < size_of::<TbAbiDescriptor>() as u32 {
+        return Err(refuse("descriptor is too small"));
+    }
     if descriptor.pointer_width != usize::BITS {
         return Err(refuse("pointer width does not match"));
     }
