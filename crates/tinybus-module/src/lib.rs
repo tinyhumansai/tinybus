@@ -42,6 +42,17 @@ impl HostCalls {
     fn fault(&self) {
         unsafe { (self.0.fault)(self.0.host_ctx, std::ptr::null(), 0) }
     }
+
+    fn log(&self, level: u32, message: &[u8]) {
+        unsafe {
+            (self.0.log)(
+                self.0.host_ctx,
+                level,
+                message.as_ptr(),
+                message.len(),
+            )
+        }
+    }
 }
 
 struct ModuleTransport {
@@ -153,6 +164,25 @@ where
         if host.0.size < size_of::<TbHostVtable>() as u32 {
             return TB_BAD_ARGUMENT;
         }
+
+        let panic_host = host;
+        std::panic::set_hook(Box::new(move |panic| {
+            let location = panic.location().map_or_else(
+                || "module panicked at an unknown location".to_string(),
+                |location| {
+                    format!(
+                        "module panicked at {}:{}:{}",
+                        location.file(),
+                        location.line(),
+                        location.column()
+                    )
+                },
+            );
+            // The payload is intentionally neither formatted nor forwarded:
+            // it may contain arguments, credentials, or recovery material.
+            panic_host.log(1, location.as_bytes());
+            panic_host.fault();
+        }));
 
         let runtime = match tokio::runtime::Builder::new_multi_thread()
             .worker_threads(worker_threads)
