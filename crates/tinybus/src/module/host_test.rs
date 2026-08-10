@@ -615,7 +615,7 @@ fn a_refusal_names_the_file_but_never_the_path_or_the_descriptor_bytes() {
 #[cfg(unix)]
 #[test]
 fn a_world_writable_module_directory_is_refused_before_any_dlopen() {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     let directory = tempfile::tempdir().unwrap();
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
