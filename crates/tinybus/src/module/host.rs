@@ -1721,9 +1721,8 @@ mod tests {
     #[test]
     #[ignore = "requires TINYBUS_TEST_MODULE and TINYBUS_TEST_MODULE_TWO"]
     fn two_modules_exporting_the_same_symbol_name_each_resolve_to_their_own() {
-        let first = PathBuf::from(
-            std::env::var_os("TINYBUS_TEST_MODULE").expect("TINYBUS_TEST_MODULE"),
-        );
+        let first =
+            PathBuf::from(std::env::var_os("TINYBUS_TEST_MODULE").expect("TINYBUS_TEST_MODULE"));
         let second = PathBuf::from(
             std::env::var_os("TINYBUS_TEST_MODULE_TWO").expect("TINYBUS_TEST_MODULE_TWO"),
         );
