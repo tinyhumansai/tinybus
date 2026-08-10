@@ -1047,7 +1047,11 @@ mod tests {
         tx: std::sync::mpsc::SyncSender<Vec<u8>>,
     }
 
-    unsafe extern "C" fn fake_deliver(ctx: *mut std::ffi::c_void, ptr: *const u8, len: usize) -> i32 {
+    unsafe extern "C" fn fake_deliver(
+        ctx: *mut std::ffi::c_void,
+        ptr: *const u8,
+        len: usize,
+    ) -> i32 {
         if ctx.is_null() || ptr.is_null() {
             return crate::module::abi::TB_BAD_ARGUMENT;
         }
