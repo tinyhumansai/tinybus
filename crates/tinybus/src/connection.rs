@@ -1027,8 +1027,14 @@ mod tests {
         let unique = connection.unique_name().unwrap();
 
         assert!(connection.list_names().await.unwrap().contains(&unique));
-        assert_eq!(connection.name_owner(&unique).await.unwrap(), Some(unique.clone()));
-        connection.request_name("ai.tinyhumans.TestService").await.unwrap();
+        assert_eq!(
+            connection.name_owner(&unique).await.unwrap(),
+            Some(unique.clone())
+        );
+        connection
+            .request_name("ai.tinyhumans.TestService")
+            .await
+            .unwrap();
         assert_eq!(
             connection
                 .name_owner("ai.tinyhumans.TestService")
@@ -1036,16 +1042,24 @@ mod tests {
                 .unwrap(),
             Some(unique.clone())
         );
-        connection.release_name("ai.tinyhumans.TestService").await.unwrap();
-        assert!(connection
-            .name_owner("ai.tinyhumans.TestService")
+        connection
+            .release_name("ai.tinyhumans.TestService")
             .await
-            .unwrap()
-            .is_none());
+            .unwrap();
+        assert!(
+            connection
+                .name_owner("ai.tinyhumans.TestService")
+                .await
+                .unwrap()
+                .is_none()
+        );
 
         let manifest = PeerManifest::new("connection-test");
         connection.announce(&manifest).await.unwrap();
-        assert_eq!(connection.manifest_of(&unique).await.unwrap(), Some(manifest));
+        assert_eq!(
+            connection.manifest_of(&unique).await.unwrap(),
+            Some(manifest)
+        );
         assert_eq!(connection.peers().await.unwrap().len(), 1);
     }
 
@@ -1059,21 +1073,33 @@ mod tests {
 
         assert!(connection.list_modules().await.unwrap().is_empty());
         assert!(connection.module("missing").await.unwrap().is_none());
-        assert!(connection.module_manifest("missing").await.unwrap().is_none());
+        assert!(
+            connection
+                .module_manifest("missing")
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(connection.rescan_modules().await.unwrap().is_empty());
-        assert!(connection
-            .scan_modules([std::path::Path::new("/definitely/not/a/module")], true)
-            .await
-            .unwrap()
-            .is_empty());
-        assert!(connection
-            .load_module("/definitely/not/a/module", serde_json::json!({}))
-            .await
-            .is_err());
-        assert!(connection
-            .stop_module("missing", Duration::from_millis(1))
-            .await
-            .is_err());
+        assert!(
+            connection
+                .scan_modules([std::path::Path::new("/definitely/not/a/module")], true)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            connection
+                .load_module("/definitely/not/a/module", serde_json::json!({}))
+                .await
+                .is_err()
+        );
+        assert!(
+            connection
+                .stop_module("missing", Duration::from_millis(1))
+                .await
+                .is_err()
+        );
         assert!(connection.enable_module("missing", true).await.is_err());
     }
 }
