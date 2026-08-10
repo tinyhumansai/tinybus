@@ -887,6 +887,8 @@ mod tests {
             max_level: tracing::level_filters::LevelFilter::TRACE,
         };
         tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("module span");
+            let _span_guard = span.enter();
             tracing::error!("module error");
             tracing::warn!("module warning");
             tracing::info!(answer = 42, "module log");
