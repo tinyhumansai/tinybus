@@ -184,16 +184,16 @@ impl Broker {
                     .expect("router lock")
                     .resolve(&destination);
                 #[cfg(feature = "modules")]
-                let target = target.or_else(|error| {
+                let target = target.map_err(|error| {
                     let control = self
                         .modules
                         .lock()
                         .expect("module control lock")
                         .as_ref()
                         .and_then(Weak::upgrade);
-                    Err(control
+                    control
                         .and_then(|control| control.unavailable_for(&destination))
-                        .unwrap_or(error))
+                        .unwrap_or(error)
                 });
                 let target = target?;
                 target
