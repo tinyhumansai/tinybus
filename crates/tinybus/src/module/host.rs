@@ -334,6 +334,7 @@ impl ModuleHost {
         let (transport, host_vtable) = ModuleTransport::new(admitted.name.clone(), config);
         let mut module_vtable = TbModuleVtable::default();
         let code = unsafe { (artifact.init)(&host_vtable, &mut module_vtable) };
+        transport.clear_config();
         if code != TB_OK {
             return Err(Error::module_refused(path, "module initialization failed"));
         }

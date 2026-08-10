@@ -9,6 +9,8 @@ The tail of the host vtable contains a borrowed JSON configuration slice. It is
 valid for the init call; the SDK deserializes it into module-owned memory before
 returning. Configuration decode failures return a numeric status and never
 include attacker-controlled values in host logs.
+The host zeroes and releases its serialized copy immediately after init
+returns; modules must not retain the borrowed pointer.
 
 ## Symbols
 

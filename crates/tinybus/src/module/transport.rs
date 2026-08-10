@@ -20,7 +20,7 @@ const HOST_QUEUE_CAPACITY: usize = 256;
 struct HostContext {
     inbound: StdMutex<Option<mpsc::Sender<Vec<u8>>>>,
     wake: Arc<Notify>,
-    config: Vec<u8>,
+    config: StdMutex<Vec<u8>>,
 }
 
 /// The broker-facing side of one loaded module.
@@ -42,7 +42,7 @@ impl ModuleTransport {
         let context = Box::leak(Box::new(HostContext {
             inbound: StdMutex::new(Some(inbound_tx)),
             wake: Arc::new(Notify::new()),
-            config,
+            config: StdMutex::new(config),
         }));
         let transport = Arc::new(Self {
             module: StdMutex::new(None),
@@ -50,6 +50,12 @@ impl ModuleTransport {
             context,
             label,
         });
+        let config = context.config.lock().expect("module config lock");
+        let config_slice = crate::module::abi::TbSlice {
+            ptr: config.as_ptr(),
+            len: config.len(),
+        };
+        drop(config);
         let vtable = TbHostVtable {
             size: size_of::<TbHostVtable>() as u32,
             _reserved: 0,
@@ -58,10 +64,7 @@ impl ModuleTransport {
             wake: host_wake,
             log: host_log,
             fault: host_fault,
-            config: crate::module::abi::TbSlice {
-                ptr: context.config.as_ptr(),
-                len: context.config.len(),
-            },
+            config: config_slice,
         };
         (transport, vtable)
     }
@@ -72,6 +75,13 @@ impl ModuleTransport {
         }
         *self.module.lock().expect("module vtable lock") = Some(module);
         Ok(())
+    }
+
+    pub(crate) fn clear_config(&self) {
+        let mut config = self.context.config.lock().expect("module config lock");
+        config.fill(0);
+        config.clear();
+        config.shrink_to_fit();
     }
 
     pub(crate) fn shutdown_sync(&self, deadline: Duration) -> i32 {
