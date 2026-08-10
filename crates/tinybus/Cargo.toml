@@ -86,5 +86,15 @@ name = "module_clock"
 crate-type = ["cdylib"]
 required-features = ["modules", "macros"]
 
+[[example]]
+name = "module_clock_two"
+crate-type = ["cdylib"]
+required-features = ["modules", "macros"]
+
+[[example]]
+name = "module_wrong_target"
+crate-type = ["cdylib"]
+required-features = ["modules"]
+
 [dev-dependencies.tinybus-module]
 workspace = true
