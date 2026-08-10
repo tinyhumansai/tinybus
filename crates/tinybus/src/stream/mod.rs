@@ -306,8 +306,9 @@ impl StreamRegistry {
             serde_json::from_value(body).map_err(|e| Error::bad_arguments(member.clone(), e))?;
         let limits = self.limits();
 
-        if let Some(total) = descriptor.total_len
-            && total > limits.max_stream_len
+        if descriptor
+            .total_len
+            .is_some_and(|total| total > limits.max_stream_len)
         {
             // Rejecting a declared oversize here rather than at the byte that
             // crosses the line saves both peers the whole transfer.
@@ -322,11 +323,10 @@ impl StreamRegistry {
             owner: header.sender.clone(),
             content_type: descriptor.content_type,
             declared_len: descriptor.total_len,
-            gate: Mutex::new(Gate {
-                next_seq: 0,
-                received: 0,
-                chunks: Some(chunks),
-            }),
+            gate: Mutex::new(()),
+            next_seq: AtomicU64::new(0),
+            received: AtomicU64::new(0),
+            chunks: std::sync::Mutex::new(Some(chunks)),
             reader: std::sync::Mutex::new(Some(reader)),
             outcome: std::sync::Mutex::new(None),
             last_activity: std::sync::Mutex::new(Instant::now()),
