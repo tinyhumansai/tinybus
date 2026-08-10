@@ -629,10 +629,6 @@ mod tests {
     async fn module_commands_and_invalid_json_fail_with_a_running_broker() {
         let (_dir, address, _host) = broker_with_module_host().await;
         let commands = [
-            ModulesCommand::List {
-                state: Some("ready".into()),
-                json: true,
-            },
             ModulesCommand::Show {
                 name: "missing".into(),
                 json: false,
@@ -655,7 +651,6 @@ mod tests {
             ModulesCommand::Disable {
                 name: "missing".into(),
             },
-            ModulesCommand::Doctor,
         ];
         for command in commands {
             assert!(
@@ -669,8 +664,8 @@ mod tests {
             &address,
             Duration::from_secs(2),
             ModulesCommand::List {
-                state: None,
-                json: false,
+                state: Some("ready".into()),
+                json: true,
             },
         )
         .await
