@@ -669,6 +669,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_refused_artifact_is_listed_without_exposing_its_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let extension = if cfg!(windows) {
+            "dll"
+        } else if cfg!(target_os = "macos") {
+            "dylib"
+        } else {
+            "so"
+        };
+        let path = directory.path().join(format!("broken.{extension}"));
+        std::fs::write(&path, b"not a dynamic library").unwrap();
+        let host = ModuleHost::new(Broker::new());
+        let error = host.load_file(&path).unwrap_err();
+        assert!(!error.to_string().contains(&directory.path().display().to_string()));
+        let listed = host.list();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].state, ModuleState::Rejected);
+        assert!(listed[0].reason.is_some());
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "requires TINYBUS_TEST_MODULE to point at the built cdylib"]
     async fn a_real_cdylib_loads_and_serves_a_call() {
