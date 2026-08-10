@@ -341,6 +341,30 @@ mod tests {
     }
 
     #[test]
+    fn every_name_grammar_rejects_its_boundary_cases() {
+        let overlong = "a".repeat(MAX_NAME_LEN + 1);
+        assert!(InterfaceName::new("").is_err());
+        assert!(InterfaceName::new(overlong.clone()).is_err());
+        assert!(InterfaceName::new("ai.tinyhumans.bad!").is_err());
+        assert!(ObjectPath::new(overlong.clone()).is_err());
+        assert!(MemberName::new("").is_err());
+        assert!(MemberName::new(overlong).is_err());
+        assert!(MemberName::new("1Call").is_err());
+    }
+
+    #[test]
+    fn generated_conversions_preserve_each_valid_name() {
+        let bus: BusName = "ai.tinyhumans.Example".parse().unwrap();
+        let path = ObjectPath::try_from("/ai/tinyhumans/Example").unwrap();
+        let interface = InterfaceName::try_from("ai.tinyhumans.Example".to_string()).unwrap();
+        let member = MemberName::new("Call").unwrap();
+        assert_eq!(bus.to_string(), bus.as_ref());
+        assert_eq!(String::from(path), "/ai/tinyhumans/Example");
+        assert_eq!(interface.as_ref(), "ai.tinyhumans.Example");
+        assert_eq!(member.as_ref(), "Call");
+    }
+
+    #[test]
     fn a_single_element_is_not_a_bus_name() {
         // The two-element minimum is what stops an integration from squatting
         // `Voice` and colliding with every other vendor on the bus.
