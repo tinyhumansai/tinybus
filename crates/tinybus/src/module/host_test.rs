@@ -498,7 +498,10 @@ async fn module_control_tracks_disable_stop_detach_and_unavailable_states() {
     assert_eq!(enabled.state, ModuleState::Resolved);
     assert!(transition.is_some());
     let unique_name = control.loaded.lock().unwrap()[0].unique_name.clone();
-    let stopped = control.stop("clock", Duration::from_millis(1)).await.unwrap();
+    let stopped = control
+        .stop("clock", Duration::from_millis(1))
+        .await
+        .unwrap();
     assert_eq!(stopped.state, ModuleState::Stopped);
     let transition = control.peer_detached(&unique_name).unwrap();
     assert_eq!(transition.2, ModuleState::Stopped);
