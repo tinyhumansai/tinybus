@@ -1079,11 +1079,12 @@ fn check_file(path: &Path) -> Result<()> {
             .open(path)
             .map_err(|_| Error::module_refused(path, "artifact metadata is unavailable"))?
     };
-    #[cfg(windows)]
-    let file = std::fs::File::open(path)
-        .map_err(|_| Error::module_refused(path, "artifact metadata is unavailable"))?;
+    #[cfg(unix)]
     let metadata = file
         .metadata()
+        .map_err(|_| Error::module_refused(path, "artifact metadata is unavailable"))?;
+    #[cfg(windows)]
+    let metadata = std::fs::symlink_metadata(path)
         .map_err(|_| Error::module_refused(path, "artifact metadata is unavailable"))?;
     if !metadata.file_type().is_file() {
         return Err(Error::module_refused(
@@ -1103,6 +1104,9 @@ fn check_file(path: &Path) -> Result<()> {
             "artifact extension is not loadable",
         ));
     }
+    #[cfg(windows)]
+    let file = std::fs::File::open(path)
+        .map_err(|_| Error::module_refused(path, "artifact is unreadable"))?;
     check_allowlist(path, file)
 }
 

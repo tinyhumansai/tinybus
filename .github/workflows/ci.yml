@@ -101,9 +101,30 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $module = (Get-ChildItem target/debug/examples/module_clock.dll | Select-Object -First 1).FullName
-          $moduleTwo = (Get-ChildItem target/debug/examples/module_clock_two.dll | Select-Object -First 1).FullName
-          $wrongTarget = (Get-ChildItem target/debug/examples/module_wrong_target.dll | Select-Object -First 1).FullName
+          $private = Join-Path $PWD target/private-module-tests
+          New-Item -ItemType Directory -Force $private | Out-Null
+          $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+          $acl = New-Object System.Security.AccessControl.DirectorySecurity
+          $acl.SetOwner($identity.User)
+          $acl.SetAccessRuleProtection($true, $false)
+          $inherit = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+          $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $identity.User,
+            [System.Security.AccessControl.FileSystemRights]::FullControl,
+            $inherit,
+            [System.Security.AccessControl.PropagationFlags]::None,
+            [System.Security.AccessControl.AccessControlType]::Allow
+          )
+          $acl.AddAccessRule($rule)
+          Set-Acl -LiteralPath $private -AclObject $acl
+          Copy-Item target/debug/examples/module_clock.dll $private
+          Copy-Item target/debug/examples/module_clock_two.dll $private
+          Copy-Item target/debug/examples/module_wrong_target.dll $private
+          $module = (Get-ChildItem "$private/module_clock.dll" | Select-Object -First 1).FullName
+          $moduleTwo = (Get-ChildItem "$private/module_clock_two.dll" | Select-Object -First 1).FullName
+          $wrongTarget = (Get-ChildItem "$private/module_wrong_target.dll" | Select-Object -First 1).FullName
+          $env:TEMP = $private
+          $env:TMP = $private
           $env:TINYBUS_TEST_MODULE = $module
           $env:TINYBUS_TEST_MODULE_TWO = $moduleTwo
           $env:TINYBUS_TEST_WRONG_TARGET = $wrongTarget
