@@ -201,7 +201,12 @@ struct Inbound {
     chunks: std::sync::Mutex<Option<mpsc::Sender<Vec<u8>>>>,
     /// Taken once, by whoever reads the stream.
     reader: std::sync::Mutex<Option<mpsc::Receiver<Vec<u8>>>>,
-    outcome: std::sync::Mutex<Option<Outcome>>,
+    /// Shared with the reader by `Arc` rather than reached through this
+    /// struct, because a reader must not keep the `Inbound` — and therefore the
+    /// channel's sending half — alive. If it did, a receiving connection that
+    /// died mid-stream would leave a reader parked on a channel that can never
+    /// close, which is precisely the hang this project exists to not have.
+    outcome: Arc<std::sync::Mutex<Option<Outcome>>>,
     last_activity: std::sync::Mutex<Instant>,
 }
 
@@ -328,7 +333,7 @@ impl StreamRegistry {
             received: AtomicU64::new(0),
             chunks: std::sync::Mutex::new(Some(chunks)),
             reader: std::sync::Mutex::new(Some(reader)),
-            outcome: std::sync::Mutex::new(None),
+            outcome: Arc::new(std::sync::Mutex::new(None)),
             last_activity: std::sync::Mutex::new(Instant::now()),
         });
 
@@ -542,7 +547,7 @@ impl StreamRegistry {
         Ok(StreamReader {
             content_type: stream.content_type.clone(),
             declared_len: stream.declared_len,
-            stream,
+            outcome: stream.outcome.clone(),
             chunks,
         })
     }
@@ -708,8 +713,10 @@ impl Drop for StreamWriter {
 /// [`StreamReader::read_to_end_capped`] is there for the common case where the payload
 /// is merely too big for a frame, not too big for memory.
 pub struct StreamReader {
-    stream: Arc<Inbound>,
     chunks: mpsc::Receiver<Vec<u8>>,
+    /// Only the verdict is shared with the receiving connection — deliberately
+    /// not the whole stream record, whose drop is what closes this channel.
+    outcome: Arc<std::sync::Mutex<Option<Outcome>>>,
     content_type: Option<String>,
     declared_len: Option<u64>,
 }
