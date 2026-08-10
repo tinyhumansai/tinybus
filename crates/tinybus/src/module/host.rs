@@ -317,94 +317,30 @@ impl ModuleHost {
             }
         }
 
-        let duplicate_names = duplicate_module_names(&pending);
-        pending.retain(|(path, artifact)| {
-            if duplicate_names.contains(&artifact.manifest.module.name) {
-                outcomes.push(Err(Error::module_refused(
-                    path,
-                    "two artifacts declare the same module name",
-                )));
-                false
-            } else {
-                true
-            }
-        });
-
-        let duplicate_bus_names = duplicate_bus_names(&pending);
-        pending.retain(|(path, artifact)| {
-            if duplicate_bus_names.contains(&artifact.manifest.bus_name) {
-                outcomes.push(Err(Error::module_refused(
-                    path,
-                    "two modules claim the same bus name",
-                )));
-                false
-            } else {
-                true
-            }
-        });
-
-        let declared_providers: HashSet<String> = pending
+        let manifests = pending
             .iter()
-            .flat_map(|(_, artifact)| {
-                artifact
-                    .manifest
-                    .provides
-                    .iter()
-                    .map(|provided| provided.version.interface.to_string())
-            })
-            .collect();
-        let mut available = self.provided_interfaces();
-        while !pending.is_empty() {
-            let ready = pending.iter().position(|(_, artifact)| {
-                artifact
-                    .manifest
-                    .requires
-                    .iter()
-                    .filter(|dependency| !dependency.optional)
-                    .all(|dependency| available.contains(dependency.interface.interface.as_str()))
-            });
-            if let Some(index) = ready {
-                let (path, artifact) = pending.remove(index);
-                let provides = artifact.manifest.provides.clone();
-                let config = self
-                    .inner
-                    .configs
-                    .lock()
-                    .expect("module config lock")
-                    .get(&artifact.manifest.module.name)
-                    .cloned()
-                    .unwrap_or_else(|| serde_json::json!({}));
-                let result = self.activate(&path, artifact, config);
-                if result.is_ok() {
-                    available.extend(
-                        provides
-                            .into_iter()
-                            .map(|provided| provided.version.interface.to_string()),
-                    );
-                }
-                outcomes.push(result);
-                continue;
-            }
-
-            for (path, artifact) in pending.drain(..) {
-                let missing = artifact
-                    .manifest
-                    .requires
-                    .iter()
-                    .filter(|dependency| !dependency.optional)
-                    .any(|dependency| {
-                        !available.contains(dependency.interface.interface.as_str())
-                            && !declared_providers.contains(dependency.interface.interface.as_str())
-                    });
-                outcomes.push(Err(Error::module_refused(
-                    &path,
-                    if missing {
-                        "a required interface has no provider"
-                    } else {
-                        "module dependency cycle detected"
-                    },
-                )));
-            }
+            .map(|(_, artifact)| artifact.manifest.clone())
+            .collect::<Vec<_>>();
+        let resolution = crate::module::resolve::resolve(&manifests, &self.provided_interfaces());
+        let mut pending = pending.into_iter().map(Some).collect::<Vec<_>>();
+        for (index, reason) in resolution.unresolved {
+            let (path, _) = pending[index].take().expect("resolver index is valid");
+            outcomes.push(Err(Error::module_refused(path, reason)));
+        }
+        for index in resolution.order {
+            let (path, artifact) = pending[index].take().expect("resolver index is valid");
+            let config = self
+                .inner
+                .configs
+                .lock()
+                .expect("module config lock")
+                .get(&artifact.manifest.module.name)
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            let result = self
+                .ensure_dependencies(&artifact.manifest, &path)
+                .and_then(|()| self.activate(&path, artifact, config));
+            outcomes.push(result);
         }
         for error in outcomes.iter().filter_map(|outcome| outcome.as_ref().err()) {
             self.record_rejection(error);
