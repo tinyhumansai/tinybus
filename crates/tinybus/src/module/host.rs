@@ -381,13 +381,12 @@ impl ModuleHost {
                 .unwrap_or_else(|| serde_json::json!({}));
             let result = self
                 .ensure_dependencies(&artifact.manifest, &path)
-                .map_err(|error| {
+                .inspect_err(|error| {
                     self.record_manifest_rejection(
-                        &error,
+                        error,
                         artifact.manifest.clone(),
                         RefusalClass::Unresolved,
                     );
-                    error
                 })
                 .and_then(|()| self.activate(&path, artifact, config));
             outcomes.push(result);
@@ -512,9 +511,8 @@ impl ModuleHost {
         let manifest = artifact.manifest.clone();
         let mut admitted = self
             .validate(path, &artifact.descriptor, &artifact.manifest)
-            .map_err(|error| {
-                self.record_manifest_rejection(&error, manifest.clone(), RefusalClass::Rejected);
-                error
+            .inspect_err(|error| {
+                self.record_manifest_rejection(error, manifest.clone(), RefusalClass::Rejected);
             })?;
         if self
             .inner

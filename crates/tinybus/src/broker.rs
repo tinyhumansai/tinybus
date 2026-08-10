@@ -421,7 +421,7 @@ impl Broker {
                         module_state_body(transition).into_iter().collect(),
                     ))
                 }
-                ModuleMember::Stop => return Err(Error::failed("module stop dispatch failed")),
+                ModuleMember::Stop => Err(Error::failed("module stop dispatch failed")),
                 ModuleMember::Enable => {
                     let (name, enabled): (String, bool) = parse_args(member, body)?;
                     let (info, transition) = control.enable(&name, enabled)?;
