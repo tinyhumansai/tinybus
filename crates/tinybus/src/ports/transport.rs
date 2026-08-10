@@ -22,7 +22,6 @@ use crate::message::Message;
 
 /// One peer's bidirectional link, framed at the message level.
 #[async_trait]
-#[cfg_attr(coverage, coverage(off))]
 pub trait Transport: Send + Sync + 'static {
     /// Write one message. Must be safe to call from many tasks at once.
     async fn send(&self, message: Message) -> Result<()>;
