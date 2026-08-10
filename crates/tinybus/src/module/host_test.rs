@@ -527,8 +527,8 @@ async fn module_control_tracks_disable_stop_detach_and_unavailable_states() {
     broker_task.abort();
 }
 
-#[test]
-fn admission_rejects_duplicate_names_bad_initializers_collisions_and_missing_dependencies() {
+#[tokio::test]
+async fn admission_rejects_duplicate_names_bad_initializers_collisions_and_missing_dependencies() {
     let host = ModuleHost::new(Broker::new());
     let descriptor = TbAbiDescriptor::current("clock", "0.1.0");
     unsafe {
