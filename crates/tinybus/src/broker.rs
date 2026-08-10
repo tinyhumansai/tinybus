@@ -237,8 +237,8 @@ impl Broker {
         Ok(())
     }
 
-    /// The bus's own interface. Synchronous: it only touches the routing table,
-    /// and holding the lock across an await is exactly what this design avoids.
+    /// The bus's own interface. Module stop may await a blocking callback; the
+    /// ordinary table still holds no lock across an await.
     async fn bus_method(
         &self,
         from: u64,
@@ -320,18 +320,25 @@ impl Broker {
         use std::path::PathBuf;
         use std::time::Duration;
 
-        if !matches!(
-            member.as_str(),
-            "ListModules"
-                | "GetModule"
-                | "GetModuleManifest"
-                | "LoadModule"
-                | "StopModule"
-                | "EnableModule"
-                | "RescanModules"
-        ) {
-            return None;
+        enum ModuleMember {
+            List,
+            Get,
+            GetManifest,
+            Load,
+            Stop,
+            Enable,
+            Rescan,
         }
+        let operation = match member.as_str() {
+            "ListModules" => ModuleMember::List,
+            "GetModule" => ModuleMember::Get,
+            "GetModuleManifest" => ModuleMember::GetManifest,
+            "LoadModule" => ModuleMember::Load,
+            "StopModule" => ModuleMember::Stop,
+            "EnableModule" => ModuleMember::Enable,
+            "RescanModules" => ModuleMember::Rescan,
+            _ => return None,
+        };
         let control = self
             .modules
             .lock()
@@ -343,7 +350,7 @@ impl Broker {
             Ok(control) => control,
             Err(error) => return Some((Err(error), Vec::new())),
         };
-        if member.as_str() == "StopModule" {
+        if matches!(operation, ModuleMember::Stop) {
             let parsed = parse_args::<(String, u64)>(member, body);
             let result = match parsed {
                 Ok((name, deadline_ms)) => control
@@ -356,9 +363,9 @@ impl Broker {
         }
 
         let outcome = (|| -> Result<(Value, Vec<Value>)> {
-            match member.as_str() {
-            "ListModules" => Ok((serde_json::to_value(control.list())?, Vec::new())),
-            "GetModule" => {
+            match operation {
+            ModuleMember::List => Ok((serde_json::to_value(control.list())?, Vec::new())),
+            ModuleMember::Get => {
                 let (name,): (String,) = parse_args(member, body)?;
                 Ok((serde_json::to_value(
                     control
@@ -367,7 +374,7 @@ impl Broker {
                         .find(|module| module.name == name),
                 )?, Vec::new()))
             }
-            "GetModuleManifest" => {
+            ModuleMember::GetManifest => {
                 let (name,): (String,) = parse_args(member, body)?;
                 Ok((serde_json::to_value(
                     control
@@ -377,7 +384,7 @@ impl Broker {
                         .map(|module| module.manifest),
                 )?, Vec::new()))
             }
-            "LoadModule" => {
+            ModuleMember::Load => {
                 let arguments = body.as_array().ok_or_else(|| {
                     Error::bad_arguments(member.clone(), "expected a positional array")
                 })?;
@@ -405,8 +412,8 @@ impl Broker {
                     module_state_body(transition).into_iter().collect(),
                 ))
             }
-            "StopModule" => unreachable!("stop is handled asynchronously above"),
-            "EnableModule" => {
+            ModuleMember::Stop => return Err(Error::failed("module stop dispatch failed")),
+            ModuleMember::Enable => {
                 let (name, enabled): (String, bool) = parse_args(member, body)?;
                 let (info, transition) = control.enable(&name, enabled)?;
                 Ok((
@@ -414,7 +421,7 @@ impl Broker {
                     module_state_body(transition).into_iter().collect(),
                 ))
             }
-            "RescanModules" => {
+            ModuleMember::Rescan => {
                 let arguments = body.as_array().ok_or_else(|| {
                     Error::bad_arguments(member.clone(), "expected a positional array")
                 })?;
