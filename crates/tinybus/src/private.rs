@@ -70,7 +70,10 @@ mod tests {
 
     #[test]
     fn literal_parsers_reject_invalid_generated_names() {
-        assert_eq!(parse_interface("ai.tinyhumans.Example").as_str(), "ai.tinyhumans.Example");
+        assert_eq!(
+            parse_interface("ai.tinyhumans.Example").as_str(),
+            "ai.tinyhumans.Example"
+        );
         assert_eq!(parse_member("Call").as_str(), "Call");
         assert!(std::panic::catch_unwind(|| parse_interface("not-valid")).is_err());
         assert!(std::panic::catch_unwind(|| parse_member("not.valid")).is_err());
