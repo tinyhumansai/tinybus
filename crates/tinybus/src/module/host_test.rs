@@ -868,6 +868,21 @@ fn module_host_helpers_preserve_safe_names_states_and_allowlist_decisions() {
         "clock.so"
     });
     std::fs::write(&module, b"module bytes").unwrap();
+    let digest = crate::module::hash::file_hex(std::fs::File::open(&module).unwrap()).unwrap();
+    std::fs::write(
+        directory.path().join("modules.toml"),
+        format!(
+            "clock.{} = \"{digest}\"\n",
+            if cfg!(windows) {
+                "dll"
+            } else if cfg!(target_os = "macos") {
+                "dylib"
+            } else {
+                "so"
+            }
+        ),
+    )
+    .unwrap();
     assert!(check_file(&module).is_ok());
     let text = directory.path().join("clock.txt");
     std::fs::write(&text, b"module bytes").unwrap();

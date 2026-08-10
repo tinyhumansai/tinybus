@@ -332,6 +332,29 @@ impl Connection {
         Ok(serde_json::from_value(value)?)
     }
 
+    /// Download and load a verified GitHub release module through the host.
+    #[cfg(feature = "modules")]
+    pub async fn load_github_module(
+        &self,
+        release_url: impl AsRef<str>,
+        asset_name: impl AsRef<str>,
+        sha256: impl AsRef<str>,
+        config: serde_json::Value,
+    ) -> Result<crate::module::ModuleInfo> {
+        let value = self
+            .call_bus(
+                "LoadGithubModule",
+                serde_json::json!([
+                    release_url.as_ref(),
+                    asset_name.as_ref(),
+                    sha256.as_ref(),
+                    config
+                ]),
+            )
+            .await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
     /// Stop one module. Its library remains mapped until process exit.
     #[cfg(feature = "modules")]
     pub async fn stop_module(

@@ -124,6 +124,18 @@ enum ModulesCommand {
         #[arg(long, default_value = "{}")]
         config: String,
     },
+    /// Download, verify, extract, and load a GitHub release module.
+    LoadGithub {
+        /// GitHub release tag URL.
+        release_url: String,
+        /// Release archive asset name, usually ending in `.tar.gz`.
+        asset: String,
+        /// Expected SHA-256 for the release archive.
+        sha256: String,
+        /// JSON object passed to the module's setup function.
+        #[arg(long, default_value = "{}")]
+        config: String,
+    },
     /// Stop a loaded module without unloading its library.
     Stop {
         /// Stable module name.
@@ -341,6 +353,19 @@ async fn run_modules(address: &Path, timeout: Duration, command: ModulesCommand)
             let config: serde_json::Value = serde_json::from_str(&config)?;
             let module: serde_json::Value = bus
                 .call("LoadModule", (path.to_string_lossy().to_string(), config))
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&module)?);
+            Ok(())
+        }
+        ModulesCommand::LoadGithub {
+            release_url,
+            asset,
+            sha256,
+            config,
+        } => {
+            let config: serde_json::Value = serde_json::from_str(&config)?;
+            let module: serde_json::Value = bus
+                .call("LoadGithubModule", (release_url, asset, sha256, config))
                 .await?;
             println!("{}", serde_json::to_string_pretty(&module)?);
             Ok(())

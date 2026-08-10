@@ -6,6 +6,8 @@
 
 pub mod abi;
 #[cfg(feature = "modules")]
+mod github;
+#[cfg(feature = "modules")]
 mod hash;
 pub mod manifest;
 
