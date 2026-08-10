@@ -617,12 +617,11 @@ impl StreamWriter {
     }
 
     /// Write exactly one chunk, which must be no larger than [`MAX_CHUNK_LEN`].
+    ///
+    /// There is no "already finished" case to guard against: [`Self::finish`]
+    /// and [`Self::abort`] both consume the writer, so the type system has
+    /// already ruled out a write after either of them.
     pub async fn write_chunk(&mut self, chunk: &[u8]) -> Result<()> {
-        if self.finished {
-            return Err(Error::StreamAborted {
-                reason: "the stream is already finished".to_string(),
-            });
-        }
         if chunk.len() > MAX_CHUNK_LEN {
             return Err(Error::protocol(format!(
                 "chunk of {} bytes exceeds the {MAX_CHUNK_LEN}-byte cap",
