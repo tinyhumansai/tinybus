@@ -25,9 +25,8 @@ restart.
 
 ## Loading sequence
 
-1. Check every directory component's ownership/mode, require a regular
-   platform library file no larger than 512 MiB, and enforce `modules.toml`
-   when present.
+1. Check every directory component's ownership/mode and require a regular
+   platform library file no larger than 512 MiB.
 2. Load eagerly and locally (`RTLD_NOW | RTLD_LOCAL` on Unix).
 3. Resolve `TINYBUS_MODULE_ABI_V1` against that specific handle.
 4. Read and validate only the frozen 16-byte descriptor prefix.
@@ -47,12 +46,41 @@ For directory discovery, embedding hosts call `ModuleHost::set_config(name,
 value)` (or the builder-form `with_config`) before `load_dir`; the value is
 selected by the admitted manifest name.
 
-The optional `modules.toml` file is authoritative for its directory. Keys are
+When present, `modules.toml` is authoritative for its directory. Keys are
 artifact file names (or stems) and values are lowercase SHA-256 hashes. An
-artifact absent from the file or with a mismatched hash is refused. Search
+artifact absent from the file or with a mismatched hash is refused. For remote
+loads, the host supplies the expected SHA-256 alongside the artifact URL;
+hashing happens before the platform loader opens the artifact. Search
 precedence is `OPENHUMAN_MODULE_PATH`, the platform user data directory, then
 the platform system directory. `tinybus modules scan --path <dir> --dry-run`
 performs admission and dependency checks without initializing or attaching.
+
+GitHub releases are loaded with `ModuleHost::load_github_release`. The release
+URL must identify a tag, the selected asset must be a `.tar.gz` or `.zip` archive, and
+the release must publish `checksum.toml` or `checksum.json`. The manifest uses
+this shape:
+
+```toml
+[sha256]
+"module-linux-x86_64.tar.gz" = "<64 lowercase hexadecimal characters>"
+```
+
+The host-provided digest is checked against the release manifest, then the
+downloaded archive is checked before extraction. The extracted archive must
+contain exactly one platform library matching the host (`.so`, `.dylib`, or
+`.dll`). `examples/create-release-assets.sh` and
+`examples/create-release-assets.ps1` show the Linux/macOS and Windows
+packaging conventions used by the example module.
+
+The CLI can generate the manifest consumed by the loader without external
+hashing tools:
+
+```sh
+tinybus modules checksum \
+  --path module-linux-x86_64.tar.gz \
+  --path module-macos-arm64.tar.gz \
+  --output checksum.toml
+```
 
 Refusing one artifact does not prevent the host from admitting other artifacts
 in the same directory. The refused artifact's error contains only a sanitized

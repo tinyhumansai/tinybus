@@ -1,4 +1,4 @@
-//! Dependency-free SHA-256 used by the optional module allowlist.
+//! Dependency-free SHA-256 used by module artifact verification.
 
 use std::io::{self, Read};
 

@@ -328,6 +328,7 @@ impl Broker {
             Get,
             GetManifest,
             Load,
+            LoadGithub,
             Stop,
             Enable,
             Rescan,
@@ -337,6 +338,7 @@ impl Broker {
             "GetModule" => ModuleMember::Get,
             "GetModuleManifest" => ModuleMember::GetManifest,
             "LoadModule" => ModuleMember::Load,
+            "LoadGithubModule" => ModuleMember::LoadGithub,
             "StopModule" => ModuleMember::Stop,
             "EnableModule" => ModuleMember::Enable,
             "RescanModules" => ModuleMember::Rescan,
@@ -416,6 +418,15 @@ impl Broker {
                         ));
                     }
                     let (info, transition) = control.load(PathBuf::from(path), config)?;
+                    Ok((
+                        serde_json::to_value(info)?,
+                        module_state_body(transition).into_iter().collect(),
+                    ))
+                }
+                ModuleMember::LoadGithub => {
+                    let (url, asset, sha256, config): (String, String, String, Value) =
+                        parse_args(member, body)?;
+                    let (info, transition) = control.load_github(url, asset, sha256, config)?;
                     Ok((
                         serde_json::to_value(info)?,
                         module_state_body(transition).into_iter().collect(),

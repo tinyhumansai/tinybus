@@ -33,6 +33,12 @@ tinybus-macros = { workspace = true, optional = true }
 # --- optional: the CLI ---
 clap = { version = "4", features = ["derive", "env"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+ureq = { version = "3.3", optional = true }
+flate2 = { version = "1", optional = true }
+tar = { version = "0.4", optional = true }
+zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
+tempfile = { version = "3", optional = true }
+toml = { version = "0.8", optional = true }
 
 [features]
 # `uds` and `macros` are on by default because a bus you cannot connect to over
@@ -62,7 +68,7 @@ cli = [
 
 # Load trusted, in-process cdylib modules. Off by default because a loaded
 # module shares the host's address space and full privileges.
-modules = []
+modules = ["dep:ureq", "dep:flate2", "dep:tar", "dep:zip", "dep:tempfile", "dep:toml"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "io-util"] }
@@ -94,6 +100,10 @@ required-features = ["modules", "macros"]
 [[example]]
 name = "module_wrong_target"
 crate-type = ["cdylib"]
+required-features = ["modules"]
+
+[[example]]
+name = "github_module_host"
 required-features = ["modules"]
 
 [dev-dependencies.tinybus-module]
