@@ -967,9 +967,13 @@ async fn a_receiver_does_not_reserve_memory_for_a_length_the_sender_merely_claim
     let stream = writer.stream_ref();
     let mut reader = service.accept_stream(&stream).unwrap();
     writer.write_chunk(b"four").await.unwrap();
-    drop(writer);
+    // Closed cleanly at the byte count actually sent, so the read below
+    // succeeds and its buffer is the one the reservation produced. Aborting
+    // instead would hand back an empty vector and assert nothing.
+    writer.finish().await.unwrap();
 
-    let bytes = reader.read_to_end_capped(claimed).await.unwrap_or_default();
+    let bytes = reader.read_to_end_capped(claimed).await.unwrap();
+    assert_eq!(bytes, b"four");
     assert!(
         bytes.capacity() as u64 <= MAX_CHUNK_LEN as u64,
         "reserved {} bytes for a {claimed}-byte claim carrying {} bytes",
