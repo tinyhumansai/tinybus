@@ -1073,7 +1073,12 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(state_change.body["state"], "stopped");
+        assert_eq!(
+            state_change.body["state"],
+            "stopped",
+            "{}",
+            state_change.body
+        );
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 if !client
