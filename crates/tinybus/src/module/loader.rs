@@ -276,8 +276,8 @@ mod tests {
                 Err(error) => error,
                 Ok(_) => panic!("missing module unexpectedly loaded"),
             }
-                .to_string()
-                .contains("dynamic loader rejected the artifact")
+            .to_string()
+            .contains("dynamic loader rejected the artifact")
         );
 
         use std::os::unix::ffi::OsStrExt;
