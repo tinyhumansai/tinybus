@@ -468,6 +468,55 @@ async fn one_wedged_module_does_not_stall_another_modules_traffic() {
     broker_task.abort();
 }
 
+#[tokio::test]
+async fn module_control_tracks_disable_stop_detach_and_unavailable_states() {
+    let _test_guard = FAKE_MODULE_TEST_LOCK.lock().await;
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    let broker_task = broker.spawn(bus);
+    let host = ModuleHost::new(broker);
+    let mut lazy_manifest = manifest();
+    lazy_manifest.lazy_init = true;
+    unsafe {
+        host.attach_raw(
+            "clock.so",
+            TbAbiDescriptor::current("clock", "0.1.0"),
+            lazy_manifest,
+            lazy_echo_init,
+        )
+    }
+    .unwrap();
+    let control = host.inner.clone();
+    let (disabled, transition) = control.enable("clock", false).unwrap();
+    assert_eq!(disabled.state, ModuleState::Disabled);
+    assert!(transition.is_some());
+    let unavailable = control
+        .unavailable_for(&manifest().bus_name)
+        .expect("disabled module is unavailable");
+    assert!(matches!(unavailable, Error::ModuleUnavailable { state, .. } if state == "disabled"));
+    let (enabled, transition) = control.enable("clock", true).unwrap();
+    assert_eq!(enabled.state, ModuleState::Resolved);
+    assert!(transition.is_some());
+    let unique_name = control.loaded.lock().unwrap()[0].unique_name.clone();
+    let stopped = control.stop("clock", Duration::from_millis(1)).await.unwrap();
+    assert_eq!(stopped.state, ModuleState::Stopped);
+    let transition = control.peer_detached(&unique_name).unwrap();
+    assert_eq!(transition.2, ModuleState::Stopped);
+    assert!(matches!(
+        control.enable("clock", true),
+        Err(Error::ModuleUnavailable { state, .. }) if state == "stopped"
+    ));
+    assert!(matches!(
+        control.stop("missing", Duration::ZERO).await,
+        Err(Error::Failed { .. })
+    ));
+    assert!(matches!(
+        control.enable("missing", true),
+        Err(Error::Failed { .. })
+    ));
+    broker_task.abort();
+}
+
 #[test]
 fn a_module_compiled_with_panic_abort_is_refused_because_a_panic_would_kill_the_host() {
     let broker = Broker::new();
