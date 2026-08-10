@@ -352,6 +352,61 @@ impl ModuleHost {
     }
 }
 
+impl ModuleControl for ModuleHostInner {
+    fn list(&self) -> Vec<ModuleInfo> {
+        self.loaded
+            .lock()
+            .expect("module list lock")
+            .iter()
+            .map(|module| module.info.clone())
+            .collect()
+    }
+
+    fn load(self: Arc<Self>, path: PathBuf) -> Result<ModuleInfo> {
+        ModuleHost { inner: self }.load_file(path)
+    }
+
+    fn stop(&self, name: &str, deadline: Duration) -> Result<ModuleInfo> {
+        let mut loaded = self.loaded.lock().expect("module list lock");
+        let module = loaded
+            .iter_mut()
+            .find(|module| module.info.name == name)
+            .ok_or_else(|| Error::failed("module is not loaded"))?;
+        let _ = module.transport.stop_sync(deadline);
+        module.info.state = ModuleState::Stopped;
+        Ok(module.info.clone())
+    }
+
+    fn enable(&self, name: &str, enabled: bool) -> Result<ModuleInfo> {
+        let mut loaded = self.loaded.lock().expect("module list lock");
+        let module = loaded
+            .iter_mut()
+            .find(|module| module.info.name == name)
+            .ok_or_else(|| Error::failed("module is not known"))?;
+        module.info.enabled = enabled;
+        Ok(module.info.clone())
+    }
+
+    fn rescan(self: Arc<Self>) -> Result<Vec<ModuleInfo>> {
+        let directories = self
+            .directories
+            .lock()
+            .expect("module directory lock")
+            .clone();
+        let host = ModuleHost { inner: self };
+        let mut loaded = Vec::new();
+        for directory in directories {
+            for outcome in host.load_dir(directory)? {
+                match outcome {
+                    Ok(info) => loaded.push(info),
+                    Err(error) => tracing::warn!(error = %error, "module refused during rescan"),
+                }
+            }
+        }
+        Ok(loaded)
+    }
+}
+
 fn duplicate_module_names(pending: &[(PathBuf, LoadedArtifact)]) -> HashSet<String> {
     let mut counts = HashMap::new();
     for (_, artifact) in pending {
