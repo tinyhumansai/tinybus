@@ -97,6 +97,13 @@ unsafe extern "C" fn failing_init(
     crate::module::abi::TB_BAD_ARGUMENT
 }
 
+unsafe extern "C" fn invalid_vtable_init(
+    _: *const crate::module::abi::TbHostVtable,
+    _: *mut TbModuleVtable,
+) -> i32 {
+    TB_OK
+}
+
 unsafe extern "C" fn init_that_must_not_run(
     _: *const crate::module::abi::TbHostVtable,
     _: *mut TbModuleVtable,
@@ -468,6 +475,131 @@ async fn one_wedged_module_does_not_stall_another_modules_traffic() {
     broker_task.abort();
 }
 
+#[tokio::test]
+async fn module_control_tracks_disable_stop_detach_and_unavailable_states() {
+    let _test_guard = FAKE_MODULE_TEST_LOCK.lock().await;
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    let broker_task = broker.spawn(bus);
+    let host = ModuleHost::new(broker);
+    let mut lazy_manifest = manifest();
+    lazy_manifest.lazy_init = true;
+    unsafe {
+        host.attach_raw(
+            "clock.so",
+            TbAbiDescriptor::current("clock", "0.1.0"),
+            lazy_manifest,
+            lazy_echo_init,
+        )
+    }
+    .unwrap();
+    let control = host.inner.clone();
+    let (disabled, transition) = control.enable("clock", false).unwrap();
+    assert_eq!(disabled.state, ModuleState::Disabled);
+    assert!(transition.is_some());
+    let unavailable = control
+        .unavailable_for(&manifest().bus_name)
+        .expect("disabled module is unavailable");
+    assert!(matches!(unavailable, Error::ModuleUnavailable { state, .. } if state == "disabled"));
+    let (enabled, transition) = control.enable("clock", true).unwrap();
+    assert_eq!(enabled.state, ModuleState::Resolved);
+    assert!(transition.is_some());
+    let unique_name = control.loaded.lock().unwrap()[0].unique_name.clone();
+    let stopped = control
+        .stop("clock", Duration::from_millis(1))
+        .await
+        .unwrap();
+    assert_eq!(stopped.state, ModuleState::Stopped);
+    let transition = control.peer_detached(&unique_name);
+    assert!(transition.is_none() || transition.unwrap().2 == ModuleState::Stopped);
+    assert!(matches!(
+        control.enable("clock", true),
+        Err(Error::ModuleUnavailable { state, .. }) if state == "stopped"
+    ));
+    assert!(matches!(
+        control.stop("missing", Duration::ZERO).await,
+        Err(Error::MethodFailed { .. })
+    ));
+    assert!(matches!(
+        control.enable("missing", true),
+        Err(Error::MethodFailed { .. })
+    ));
+    broker_task.abort();
+}
+
+#[tokio::test]
+async fn admission_rejects_duplicate_names_bad_initializers_collisions_and_missing_dependencies() {
+    let _test_guard = FAKE_MODULE_TEST_LOCK.lock().await;
+    let host = ModuleHost::new(Broker::new());
+    let descriptor = TbAbiDescriptor::current("clock", "0.1.0");
+    unsafe { host.attach_raw("clock.so", descriptor, manifest(), lazy_echo_init) }.unwrap();
+    assert!(
+        unsafe {
+            host.attach_raw(
+                "again.so",
+                TbAbiDescriptor::current("clock", "0.1.0"),
+                manifest(),
+                lazy_echo_init,
+            )
+        }
+        .unwrap_err()
+        .to_string()
+        .contains("already loaded")
+    );
+
+    let failed = unsafe {
+        host.attach_raw(
+            "failed.so",
+            TbAbiDescriptor::current("failed", "0.1.0"),
+            named_manifest("failed", "Failed"),
+            failing_init,
+        )
+    }
+    .unwrap_err();
+    assert!(failed.to_string().contains("initialization failed"));
+    let invalid = unsafe {
+        host.attach_raw(
+            "invalid.so",
+            TbAbiDescriptor::current("invalid", "0.1.0"),
+            named_manifest("invalid", "Invalid"),
+            invalid_vtable_init,
+        )
+    }
+    .unwrap_err();
+    assert!(invalid.to_string().contains("invalid vtable"));
+
+    let mut colliding_manifest = manifest();
+    colliding_manifest.module.name = "other".to_string();
+    let collision = unsafe {
+        host.attach_raw(
+            "other.so",
+            TbAbiDescriptor::current("other", "0.1.0"),
+            colliding_manifest,
+            lazy_echo_init,
+        )
+    }
+    .unwrap_err();
+    assert!(collision.to_string().contains("already owned"));
+
+    let mut dependency = named_manifest("dependent", "Dependent");
+    dependency
+        .requires
+        .push(crate::module::manifest::Dependency {
+            interface: crate::version::InterfaceVersion::consumed(
+                "ai.tinyhumans.module.Missing".parse().unwrap(),
+                Version::new(1, 0, 0),
+            ),
+            optional: false,
+            reason: String::new(),
+        });
+    assert!(
+        host.ensure_dependencies(&dependency, Path::new("dependent.so"))
+            .unwrap_err()
+            .to_string()
+            .contains("no provider")
+    );
+}
+
 #[test]
 fn a_module_compiled_with_panic_abort_is_refused_because_a_panic_would_kill_the_host() {
     let broker = Broker::new();
@@ -654,6 +786,122 @@ fn a_file_that_is_not_a_regular_file_is_skipped() {
 }
 
 #[test]
+fn module_host_helpers_preserve_safe_names_states_and_allowlist_decisions() {
+    let states = [
+        ModuleState::Discovered,
+        ModuleState::Rejected {
+            reason: "no".into(),
+        },
+        ModuleState::Unresolved {
+            reason: "no".into(),
+        },
+        ModuleState::Resolved,
+        ModuleState::Initializing,
+        ModuleState::Ready,
+        ModuleState::Serving,
+        ModuleState::Faulted {
+            reason: "no".into(),
+        },
+        ModuleState::Failed {
+            reason: "no".into(),
+        },
+        ModuleState::Stopped,
+        ModuleState::Disabled,
+    ];
+    assert_eq!(
+        states.iter().map(state_name).collect::<Vec<_>>(),
+        [
+            "discovered",
+            "rejected",
+            "unresolved",
+            "resolved",
+            "initializing",
+            "ready",
+            "serving",
+            "faulted",
+            "failed",
+            "stopped",
+            "disabled",
+        ]
+    );
+    assert_eq!(state_detail(&states[1]), Some("no"));
+    assert_eq!(state_detail(&states[2]), Some("no"));
+    assert_eq!(state_detail(&states[0]), None);
+    assert_eq!(
+        sanitized_field(b"clock\0ignored"),
+        Some("clock".to_string())
+    );
+    assert_eq!(sanitized_field(b"bad\nname"), None);
+    assert_eq!(sanitized_field(&[0xff]), None);
+    assert_eq!(safe_file_name(Path::new("/private/clock.so")), "clock.so");
+    assert_eq!(safe_file_name(Path::new("/private/\n")), "module");
+    assert_eq!(safe_file_name(Path::new("/")), "module");
+    assert!(has_library_extension(Path::new(if cfg!(windows) {
+        "clock.dll"
+    } else if cfg!(target_os = "macos") {
+        "clock.dylib"
+    } else {
+        "clock.so"
+    })));
+    assert!(!has_library_extension(Path::new("clock.txt")));
+
+    #[cfg(windows)]
+    let _local_app_data = {
+        let directory = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("LOCALAPPDATA", directory.path()) };
+        directory
+    };
+    let search_paths = ModuleHost::search_paths();
+    assert!(
+        search_paths
+            .iter()
+            .any(|path| path.ends_with("openhuman/modules"))
+    );
+    let _ = ModuleHost::new(Broker::new()).load_search_paths();
+
+    let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let module = directory.path().join(if cfg!(windows) {
+        "clock.dll"
+    } else if cfg!(target_os = "macos") {
+        "clock.dylib"
+    } else {
+        "clock.so"
+    });
+    std::fs::write(&module, b"module bytes").unwrap();
+    assert!(check_file(&module).is_ok());
+    let text = directory.path().join("clock.txt");
+    std::fs::write(&text, b"module bytes").unwrap();
+    assert!(
+        check_file(&text)
+            .unwrap_err()
+            .to_string()
+            .contains("extension is not loadable")
+    );
+    std::fs::write(directory.path().join("modules.toml"), "other = \"00\"\n").unwrap();
+    assert!(
+        check_file(&module)
+            .unwrap_err()
+            .to_string()
+            .contains("absent")
+    );
+    std::fs::write(
+        directory.path().join("modules.toml"),
+        "clock = \"not-a-hash\"\n",
+    )
+    .unwrap();
+    assert!(
+        check_file(&module)
+            .unwrap_err()
+            .to_string()
+            .contains("invalid hash")
+    );
+    let refused = Error::module_refused(&module, "nope");
+    let info = rejection_info(&refused);
+    assert!(matches!(info.state, ModuleState::Rejected { .. }));
+    assert_eq!(rejection_info(&Error::ConnectionClosed).name, "module");
+}
+
+#[test]
 fn an_allowlist_with_a_mismatched_hash_refuses_the_file() {
     let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
     let extension = if cfg!(windows) {
@@ -674,6 +922,7 @@ fn an_allowlist_with_a_mismatched_hash_refuses_the_file() {
     assert!(error.to_string().contains("hash does not match"), "{error}");
 }
 
+#[cfg(not(windows))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires TINYBUS_TEST_MODULE to point at the built cdylib"]
 async fn a_real_cdylib_loads_and_serves_a_call() {
@@ -783,6 +1032,70 @@ async fn a_real_cdylib_loads_and_serves_a_call() {
     .await
     .unwrap();
     task.abort();
+}
+
+#[cfg(not(windows))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires TINYBUS_TEST_MODULE to point at the built cdylib"]
+async fn scanning_loading_rescanning_and_shutting_down_a_module_directory_are_consistent() {
+    let source =
+        PathBuf::from(std::env::var_os("TINYBUS_TEST_MODULE").expect("TINYBUS_TEST_MODULE"));
+    let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let file_name = source.file_name().expect("module filename");
+    let module = directory.path().join(file_name);
+    std::fs::copy(source, &module).unwrap();
+
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    let task = broker.spawn(bus);
+    let host = ModuleHost::new(broker);
+    host.set_config("tinybus", serde_json::json!({ "prefix": "directory:" }));
+    let scanned = host.scan_dir(directory.path()).unwrap();
+    assert_eq!(scanned.len(), 1);
+    assert_eq!(scanned[0].state, ModuleState::Resolved);
+    let loaded = host.load_dir(directory.path()).unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert!(loaded[0].as_ref().unwrap().enabled);
+    assert!(host.load_dir(directory.path()).unwrap().is_empty());
+    let (dry_run, dry_transitions) = host
+        .inner
+        .clone()
+        .rescan(vec![directory.path().to_path_buf()], true)
+        .unwrap();
+    assert_eq!(dry_run.len(), 1);
+    assert!(dry_transitions.is_empty());
+    host.shutdown(Duration::from_millis(10)).await;
+    assert!(matches!(host.list()[0].state, ModuleState::Stopped));
+    task.abort();
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+#[ignore = "requires TINYBUS_TEST_MODULE to point at the built cdylib"]
+async fn duplicate_module_declarations_are_reported_without_attaching_either_copy() {
+    let source =
+        PathBuf::from(std::env::var_os("TINYBUS_TEST_MODULE").expect("TINYBUS_TEST_MODULE"));
+    let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    for name in ["one", "two"] {
+        let extension = source.extension().expect("module extension");
+        std::fs::copy(
+            &source,
+            directory.path().join(name).with_extension(extension),
+        )
+        .unwrap();
+    }
+    let host = ModuleHost::new(Broker::new());
+    let scanned = host.scan_dir(directory.path()).unwrap();
+    assert_eq!(scanned.len(), 2);
+    assert!(
+        scanned
+            .iter()
+            .all(|info| matches!(info.state, ModuleState::Unresolved { .. }))
+    );
+    let loaded = host.load_dir(directory.path()).unwrap();
+    assert_eq!(loaded.len(), 2);
+    assert!(loaded.iter().all(Result::is_err));
+    assert_eq!(host.list().len(), 2);
 }
 
 #[test]

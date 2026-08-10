@@ -232,4 +232,40 @@ mod tests {
         static BUS: OnceBus<Tick> = OnceBus::new();
         assert!(!BUS.is_initialised());
     }
+
+    #[test]
+    fn default_constructs_the_same_uninitialised_singleton() {
+        let bus = OnceBus::<Tick>::default();
+        assert!(bus.get().is_none());
+        assert!(!bus.is_initialised());
+    }
+
+    #[tokio::test]
+    async fn an_existing_transport_initialises_and_announces_a_manifest() {
+        let transport = MemoryBus::new();
+        Broker::new().spawn(transport.clone());
+        let bus: OnceBus<Tick> = OnceBus::new();
+
+        let initialised = bus
+            .init_over(transport.connect().await.unwrap(), config())
+            .await
+            .unwrap();
+        assert_eq!(
+            initialised.config().interface.as_str(),
+            "ai.tinyhumans.test.Events"
+        );
+        assert!(std::ptr::eq(bus.get().unwrap(), initialised));
+
+        let manifest =
+            PeerManifest::new("test-host").version(crate::Version::parse("1.0.0").unwrap());
+        bus.announce(&manifest).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn announcing_before_initialisation_is_a_safe_no_op() {
+        let bus: OnceBus<Tick> = OnceBus::new();
+        let manifest =
+            PeerManifest::new("test-host").version(crate::Version::parse("1.0.0").unwrap());
+        bus.announce(&manifest).await.unwrap();
+    }
 }

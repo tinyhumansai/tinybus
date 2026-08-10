@@ -329,28 +329,35 @@ impl Error {
     }
 }
 
-/// Replace every backtick-quoted span with `…`.
+/// Replace every backtick- or double-quoted span with `…`.
 ///
-/// serde puts the values it rejected in backticks, and so do most of the
-/// libraries a service will wrap. Redacting the span rather than dropping the
-/// whole message keeps the diagnostic — "invalid type: integer, expected a
-/// string" still tells you what went wrong — while making the error safe to log
-/// and safe to send to a peer that must not see the argument.
+/// Serde puts rejected values in quotes, and so do most of the libraries a
+/// service will wrap. Redacting the span rather than dropping the whole
+/// message keeps the diagnosis — "invalid type: string, expected a number"
+/// still tells you what went wrong — while making the error safe to log and
+/// safe to send to a peer that must not see the argument.
 pub fn redact_values(message: &str) -> String {
     let mut out = String::with_capacity(message.len());
-    let mut inside = false;
+    let mut quote = None;
+    let mut escaped = false;
     for c in message.chars() {
-        match (c, inside) {
-            ('`', false) => {
-                out.push_str("`…");
-                inside = true;
+        if let Some(delimiter) = quote {
+            if delimiter == '"' && escaped {
+                escaped = false;
+            } else if delimiter == '"' && c == '\\' {
+                escaped = true;
+            } else if c == delimiter {
+                out.push(delimiter);
+                quote = None;
             }
-            ('`', true) => {
-                out.push('`');
-                inside = false;
-            }
-            (_, false) => out.push(c),
-            (_, true) => {}
+            continue;
+        }
+        if matches!(c, '`' | '"') {
+            out.push(c);
+            out.push('…');
+            quote = Some(c);
+        } else {
+            out.push(c);
         }
     }
     out
@@ -438,5 +445,70 @@ mod tests {
             panic!("expected module refusal");
         };
         assert_eq!(reason, "loader exposed secretpath and spaces");
+    }
+
+    #[test]
+    fn module_refusal_uses_a_safe_filename_fallback() {
+        let error = Error::module_refused(std::path::Path::new("/"), "refused");
+        let Error::ModuleRefused { file, .. } = error else {
+            panic!("expected module refusal");
+        };
+        assert_eq!(file, "module");
+    }
+
+    #[test]
+    fn every_structured_error_has_a_stable_wire_name() {
+        let bus = BusName::new("ai.tinyhumans.Example").unwrap();
+        let path = ObjectPath::new("/ai/tinyhumans/Example").unwrap();
+        let interface = InterfaceName::new("ai.tinyhumans.Example").unwrap();
+        let member = MemberName::new("Call").unwrap();
+        let errors = [
+            Error::InvalidName {
+                kind: "name",
+                input: "bad".into(),
+                reason: "bad".into(),
+            },
+            Error::protocol("bad"),
+            Error::transport("bad"),
+            Error::ConnectionClosed,
+            Error::Backpressure,
+            Error::NameHasNoOwner(bus.clone()),
+            Error::NameTaken {
+                name: bus.clone(),
+                owner: bus,
+            },
+            Error::UnknownObject { path: path.clone() },
+            Error::UnknownInterface {
+                path,
+                interface: interface.clone(),
+            },
+            Error::UnknownMethod {
+                interface,
+                member: member.clone(),
+            },
+            Error::bad_arguments(member.clone(), "bad"),
+            Error::invalid_domain("bad", "bad"),
+            Error::Timeout {
+                member,
+                timeout_ms: 1,
+            },
+            Error::IncompatibleVersion {
+                peer: "peer".into(),
+                interface: "interface".into(),
+                detail: "bad".into(),
+            },
+            Error::module_refused(std::path::Path::new("module.so"), "bad"),
+            Error::ModuleUnavailable {
+                module: "module".into(),
+                state: "refused".into(),
+                detail: "bad".into(),
+            },
+            Error::path("path", "bad"),
+            Error::FeatureDisabled("thing", "uds"),
+            Error::Json(serde_json::from_str::<serde_json::Value>("{").unwrap_err()),
+        ];
+        for error in errors {
+            assert!(error.wire_name().starts_with("ai.tinyhumans."));
+        }
     }
 }

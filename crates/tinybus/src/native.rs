@@ -419,6 +419,57 @@ mod tests {
         assert_eq!(registry.len(), 1);
     }
 
+    #[test]
+    fn registry_introspection_and_debug_never_block_on_a_writer() {
+        let registry = NativeRegistry::new();
+        assert!(registry.is_empty());
+        registry.register::<Req, Resp, _, _>("demo.z", |_| async { Ok(Resp("z".into())) });
+        registry.register::<Req, Resp, _, _>("demo.a", |_| async { Ok(Resp("a".into())) });
+        assert_eq!(registry.methods(), ["demo.a", "demo.z"]);
+        assert!(format!("{registry:?}").contains("demo.a"));
+
+        let _writer = registry.handlers.write().unwrap();
+        assert!(format!("{registry:?}").contains("<locked>"));
+    }
+
+    #[test]
+    fn native_errors_render_their_operation_and_type_details() {
+        assert!(
+            NativeRequestError::UnregisteredHandler {
+                method: "missing".into()
+            }
+            .to_string()
+            .contains("missing")
+        );
+        assert!(
+            NativeRequestError::TypeMismatch {
+                method: "typed".into(),
+                expected: "Expected",
+                actual: "Actual",
+            }
+            .to_string()
+            .contains("expected Expected, got Actual")
+        );
+        assert!(
+            NativeRequestError::HandlerFailed {
+                method: "failed".into(),
+                message: "reason".into(),
+            }
+            .to_string()
+            .contains("reason")
+        );
+    }
+
+    #[test]
+    fn clearing_an_empty_or_populated_registry_leaves_no_handlers() {
+        let registry = NativeRegistry::new();
+        registry.clear();
+        registry.register::<Req, Resp, _, _>("demo.clear", |_| async { Ok(Resp("x".into())) });
+        registry.clear();
+        assert!(registry.is_empty());
+        assert!(!registry.is_registered("demo.clear"));
+    }
+
     #[tokio::test]
     async fn a_slow_handler_does_not_block_an_unrelated_dispatch() {
         // The reason the lock is dropped before the await. If it were held,

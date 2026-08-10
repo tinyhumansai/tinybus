@@ -17,6 +17,8 @@ use tokio::sync::Mutex;
 use crate::broker::Broker;
 use crate::connection::Connection;
 use crate::events::{Event, EventBus, EventBusConfig, EventHandler};
+use crate::message::Message;
+use crate::name::{InterfaceName, MemberName, ObjectPath};
 use crate::transport::memory::MemoryBus;
 
 /// A miniature stand-in for OpenHuman's `DomainEvent`.
@@ -450,4 +452,70 @@ async fn a_domain_becomes_a_path_element() {
     // A domain that cannot be a path element is reported, not swallowed.
     let err = bus.path_for("not a domain").unwrap_err();
     assert!(err.to_string().contains("not a domain"), "{err}");
+}
+
+#[tokio::test]
+async fn root_catalogs_and_awaited_publishing_keep_the_same_wire_shape() {
+    let (_transport, ordinary) = bus().await;
+    ordinary
+        .publish_awaited(TestEvent::SystemStartup)
+        .await
+        .unwrap();
+
+    let root_config = EventBusConfig::new("/", "ai.tinyhumans.openhuman.Events").unwrap();
+    let root_bus = EventBus::<TestEvent>::without_match(
+        Connection::attach(Arc::new(
+            crate::transport::memory::MemoryTransport::pair().0,
+        )),
+        root_config.clone(),
+    );
+    assert_eq!(root_bus.path_for("cron").unwrap().as_str(), "/cron");
+    assert_eq!(root_bus.config().root, root_config.root);
+    assert!(root_bus.connection().unique_name().is_none());
+}
+
+#[test]
+fn invalid_catalog_configuration_fails_before_a_subscription_is_created() {
+    assert!(EventBusConfig::new("not/a/path", "ai.tinyhumans.Events").is_err());
+    assert!(EventBusConfig::new("/events", "not-an-interface").is_err());
+}
+
+#[test]
+fn decoding_rejects_other_catalogs_and_malformed_event_bodies() {
+    let config = config();
+    let path = ObjectPath::new("/ai/tinyhumans/openhuman/events/cron").unwrap();
+    let interface = InterfaceName::new("ai.tinyhumans.openhuman.Events").unwrap();
+    let published = MemberName::new("Published").unwrap();
+
+    let wrong_interface = Message::signal(
+        path.clone(),
+        InterfaceName::new("ai.tinyhumans.other.Events").unwrap(),
+        published.clone(),
+        serde_json::json!([TestEvent::SystemStartup]),
+    );
+    assert!(crate::events::decode::<TestEvent>(&config, &wrong_interface).is_none());
+
+    let wrong_member = Message::signal(
+        path.clone(),
+        interface.clone(),
+        MemberName::new("Other").unwrap(),
+        serde_json::json!([TestEvent::SystemStartup]),
+    );
+    assert!(crate::events::decode::<TestEvent>(&config, &wrong_member).is_none());
+
+    let wrong_path = Message::signal(
+        ObjectPath::new("/elsewhere").unwrap(),
+        interface.clone(),
+        published.clone(),
+        serde_json::json!([TestEvent::SystemStartup]),
+    );
+    assert!(crate::events::decode::<TestEvent>(&config, &wrong_path).is_none());
+
+    let malformed = Message::signal(
+        path,
+        interface,
+        published,
+        serde_json::json!([{"bad": true}]),
+    );
+    assert!(crate::events::decode::<TestEvent>(&config, &malformed).is_none());
 }

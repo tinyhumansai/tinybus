@@ -450,6 +450,7 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
+    use tinybus::module::ModuleHost;
     use tinybus::name::{BusName, InterfaceName, MemberName, ObjectPath};
     use tinybus::service::Interface;
 
@@ -489,6 +490,18 @@ mod tests {
             .await
             .unwrap();
         (dir, address, service)
+    }
+
+    async fn broker_with_module_host() -> (tempfile::TempDir, PathBuf, ModuleHost) {
+        let dir = tempfile::tempdir().unwrap();
+        let address = dir.path().join("bus");
+        let listener = UnixListenerAdapter::bind(&address).await.unwrap();
+        let broker = Broker::new();
+        // The broker retains only a weak module control, so callers must keep
+        // this host bound while they issue module commands.
+        let host = ModuleHost::new(broker.clone());
+        broker.spawn(listener);
+        (dir, address, host)
     }
 
     #[test]
@@ -612,5 +625,200 @@ mod tests {
         .await
         .unwrap();
         assert!(service.unique_name().is_some());
+    }
+
+    #[tokio::test]
+    async fn module_commands_report_errors_and_valid_commands_succeed() {
+        let (_dir, address, _host) = broker_with_module_host().await;
+        let commands = [
+            ModulesCommand::Show {
+                name: "missing".into(),
+                json: false,
+            },
+            ModulesCommand::Scan {
+                paths: vec![PathBuf::from("/not/a/module")],
+                dry_run: true,
+            },
+            ModulesCommand::Load {
+                path: PathBuf::from("/not/a/module"),
+                config: "{}".into(),
+            },
+            ModulesCommand::Stop {
+                name: "missing".into(),
+                deadline_ms: 1_000,
+            },
+            ModulesCommand::Enable {
+                name: "missing".into(),
+            },
+            ModulesCommand::Disable {
+                name: "missing".into(),
+            },
+        ];
+        for command in commands {
+            assert!(
+                run_modules(&address, Duration::from_secs(2), command)
+                    .await
+                    .is_err()
+            );
+        }
+
+        run_modules(
+            &address,
+            Duration::from_secs(2),
+            ModulesCommand::List {
+                state: Some("ready".into()),
+                json: true,
+            },
+        )
+        .await
+        .unwrap();
+        run_modules(&address, Duration::from_secs(2), ModulesCommand::Doctor)
+            .await
+            .unwrap();
+        run_modules(
+            &address,
+            Duration::from_secs(2),
+            ModulesCommand::Scan {
+                paths: Vec::new(),
+                dry_run: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        let (_dir, address, _service) = broker_and_service().await;
+        for command in [
+            Command::Call {
+                destination: DESTINATION.into(),
+                path: PATH.into(),
+                interface: INTERFACE.into(),
+                member: "Echo".into(),
+                args: "not json".into(),
+            },
+            Command::Emit {
+                path: PATH.into(),
+                interface: INTERFACE.into(),
+                member: "Changed".into(),
+                args: "not json".into(),
+            },
+        ] {
+            assert!(
+                run(Cli {
+                    address: Some(address.clone()),
+                    timeout: 1,
+                    command,
+                })
+                .await
+                .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_module_stop_deadline_cannot_outlive_the_call_deadline() {
+        let (_dir, address, _service) = broker_and_service().await;
+        let error = run_modules(
+            &address,
+            Duration::from_millis(10),
+            ModulesCommand::Stop {
+                name: "missing".into(),
+                deadline_ms: 10,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("shorter than the RPC timeout"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TINYBUS_TEST_MODULE to point at the built cdylib"]
+    async fn module_cli_controls_a_real_dynamic_module_lifecycle() {
+        let path = PathBuf::from(std::env::var_os("TINYBUS_TEST_MODULE").unwrap());
+        let (_dir, address, _host) = broker_with_module_host().await;
+        let timeout = Duration::from_secs(2);
+
+        run_modules(
+            &address,
+            timeout,
+            ModulesCommand::Load {
+                path,
+                config: r#"{"prefix":"cli:"}"#.into(),
+            },
+        )
+        .await
+        .unwrap();
+        run_modules(
+            &address,
+            timeout,
+            ModulesCommand::List {
+                state: None,
+                json: true,
+            },
+        )
+        .await
+        .unwrap();
+        run_modules(
+            &address,
+            timeout,
+            ModulesCommand::List {
+                state: None,
+                json: false,
+            },
+        )
+        .await
+        .unwrap();
+        run_modules(
+            &address,
+            timeout,
+            ModulesCommand::Show {
+                name: "tinybus".into(),
+                json: false,
+            },
+        )
+        .await
+        .unwrap();
+        run_modules(
+            &address,
+            timeout,
+            ModulesCommand::Show {
+                name: "tinybus".into(),
+                json: true,
+            },
+        )
+        .await
+        .unwrap();
+        run_modules(&address, timeout, ModulesCommand::Doctor)
+            .await
+            .unwrap();
+        run_modules(
+            &address,
+            timeout,
+            ModulesCommand::Enable {
+                name: "tinybus".into(),
+            },
+        )
+        .await
+        .unwrap();
+        run_modules(
+            &address,
+            timeout,
+            ModulesCommand::Stop {
+                name: "tinybus".into(),
+                deadline_ms: 500,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            run_modules(
+                &address,
+                timeout,
+                ModulesCommand::Disable {
+                    name: "tinybus".into(),
+                },
+            )
+            .await
+            .is_err()
+        );
     }
 }

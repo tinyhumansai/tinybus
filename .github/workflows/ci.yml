@@ -46,6 +46,37 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  coverage:
+    name: Per-file coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Build loader fixtures
+        run: cargo build --locked --example module_clock --example module_clock_two --example module_wrong_target --no-default-features --features modules,macros
+      - name: Enforce 90% line coverage per source file
+        shell: bash
+        run: |
+          set -euo pipefail
+          module=$(find target/debug/examples -maxdepth 1 -type f -name 'libmodule_clock.so' -print -quit)
+          module_two=$(find target/debug/examples -maxdepth 1 -type f -name 'libmodule_clock_two.so' -print -quit)
+          wrong_target=$(find target/debug/examples -maxdepth 1 -type f -name 'libmodule_wrong_target.so' -print -quit)
+          for artifact in "$module" "$module_two" "$wrong_target"; do
+            if [ -z "$artifact" ] || [ ! -f "$artifact" ]; then
+              echo "a module loader fixture is missing" >&2
+              exit 1
+            fi
+          done
+          # Port traits declare contracts only; their transport implementations
+          # exercise those contracts, but traits have no executable body to cover.
+          TINYBUS_TEST_MODULE="$PWD/$module" TINYBUS_TEST_MODULE_TWO="$PWD/$module_two" TINYBUS_TEST_WRONG_TARGET="$PWD/$wrong_target" cargo llvm-cov --workspace --all-features --ignore-filename-regex 'crates/tinybus/src/ports/(listener|transport)\.rs$' --fail-under-file-lines 90 -- --include-ignored
+
   # The bus is meant to be embeddable on every platform OpenHuman ships on. The
   # socket adapter remains Unix-only, while the in-process module transport
   # and dynamic loader are portable and run on both non-Linux targets.

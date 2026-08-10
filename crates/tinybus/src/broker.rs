@@ -609,6 +609,7 @@ async fn reader_task(broker: Broker, transport: Arc<dyn Transport>, id: u64, nam
 mod tests {
     use super::*;
     use crate::connection::Connection;
+    use crate::ports::Listener;
     use crate::service::Interface;
     use crate::transport::memory::MemoryBus;
     use async_trait::async_trait;
@@ -670,6 +671,56 @@ mod tests {
         let b = client.unique_name().unwrap();
         assert!(a.is_unique() && b.is_unique());
         assert_ne!(a, b);
+    }
+
+    struct ClosedListener;
+
+    #[async_trait]
+    impl Listener for ClosedListener {
+        async fn accept(&self) -> Result<Option<Box<dyn Transport>>> {
+            Ok(None)
+        }
+
+        fn describe(&self) -> String {
+            "closed-test-listener".into()
+        }
+    }
+
+    struct FailingListener;
+
+    #[async_trait]
+    impl Listener for FailingListener {
+        async fn accept(&self) -> Result<Option<Box<dyn Transport>>> {
+            Err(Error::transport("accept failed"))
+        }
+    }
+
+    #[tokio::test]
+    async fn serving_stops_cleanly_on_listener_shutdown_and_reports_listener_errors() {
+        let broker = Broker::default();
+        assert!(broker.id().starts_with("tinybus-"));
+        broker.serve(ClosedListener).await.unwrap();
+        assert!(broker.serve(FailingListener).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn malformed_bus_arguments_are_replied_to_without_hanging() {
+        let (_bus, _service, client) = bus().await;
+        let invalid = Message::method_call(
+            BusName::new(crate::BUS_NAME).unwrap(),
+            ObjectPath::new(crate::BUS_PATH).unwrap(),
+            InterfaceName::new(crate::BUS_INTERFACE).unwrap(),
+            MemberName::new("AddMatch").unwrap(),
+            serde_json::json!([42]),
+        );
+        let error = client
+            .call_raw(invalid, Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.wire_name(),
+            "ai.tinyhumans.tinybus.Error.BadArguments"
+        );
     }
 
     #[tokio::test]
