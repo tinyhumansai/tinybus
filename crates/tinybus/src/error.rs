@@ -178,6 +178,18 @@ pub enum Error {
     #[error("{0} requires the `{1}` feature; rebuild with --features {1}")]
     FeatureDisabled(&'static str, &'static str),
 
+    /// A dynamic module failed a fixed admission rule.
+    ///
+    /// `file` is a basename only and `reason` is selected by the host. Neither
+    /// field may contain a path or attacker-controlled descriptor bytes.
+    #[error("module `{file}` refused: {reason}")]
+    ModuleRefused {
+        /// Sanitized artifact basename.
+        file: String,
+        /// Fixed admission failure phrase.
+        reason: &'static str,
+    },
+
     /// Filesystem or socket I/O failed.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
@@ -209,6 +221,17 @@ impl Error {
             path: path.into(),
             message: message.to_string(),
         }
+    }
+
+    /// Build a redacted module refusal from an artifact path.
+    pub fn module_refused(path: &std::path::Path, reason: &'static str) -> Self {
+        let file = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(sanitize_untrusted)
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "module".to_string());
+        Self::ModuleRefused { file, reason }
     }
 
     /// Build an [`Error::BadArguments`] from a serde failure, with the
@@ -278,6 +301,7 @@ impl Error {
             Self::InvalidDomain { .. } => "ai.tinyhumans.tinybus.Error.InvalidDomain",
             Self::Timeout { .. } => "ai.tinyhumans.tinybus.Error.Timeout",
             Self::IncompatibleVersion { .. } => "ai.tinyhumans.tinybus.Error.IncompatibleVersion",
+            Self::ModuleRefused { .. } => "ai.tinyhumans.tinybus.Error.ModuleRefused",
             Self::Path { .. } => "ai.tinyhumans.tinybus.Error.Path",
             Self::FeatureDisabled(_, _) => "ai.tinyhumans.tinybus.Error.FeatureDisabled",
             Self::Json(_) => "ai.tinyhumans.tinybus.Error.Json",
