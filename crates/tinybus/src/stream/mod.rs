@@ -513,13 +513,23 @@ impl StreamRegistry {
     }
 
     /// Hand the reading half of a stream to the caller. Once only.
+    ///
+    /// The entry leaves the registry: from here the reader owns the stream, and
+    /// a sender writing to it is talking to the reader's window rather than to
+    /// a table this connection has to keep swept.
     pub(crate) fn take_reader(&self, id: &str) -> Result<StreamReader> {
         let stream = {
-            let streams = self.inbound.lock().expect("stream registry lock");
-            streams
+            let mut streams = self.inbound.lock().expect("stream registry lock");
+            let stream = streams
                 .get(id)
                 .cloned()
-                .ok_or_else(|| Error::UnknownStream { id: id.to_string() })?
+                .ok_or_else(|| Error::UnknownStream { id: id.to_string() })?;
+            // A sealed stream has nothing left to route to it; a live one still
+            // needs its entry so `Write` can find it.
+            if stream.writer().is_none() {
+                streams.remove(id);
+            }
+            stream
         };
         let chunks = stream
             .reader
