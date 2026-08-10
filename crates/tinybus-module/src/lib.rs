@@ -515,9 +515,7 @@ where
 /// ```
 #[macro_export]
 macro_rules! module_export {
-    (
-        setup = $setup:path,
-        config = $config:ty,
+    (@common
         worker_threads = $threads:expr,
         provides = [$($provides:literal),* $(,)?],
         methods = [$($methods:literal),* $(,)?],
@@ -546,6 +544,28 @@ macro_rules! module_export {
                 lazy: $lazy,
                 worker_threads: $threads as u32,
             })
+        }
+    };
+    (
+        setup = $setup:path,
+        config = $config:ty,
+        worker_threads = $threads:expr,
+        provides = [$($provides:literal),* $(,)?],
+        methods = [$($methods:literal),* $(,)?],
+        signals = [$($signals:literal),* $(,)?],
+        requires = [$($requires:literal),* $(,)?],
+        optional = [$($optional:literal),* $(,)?],
+        lazy = $lazy:expr $(,)?
+    ) => {
+        $crate::module_export! {
+            @common
+            worker_threads = $threads,
+            provides = [$($provides),*],
+            methods = [$($methods),*],
+            signals = [$($signals),*],
+            requires = [$($requires),*],
+            optional = [$($optional),*],
+            lazy = $lazy,
         }
 
         #[unsafe(no_mangle)]
@@ -586,26 +606,15 @@ macro_rules! module_export {
         optional = [$($optional:literal),* $(,)?],
         lazy = $lazy:expr $(,)?
     ) => {
-        #[unsafe(no_mangle)]
-        pub static TINYBUS_MODULE_ABI_V1: ::tinybus::module::abi::TbAbiDescriptor =
-            ::tinybus::module::abi::TbAbiDescriptor::current(
-                env!("CARGO_PKG_NAME"),
-                env!("CARGO_PKG_VERSION"),
-            );
-
-        #[unsafe(no_mangle)]
-        pub extern "C" fn tinybus_module_manifest_v1() -> ::tinybus::module::abi::TbSlice {
-            $crate::manifest_slice($crate::ManifestDeclaration {
-                name: env!("CARGO_PKG_NAME"),
-                version: env!("CARGO_PKG_VERSION"),
-                provides: &[$($provides),*],
-                methods: &[$($methods),*],
-                signals: &[$($signals),*],
-                requires: &[$($requires),*],
-                optional: &[$($optional),*],
-                lazy: $lazy,
-                worker_threads: $threads as u32,
-            })
+        $crate::module_export! {
+            @common
+            worker_threads = $threads,
+            provides = [$($provides),*],
+            methods = [$($methods),*],
+            signals = [$($signals),*],
+            requires = [$($requires),*],
+            optional = [$($optional),*],
+            lazy = $lazy,
         }
 
         #[unsafe(no_mangle)]
