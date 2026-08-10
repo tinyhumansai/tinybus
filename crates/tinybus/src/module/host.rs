@@ -525,23 +525,19 @@ impl ModuleHost {
 
         let transport_for_broker: Arc<dyn Transport> = transport.clone();
         let unique = self.inner.broker.attach(transport_for_broker);
-        let reserved_change = if artifact.manifest.lazy_init {
-            match self
-                .inner
-                .broker
-                .reserve_module_name(&unique, admitted.manifest.bus_name.clone())
-            {
-                Ok(change) => Some(change),
-                Err(_) => {
-                    let _ = transport.stop_sync(Duration::from_millis(0));
-                    return Err(Error::module_refused(
-                        path,
-                        "module bus name is already owned",
-                    ));
-                }
+        let reserved_change = match self
+            .inner
+            .broker
+            .reserve_module_name(&unique, admitted.manifest.bus_name.clone())
+        {
+            Ok(change) => change,
+            Err(_) => {
+                let _ = transport.stop_sync(Duration::from_millis(0));
+                return Err(Error::module_refused(
+                    path,
+                    "module bus name is already owned",
+                ));
             }
-        } else {
-            None
         };
         let broker = self.inner.broker.clone();
         let ready_transport = transport.clone();
@@ -562,9 +558,7 @@ impl ModuleHost {
             }
             ready_transport.wait_ready().await;
             if ready_transport.is_ready() {
-                if let Some(change) = reserved_change {
-                    broker.announce_name_change(change).await;
-                }
+                broker.announce_name_change(reserved_change).await;
                 broker
                     .announce_module_state(serde_json::json!([
                         module_name,
