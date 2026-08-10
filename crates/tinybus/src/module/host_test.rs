@@ -837,6 +837,39 @@ async fn a_real_cdylib_loads_and_serves_a_call() {
     task.abort();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires TINYBUS_TEST_MODULE to point at the built cdylib"]
+async fn scanning_loading_rescanning_and_shutting_down_a_module_directory_are_consistent() {
+    let source = PathBuf::from(std::env::var_os("TINYBUS_TEST_MODULE").expect("TINYBUS_TEST_MODULE"));
+    let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let file_name = source.file_name().expect("module filename");
+    let module = directory.path().join(file_name);
+    std::fs::copy(source, &module).unwrap();
+
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    let task = broker.spawn(bus);
+    let host = ModuleHost::new(broker);
+    host.set_config("tinybus", serde_json::json!({ "prefix": "directory:" }));
+    let scanned = host.scan_dir(directory.path()).unwrap();
+    assert_eq!(scanned.len(), 1);
+    assert_eq!(scanned[0].state, ModuleState::Resolved);
+    let loaded = host.load_dir(directory.path()).unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert!(loaded[0].as_ref().unwrap().enabled);
+    assert!(host.load_dir(directory.path()).unwrap().is_empty());
+    let (dry_run, dry_transitions) = host
+        .inner
+        .clone()
+        .rescan(vec![directory.path().to_path_buf()], true)
+        .unwrap();
+    assert_eq!(dry_run.len(), 1);
+    assert!(dry_transitions.is_empty());
+    host.shutdown(Duration::from_millis(10)).await;
+    assert!(matches!(host.list()[0].state, ModuleState::Stopped));
+    task.abort();
+}
+
 #[test]
 #[ignore = "requires TINYBUS_TEST_MODULE and TINYBUS_TEST_MODULE_TWO"]
 fn two_modules_exporting_the_same_symbol_name_each_resolve_to_their_own() {
