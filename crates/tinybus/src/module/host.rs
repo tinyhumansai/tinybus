@@ -325,7 +325,7 @@ impl ModuleHost {
         let mut pending = pending.into_iter().map(Some).collect::<Vec<_>>();
         for (index, reason) in resolution.unresolved {
             let (path, _) = pending[index].take().expect("resolver index is valid");
-            outcomes.push(Err(Error::module_refused(path, reason)));
+            outcomes.push(Err(Error::module_refused(&path, reason)));
         }
         for index in resolution.order {
             let (path, artifact) = pending[index].take().expect("resolver index is valid");
