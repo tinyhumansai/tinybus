@@ -201,6 +201,42 @@ pub enum Error {
         detail: String,
     },
 
+    /// No such bulk stream, or not one this peer opened.
+    ///
+    /// The two cases are deliberately one error: distinguishing them would let
+    /// a peer probe for streams running between two others.
+    #[error("no stream `{id}`")]
+    UnknownStream {
+        /// The handle that was presented. Minted by this peer, so quoting it
+        /// leaks nothing.
+        id: String,
+    },
+
+    /// A bulk stream ended before it was complete.
+    #[error("stream aborted: {reason}")]
+    StreamAborted {
+        /// Why it ended. Always crate-generated — never a peer's string, which
+        /// would be a peer writing into this process's logs.
+        reason: String,
+    },
+
+    /// A bulk stream would exceed what the receiver accepts.
+    #[error("stream exceeds the {limit}-byte limit")]
+    StreamTooLarge {
+        /// The receiver's cap, in bytes.
+        limit: u64,
+    },
+
+    /// This peer already has as many streams open as the receiver allows.
+    ///
+    /// Per peer, so a peer that opens streams and never finishes them runs out
+    /// of its own slots rather than everyone's.
+    #[error("already at the limit of {limit} open streams")]
+    TooManyStreams {
+        /// The receiver's per-peer cap.
+        limit: usize,
+    },
+
     /// Filesystem or socket I/O failed.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
@@ -322,6 +358,10 @@ impl Error {
             Self::ModuleRefused { .. } => "ai.tinyhumans.tinybus.Error.ModuleRefused",
             Self::ModuleUnavailable { .. } => "ai.tinyhumans.tinybus.Error.ModuleUnavailable",
             Self::Path { .. } => "ai.tinyhumans.tinybus.Error.Path",
+            Self::UnknownStream { .. } => "ai.tinyhumans.tinybus.Error.UnknownStream",
+            Self::StreamAborted { .. } => "ai.tinyhumans.tinybus.Error.StreamAborted",
+            Self::StreamTooLarge { .. } => "ai.tinyhumans.tinybus.Error.StreamTooLarge",
+            Self::TooManyStreams { .. } => "ai.tinyhumans.tinybus.Error.TooManyStreams",
             Self::FeatureDisabled(_, _) => "ai.tinyhumans.tinybus.Error.FeatureDisabled",
             Self::Json(_) => "ai.tinyhumans.tinybus.Error.Json",
             Self::MethodFailed { name, .. } => name,
@@ -410,6 +450,9 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains("expected u64"), "{text}");
         assert!(!text.contains("0xdeadbeef"), "{text}");
+        // The double-quoted half is the one serde uses for a rejected *string*,
+        // which is the shape a token or a recovery phrase arrives in.
+        assert!(!text.contains("seed phrase here"), "{text}");
     }
 
     #[test]
@@ -417,7 +460,18 @@ mod tests {
         // A truncated message must not leak the tail just because its closing
         // backtick never arrived.
         assert_eq!(redact_values("bad token `abc"), "bad token `…");
+        assert_eq!(redact_values("bad token \"abc"), "bad token \"…");
         assert_eq!(redact_values("no quotes here"), "no quotes here");
+    }
+
+    #[test]
+    fn a_backtick_inside_a_quoted_value_does_not_end_the_redaction_early() {
+        // Otherwise a value chosen to contain a backtick would close the span
+        // and put its own tail back into the message.
+        assert_eq!(
+            redact_values("invalid: \"a`b`c\", expected u64"),
+            "invalid: \"…\", expected u64"
+        );
     }
 
     #[test]
@@ -505,6 +559,12 @@ mod tests {
             },
             Error::path("path", "bad"),
             Error::FeatureDisabled("thing", "uds"),
+            Error::UnknownStream { id: "s1".into() },
+            Error::StreamAborted {
+                reason: "aborted".into(),
+            },
+            Error::StreamTooLarge { limit: 1 },
+            Error::TooManyStreams { limit: 1 },
             Error::Json(serde_json::from_str::<serde_json::Value>("{").unwrap_err()),
         ];
         for error in errors {
