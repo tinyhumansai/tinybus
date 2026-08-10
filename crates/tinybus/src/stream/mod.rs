@@ -548,6 +548,145 @@ impl StreamRegistry {
     }
 }
 
+/// The sending half of a stream: chunks out, one at a time, at the receiver's
+/// pace.
+///
+/// Obtained from [`Connection::open_stream`](crate::Connection::open_stream).
+/// Every write is a call with a deadline, so a receiver that stops draining
+/// surfaces as an error on the write rather than as a hang — the same rule the
+/// rest of the bus lives by.
+pub struct StreamWriter {
+    connection: crate::Connection,
+    destination: BusName,
+    id: String,
+    content_type: Option<String>,
+    declared_len: Option<u64>,
+    timeout: Duration,
+    seq: u64,
+    sent: u64,
+    finished: bool,
+}
+
+impl StreamWriter {
+    pub(crate) fn new(
+        connection: crate::Connection,
+        destination: BusName,
+        id: String,
+        descriptor: StreamDescriptor,
+        timeout: Duration,
+    ) -> Self {
+        Self {
+            connection,
+            destination,
+            id,
+            content_type: descriptor.content_type,
+            declared_len: descriptor.total_len,
+            timeout,
+            seq: 0,
+            sent: 0,
+            finished: false,
+        }
+    }
+
+    /// The handle to put in the method body that tells the receiver what these
+    /// bytes are for.
+    ///
+    /// Available before the payload has been written, and that is the intended
+    /// order: send the call first, then feed the stream. The window is only a
+    /// few megabytes, so a sender that writes everything before making the call
+    /// stalls against a reader that does not exist yet.
+    pub fn stream_ref(&self) -> StreamRef {
+        StreamRef {
+            id: self.id.clone(),
+            content_type: self.content_type.clone(),
+            len: self.declared_len,
+        }
+    }
+
+    /// How many bytes have been accepted by the receiver so far.
+    pub fn sent(&self) -> u64 {
+        self.sent
+    }
+
+    /// Write `bytes`, splitting them across as many chunks as it takes.
+    pub async fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        for chunk in bytes.chunks(MAX_CHUNK_LEN) {
+            self.write_chunk(chunk).await?;
+        }
+        Ok(())
+    }
+
+    /// Write exactly one chunk, which must be no larger than [`MAX_CHUNK_LEN`].
+    pub async fn write_chunk(&mut self, chunk: &[u8]) -> Result<()> {
+        if self.finished {
+            return Err(Error::StreamAborted {
+                reason: "the stream is already finished".to_string(),
+            });
+        }
+        if chunk.len() > MAX_CHUNK_LEN {
+            return Err(Error::protocol(format!(
+                "chunk of {} bytes exceeds the {MAX_CHUNK_LEN}-byte cap",
+                chunk.len()
+            )));
+        }
+        self.call("Write", serde_json::json!([self.id, self.seq, base64::encode(chunk)]))
+            .await?;
+        self.seq += 1;
+        self.sent += chunk.len() as u64;
+        Ok(())
+    }
+
+    /// Close the stream and return the handle, now carrying its final length.
+    pub async fn finish(mut self) -> Result<StreamRef> {
+        self.call("Close", serde_json::json!([self.id, self.sent]))
+            .await?;
+        self.finished = true;
+        Ok(StreamRef {
+            id: self.id.clone(),
+            content_type: self.content_type.clone(),
+            len: Some(self.sent),
+        })
+    }
+
+    /// Abandon the stream, telling the receiver not to wait for the rest.
+    pub async fn abort(mut self) -> Result<()> {
+        self.finished = true;
+        self.call("Abort", serde_json::json!([self.id])).await?;
+        Ok(())
+    }
+
+    async fn call(&self, member: &str, args: Value) -> Result<Value> {
+        self.connection
+            .call_stream_member(&self.destination, member, args, self.timeout)
+            .await
+    }
+}
+
+impl Drop for StreamWriter {
+    /// A dropped writer aborts, so a sender that fails halfway does not leave
+    /// the receiver holding a window open until the idle reaper notices.
+    /// Best-effort by necessity: `Drop` cannot await, and the process may be on
+    /// its way out.
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let (connection, destination, id, timeout) = (
+            self.connection.clone(),
+            self.destination.clone(),
+            self.id.clone(),
+            self.timeout,
+        );
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::spawn(async move {
+                let _ = connection
+                    .call_stream_member(&destination, "Abort", serde_json::json!([id]), timeout)
+                    .await;
+            });
+        }
+    }
+}
+
 /// The receiving half of a stream: chunks, in order, as they land.
 ///
 /// Reading incrementally is the point — a receiver writing a payload to disk
