@@ -918,6 +918,25 @@ fn safe_file_name(path: &Path) -> String {
 }
 
 fn check_file(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    let metadata = {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        #[cfg(target_os = "macos")]
+        const O_NOFOLLOW: i32 = 0x100;
+        #[cfg(not(target_os = "macos"))]
+        const O_NOFOLLOW: i32 = 0x2_0000;
+        // There is no portable fd-based dlopen. O_NOFOLLOW closes the obvious
+        // symlink path, while the checked parent permissions are what prevent
+        // a hostile swap in the unavoidable check-to-dlopen interval.
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NOFOLLOW)
+            .open(path)
+            .and_then(|file| file.metadata())
+            .map_err(|_| Error::module_refused(path, "artifact metadata is unavailable"))?
+    };
+    #[cfg(windows)]
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|_| Error::module_refused(path, "artifact metadata is unavailable"))?;
     if !metadata.file_type().is_file() {
