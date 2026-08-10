@@ -23,9 +23,12 @@
 //! remote work — tinybus cannot — it stops waiting and frees the caller.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+use std::task::{Context, Poll};
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -77,6 +80,7 @@ struct Inner {
     /// the sender on a locally looped-back signal without an await.
     unique_name: std::sync::RwLock<Option<BusName>>,
     signals: broadcast::Sender<Message>,
+    panic_handler: std::sync::RwLock<Option<Arc<dyn Fn() -> Error + Send + Sync>>>,
 }
 
 /// Closes the transport when the last [`Connection`] handle goes away.
@@ -168,6 +172,7 @@ impl Connection {
             objects: RwLock::new(ObjectTree::new()),
             unique_name: std::sync::RwLock::new(None),
             signals,
+            panic_handler: std::sync::RwLock::new(None),
         });
         tokio::spawn(writer_loop(inner.transport.clone(), outbound));
         tokio::spawn(dispatch_loop(inner.clone()));
@@ -594,6 +599,17 @@ impl Connection {
         self.inner.transport.close().await
     }
 
+    /// Install module-boundary panic conversion for dispatched methods.
+    ///
+    /// Hidden because ordinary process peers intentionally keep the existing
+    /// policy that a panic is fatal to the service. The module SDK uses this to
+    /// turn an unwind into a redacted error reply before applying its manifest
+    /// panic policy.
+    #[doc(hidden)]
+    pub fn __set_panic_handler(&self, handler: Arc<dyn Fn() -> Error + Send + Sync>) {
+        *self.inner.panic_handler.write().expect("panic handler lock") = Some(handler);
+    }
+
     /// Call a method on the broker's own interface.
     async fn call_bus(&self, member: &str, args: Value) -> Result<Value> {
         let message = Message::method_call(
@@ -712,7 +728,19 @@ async fn dispatch_loop(inner: Arc<Inner>) {
 /// Run one inbound method call and send its reply.
 async fn handle_call(inner: Arc<Inner>, message: Message) {
     let header = message.header.clone();
-    let result = dispatch(&inner, &header, message.body).await;
+    let panic_handler = inner
+        .panic_handler
+        .read()
+        .expect("panic handler lock")
+        .clone();
+    let result = if let Some(panic_handler) = panic_handler {
+        match CatchUnwind::new(dispatch(&inner, &header, message.body)).await {
+            Ok(result) => result,
+            Err(()) => Err(panic_handler()),
+        }
+    } else {
+        dispatch(&inner, &header, message.body).await
+    };
 
     let mut reply = match result {
         Ok(value) => Message::method_return(&header, value),
@@ -721,6 +749,34 @@ async fn handle_call(inner: Arc<Inner>, message: Message) {
     reply.header.serial = inner.serial.fetch_add(1, Ordering::Relaxed);
     if let Err(e) = inner.outbox.send(reply).await {
         tracing::debug!(error = %e, "could not reply; the caller will time out");
+    }
+}
+
+struct CatchUnwind<F> {
+    future: std::panic::AssertUnwindSafe<F>,
+}
+
+impl<F> CatchUnwind<F> {
+    fn new(future: F) -> Self {
+        Self {
+            future: std::panic::AssertUnwindSafe(future),
+        }
+    }
+}
+
+impl<F: Future> Future for CatchUnwind<F> {
+    type Output = std::result::Result<F::Output, ()>;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        // `future` is structurally pinned with its wrapper and never moved.
+        let future = unsafe { self.map_unchecked_mut(|this| &mut this.future.0) };
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            future.poll(context)
+        })) {
+            Ok(Poll::Ready(value)) => Poll::Ready(Ok(value)),
+            Ok(Poll::Pending) => Poll::Pending,
+            Err(_) => Poll::Ready(Err(())),
+        }
     }
 }
 
