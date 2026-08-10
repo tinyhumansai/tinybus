@@ -681,4 +681,18 @@ mod tests {
         assert!(slice.ptr.is_null());
         assert_eq!(slice.len, 0);
     }
+
+    #[test]
+    fn a_panicking_shutdown_callback_reports_panicked_not_timed_out() {
+        let state = RuntimeState {
+            inbound: StdMutex::new(None),
+            runtime: StdMutex::new(None),
+        };
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = state.runtime.lock().unwrap();
+            panic!("poison runtime lock");
+        }));
+        let code = unsafe { shutdown(std::ptr::from_ref(&state).cast_mut().cast(), 1) };
+        assert_eq!(code, TB_PANICKED);
+    }
 }
