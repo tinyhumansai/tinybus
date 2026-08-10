@@ -351,6 +351,7 @@ impl ModuleHost {
         }
         for index in resolution.order {
             let (path, artifact) = pending[index].take().expect("resolver index is valid");
+            let rejected_manifest = artifact.manifest.clone();
             let config = self
                 .inner
                 .configs
@@ -362,6 +363,9 @@ impl ModuleHost {
             let result = self
                 .ensure_dependencies(&artifact.manifest, &path)
                 .and_then(|()| self.activate(&path, artifact, config));
+            if let Err(error) = &result {
+                self.record_manifest_rejection(error, rejected_manifest);
+            }
             outcomes.push(result);
         }
         for error in outcomes.iter().filter_map(|outcome| outcome.as_ref().err()) {
