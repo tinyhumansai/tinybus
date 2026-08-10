@@ -448,14 +448,13 @@ impl StreamRegistry {
         let (id, total_len): (String, u64) =
             serde_json::from_value(body).map_err(|e| Error::bad_arguments(member.clone(), e))?;
         let stream = self.lookup(&id, header)?;
-        // Closing removes the registry entry, but the reader holds its own
-        // handle: the bytes already in the window are still there to be read.
-        self.inbound
-            .lock()
-            .expect("stream registry lock")
-            .remove(&id);
 
+        // The entry stays in the registry, sealed. A payload that fits inside
+        // the window can be written and closed before the receiving method has
+        // even been dispatched, and dropping the entry here would turn that —
+        // the *fast* case — into "no such stream".
         let received = stream.received.load(Ordering::Relaxed);
+        stream.touch();
         stream.seal();
 
         if received != total_len {
