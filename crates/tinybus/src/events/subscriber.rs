@@ -259,7 +259,7 @@ mod tests {
         let config = EventBusConfig::new("/events", "ai.tinyhumans.Events").unwrap();
         let handle = spawn(receiver, config, Arc::new(Handler));
         assert_eq!(handle.name(), "subscriber::test");
-        handle.task.await.unwrap();
+        (&mut handle.task).await.unwrap();
     }
 
     #[tokio::test]
