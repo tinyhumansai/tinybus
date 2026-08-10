@@ -78,14 +78,7 @@ impl HostCalls {
     }
 
     fn log(&self, level: u32, message: &[u8]) {
-        unsafe {
-            (self.0.log)(
-                self.0.host_ctx,
-                level,
-                message.as_ptr(),
-                message.len(),
-            )
-        }
+        unsafe { (self.0.log)(self.0.host_ctx, level, message.as_ptr(), message.len()) }
     }
 }
 
