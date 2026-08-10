@@ -559,6 +559,12 @@ mod tests {
             },
             Error::path("path", "bad"),
             Error::FeatureDisabled("thing", "uds"),
+            Error::UnknownStream { id: "s1".into() },
+            Error::StreamAborted {
+                reason: "aborted".into(),
+            },
+            Error::StreamTooLarge { limit: 1 },
+            Error::TooManyStreams { limit: 1 },
             Error::Json(serde_json::from_str::<serde_json::Value>("{").unwrap_err()),
         ];
         for error in errors {
