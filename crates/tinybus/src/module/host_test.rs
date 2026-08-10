@@ -511,11 +511,11 @@ async fn module_control_tracks_disable_stop_detach_and_unavailable_states() {
     ));
     assert!(matches!(
         control.stop("missing", Duration::ZERO).await,
-        Err(Error::Failed { .. })
+        Err(Error::MethodFailed { .. })
     ));
     assert!(matches!(
         control.enable("missing", true),
-        Err(Error::Failed { .. })
+        Err(Error::MethodFailed { .. })
     ));
     broker_task.abort();
 }
