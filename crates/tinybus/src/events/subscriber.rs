@@ -257,7 +257,7 @@ mod tests {
         let (sender, receiver) = broadcast::channel(1);
         drop(sender);
         let config = EventBusConfig::new("/events", "ai.tinyhumans.Events").unwrap();
-        let handle = spawn(receiver, config, Arc::new(Handler));
+        let mut handle = spawn(receiver, config, Arc::new(Handler));
         assert_eq!(handle.name(), "subscriber::test");
         (&mut handle.task).await.unwrap();
     }
