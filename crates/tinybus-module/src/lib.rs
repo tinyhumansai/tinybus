@@ -218,8 +218,10 @@ macro_rules! module_export {
         #[unsafe(no_mangle)]
         pub extern "C" fn tinybus_module_manifest_v1() -> ::tinybus::module::abi::TbSlice {
             static MANIFEST: &str = concat!(
-                "{\"name\":\"", env!("CARGO_PKG_NAME"),
-                "\",\"version\":\"", env!("CARGO_PKG_VERSION"),
+                "{\"name\":\"",
+                env!("CARGO_PKG_NAME"),
+                "\",\"version\":\"",
+                env!("CARGO_PKG_VERSION"),
                 "\",\"provides\":[],\"requires\":[],\"optional\":[],\"lazy\":false}"
             );
             ::tinybus::module::abi::TbSlice {

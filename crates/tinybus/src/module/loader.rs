@@ -62,11 +62,7 @@ pub(crate) fn load(path: &Path) -> Result<LoadedArtifact> {
         .map_err(|_| Error::module_refused(path, "manifest is not valid JSON"))?;
 
     let init: InitFn = unsafe {
-        std::mem::transmute(platform::symbol(
-            handle,
-            b"tinybus_module_init_v1\0",
-            path,
-        )?)
+        std::mem::transmute(platform::symbol(handle, b"tinybus_module_init_v1\0", path)?)
     };
     Ok(LoadedArtifact {
         descriptor,
@@ -104,7 +100,10 @@ mod platform {
         let handle = unsafe { dlopen(path_bytes.as_ptr(), RTLD_NOW | RTLD_LOCAL) };
         if handle.is_null() {
             log_last_error();
-            return Err(Error::module_refused(path, "dynamic loader rejected the artifact"));
+            return Err(Error::module_refused(
+                path,
+                "dynamic loader rejected the artifact",
+            ));
         }
         // No Drop wrapper on purpose. Calling dlclose would invalidate code,
         // TLS, panic metadata, and callbacks that may still be reachable.
@@ -115,7 +114,10 @@ mod platform {
         let pointer = unsafe { dlsym(handle, name.as_ptr().cast()) };
         if pointer.is_null() {
             log_last_error();
-            return Err(Error::module_refused(path, "required ABI symbol is missing"));
+            return Err(Error::module_refused(
+                path,
+                "required ABI symbol is missing",
+            ));
         }
         Ok(pointer)
     }
@@ -157,8 +159,14 @@ mod platform {
             )
         };
         if handle.is_null() {
-            tracing::debug!(loader_error = unsafe { GetLastError() }, "module loader detail");
-            return Err(Error::module_refused(path, "dynamic loader rejected the artifact"));
+            tracing::debug!(
+                loader_error = unsafe { GetLastError() },
+                "module loader detail"
+            );
+            return Err(Error::module_refused(
+                path,
+                "dynamic loader rejected the artifact",
+            ));
         }
         Ok(handle)
     }
@@ -166,8 +174,14 @@ mod platform {
     pub(super) fn symbol(handle: Handle, name: &[u8], path: &Path) -> Result<*mut c_void> {
         let pointer = unsafe { GetProcAddress(handle, name.as_ptr().cast()) };
         if pointer.is_null() {
-            tracing::debug!(loader_error = unsafe { GetLastError() }, "module loader detail");
-            return Err(Error::module_refused(path, "required ABI symbol is missing"));
+            tracing::debug!(
+                loader_error = unsafe { GetLastError() },
+                "module loader detail"
+            );
+            return Err(Error::module_refused(
+                path,
+                "required ABI symbol is missing",
+            ));
         }
         Ok(pointer)
     }

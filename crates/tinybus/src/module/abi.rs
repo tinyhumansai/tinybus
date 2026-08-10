@@ -77,7 +77,11 @@ impl TbAbiDescriptor {
             descriptor_size: size_of::<Self>() as u32,
             flags: (if cfg!(panic = "unwind") { 1 } else { 0 })
                 | (if cfg!(debug_assertions) { 1 << 1 } else { 0 })
-                | (if cfg!(target_endian = "little") { 1 << 2 } else { 0 }),
+                | (if cfg!(target_endian = "little") {
+                    1 << 2
+                } else {
+                    0
+                }),
             pointer_width: usize::BITS,
             tinybus_major: version[0],
             tinybus_minor: version[1],

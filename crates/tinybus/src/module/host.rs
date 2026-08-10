@@ -272,8 +272,8 @@ impl ModuleHost {
 
         let rustc = sanitized_field(&descriptor.rustc_version)
             .ok_or_else(|| refuse("descriptor identity is invalid"))?;
-        let rustc_mismatch = field_bytes(&descriptor.rustc_version)
-            != build_info::RUSTC_VERSION.as_bytes();
+        let rustc_mismatch =
+            field_bytes(&descriptor.rustc_version) != build_info::RUSTC_VERSION.as_bytes();
         if self.strict && rustc_mismatch {
             return Err(refuse("rustc version does not match in strict mode"));
         }
@@ -328,7 +328,9 @@ impl ModuleHost {
 fn duplicate_module_names(pending: &[(PathBuf, LoadedArtifact)]) -> HashSet<String> {
     let mut counts = HashMap::new();
     for (_, artifact) in pending {
-        *counts.entry(artifact.manifest.name.clone()).or_insert(0usize) += 1;
+        *counts
+            .entry(artifact.manifest.name.clone())
+            .or_insert(0usize) += 1;
     }
     counts
         .into_iter()
@@ -354,10 +356,16 @@ fn check_file(path: &Path) -> Result<()> {
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|_| Error::module_refused(path, "artifact metadata is unavailable"))?;
     if !metadata.file_type().is_file() {
-        return Err(Error::module_refused(path, "artifact is not a regular file"));
+        return Err(Error::module_refused(
+            path,
+            "artifact is not a regular file",
+        ));
     }
     if !has_library_extension(path) {
-        return Err(Error::module_refused(path, "artifact extension is not loadable"));
+        return Err(Error::module_refused(
+            path,
+            "artifact extension is not loadable",
+        ));
     }
     Ok(())
 }
@@ -384,7 +392,10 @@ fn check_directory(path: &Path) -> Result<()> {
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|_| Error::module_refused(path, "module directory is unavailable"))?;
     if !metadata.file_type().is_dir() {
-        return Err(Error::module_refused(path, "module search path is not a directory"));
+        return Err(Error::module_refused(
+            path,
+            "module search path is not a directory",
+        ));
     }
     if metadata.uid() != unsafe { getuid() } {
         return Err(Error::module_refused(
@@ -406,7 +417,10 @@ fn check_directory(path: &Path) -> Result<()> {
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|_| Error::module_refused(path, "module directory is unavailable"))?;
     if !metadata.file_type().is_dir() {
-        return Err(Error::module_refused(path, "module search path is not a directory"));
+        return Err(Error::module_refused(
+            path,
+            "module search path is not a directory",
+        ));
     }
     // The loader uses LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR. ACL enforcement is
     // performed by the embedding application, which owns the install root.

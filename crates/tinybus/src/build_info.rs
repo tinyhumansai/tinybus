@@ -16,18 +16,23 @@ pub const FEATURE_CLI: u64 = 1 << 2;
 pub const FEATURE_MODULES: u64 = 1 << 3;
 
 /// Features compiled into this copy of tinybus.
-pub const FEATURE_BITS: u64 = (if cfg!(feature = "uds") { FEATURE_UDS } else { 0 })
-    | (if cfg!(feature = "macros") {
-        FEATURE_MACROS
-    } else {
-        0
-    })
-    | (if cfg!(feature = "cli") { FEATURE_CLI } else { 0 })
-    | (if cfg!(feature = "modules") {
-        FEATURE_MODULES
-    } else {
-        0
-    });
+pub const FEATURE_BITS: u64 = (if cfg!(feature = "uds") {
+    FEATURE_UDS
+} else {
+    0
+}) | (if cfg!(feature = "macros") {
+    FEATURE_MACROS
+} else {
+    0
+}) | (if cfg!(feature = "cli") {
+    FEATURE_CLI
+} else {
+    0
+}) | (if cfg!(feature = "modules") {
+    FEATURE_MODULES
+} else {
+    0
+});
 
 /// Render a known feature bit for admission diagnostics.
 pub const fn feature_name(bit: u64) -> &'static str {

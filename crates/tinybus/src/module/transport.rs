@@ -93,9 +93,7 @@ impl Transport for ModuleTransport {
             let Some(module) = module else {
                 return Err(Error::ConnectionClosed);
             };
-            let code = unsafe {
-                (module.deliver)(module.module_ctx, bytes.as_ptr(), bytes.len())
-            };
+            let code = unsafe { (module.deliver)(module.module_ctx, bytes.as_ptr(), bytes.len()) };
             match code {
                 TB_OK => return Ok(()),
                 TB_BACKPRESSURE => notified.await,
@@ -171,10 +169,6 @@ unsafe extern "C" fn host_log(ctx: *mut c_void, level: u32, ptr: *const u8, len:
 
 unsafe extern "C" fn host_fault(ctx: *mut c_void, _: *const u8, _: usize) {
     if let Some(context) = unsafe { ctx.cast::<HostContext>().as_ref() } {
-        context
-            .inbound
-            .lock()
-            .expect("host inbound lock")
-            .take();
+        context.inbound.lock().expect("host inbound lock").take();
     }
 }
