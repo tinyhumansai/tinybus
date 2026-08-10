@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn attributes_and_interface_names_are_validated() {
         assert_eq!(
-            interface_name(&args("name = \"ai.tinyhumans.Example\"")),
+            interface_name(&args("name = \"ai.tinyhumans.Example\"")).unwrap(),
             "ai.tinyhumans.Example"
         );
         assert!(interface_name(&args("other = \"value\"")).is_err());
