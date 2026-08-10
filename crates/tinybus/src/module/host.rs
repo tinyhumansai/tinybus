@@ -24,16 +24,42 @@ use crate::version::Version;
 
 /// Current lifecycle state of a discovered module.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "state", content = "detail", rename_all = "snake_case")]
 pub enum ModuleState {
-    /// ABI-gated, initialized, and attached to the broker.
-    Loaded,
+    /// File passed every check that can run before the platform loader.
+    Discovered,
+    /// ABI or manifest admission failed. Terminal.
+    Rejected {
+        /// Safe refusal reason.
+        reason: String,
+    },
+    /// Dependencies or bus-name collisions prevent initialization.
+    Unresolved {
+        /// Safe resolution reason.
+        reason: String,
+    },
+    /// Gated and ordered, waiting for eager or lazy initialization.
+    Resolved,
+    /// Initialization is running exactly once.
+    Initializing,
+    /// Owns its name and is waiting for calls.
+    Ready,
+    /// At least one method call is in flight.
+    Serving,
+    /// A panic or explicit fault detached the module. Terminal.
+    Faulted {
+        /// Safe fault reason.
+        reason: String,
+    },
+    /// Initialization returned failure. Terminal.
+    Failed {
+        /// Safe initialization reason.
+        reason: String,
+    },
     /// Explicitly stopped. Its library remains mapped until process exit.
     Stopped,
-    /// Initialization or runtime setup failed.
-    Failed,
-    /// Discovery found the artifact but admission refused it.
-    Rejected,
+    /// Operator disabled the module before initialization.
+    Disabled,
 }
 
 /// Safe, serializable facts about one module. No absolute artifact path leaks.
@@ -45,7 +71,8 @@ pub struct ModuleInfo {
     pub version: String,
     /// Artifact basename only.
     pub file: String,
-    /// Current lifecycle state.
+    /// Current lifecycle state and safe detail, flattened for CLI JSON.
+    #[serde(flatten)]
     pub state: ModuleState,
     /// Module dependency and surface declaration.
     pub manifest: ModuleManifest,
@@ -55,9 +82,6 @@ pub struct ModuleInfo {
     pub rustc_mismatch: bool,
     /// Whether discovery should admit this module on future scans.
     pub enabled: bool,
-    /// Fixed admission reason for a rejected artifact.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
 }
 
 struct LoadedModule {
@@ -517,12 +541,11 @@ impl ModuleHost {
             name,
             version,
             file: safe_file_name(path),
-            state: ModuleState::Loaded,
+            state: ModuleState::Ready,
             manifest: manifest.clone(),
             rustc_version: rustc,
             rustc_mismatch,
             enabled: true,
-            reason: None,
         })
     }
 
@@ -568,7 +591,9 @@ impl ModuleHost {
             name: file.clone(),
             version: String::new(),
             file: file.clone(),
-            state: ModuleState::Rejected,
+            state: ModuleState::Rejected {
+                reason: reason.clone(),
+            },
             manifest: ModuleManifest {
                 schema: MANIFEST_SCHEMA,
                 module: ModuleIdentity {
@@ -592,7 +617,6 @@ impl ModuleHost {
             rustc_version: String::new(),
             rustc_mismatch: false,
             enabled: false,
-            reason: Some(reason.clone()),
         };
         let mut rejected = self
             .inner
