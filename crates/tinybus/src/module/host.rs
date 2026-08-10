@@ -458,12 +458,21 @@ impl ModuleHost {
 
 impl ModuleControl for ModuleHostInner {
     fn list(&self) -> Vec<ModuleInfo> {
-        self.loaded
+        let mut modules = self
+            .loaded
             .lock()
             .expect("module list lock")
             .iter()
             .map(|module| module.info.clone())
-            .collect()
+            .collect::<Vec<_>>();
+        modules.extend(
+            self.rejected
+                .lock()
+                .expect("rejected module list lock")
+                .iter()
+                .cloned(),
+        );
+        modules
     }
 
     fn load(self: Arc<Self>, path: PathBuf, config: serde_json::Value) -> Result<ModuleInfo> {
