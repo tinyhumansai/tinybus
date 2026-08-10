@@ -1205,6 +1205,9 @@ mod tests {
                     continue;
                 };
                 if message.header.kind == crate::message::MessageKind::MethodCall {
+                    if message.header.member.as_ref().map(|member| member.as_str()) == Some("Hang") {
+                        continue;
+                    }
                     let body = message
                         .body
                         .as_array()
@@ -1493,6 +1496,43 @@ mod tests {
             stopped.wire_name(),
             "ai.tinyhumans.tinybus.Error.ModuleUnavailable"
         );
+        broker_task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_module_that_never_replies_times_out_the_caller_and_leaves_the_bus_usable() {
+        let _test_guard = FAKE_MODULE_TEST_LOCK.lock().await;
+        let bus = MemoryBus::new();
+        let broker = Broker::new();
+        let broker_task = broker.spawn(bus.clone());
+        let host = ModuleHost::new(broker);
+        let mut lazy_manifest = manifest();
+        lazy_manifest.lazy_init = true;
+        unsafe {
+            host.attach_raw(
+                "clock.so",
+                TbAbiDescriptor::current("clock", "0.1.0"),
+                lazy_manifest,
+                lazy_echo_init,
+            )
+        }
+        .unwrap();
+        let connection = Connection::connect(bus.connect().await.unwrap()).await.unwrap();
+        let proxy = connection
+            .proxy(
+                "ai.tinyhumans.module.Clock",
+                "/ai/tinyhumans/module/Clock",
+                "ai.tinyhumans.module.Clock",
+            )
+            .unwrap()
+            .with_timeout(Duration::from_millis(20));
+        let error = proxy.call::<()>("Hang", ()).await.unwrap_err();
+        assert!(matches!(error, Error::Timeout { .. }), "{error}");
+        assert_eq!(
+            proxy.call::<String>("Echo", ("usable",)).await.unwrap(),
+            "usable"
+        );
+        assert_eq!(host.list()[0].state, ModuleState::Serving);
         broker_task.abort();
     }
 
