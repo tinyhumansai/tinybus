@@ -329,28 +329,35 @@ impl Error {
     }
 }
 
-/// Replace every backtick-quoted span with `…`.
+/// Replace every backtick- or double-quoted span with `…`.
 ///
-/// serde puts the values it rejected in backticks, and so do most of the
-/// libraries a service will wrap. Redacting the span rather than dropping the
-/// whole message keeps the diagnostic — "invalid type: integer, expected a
-/// string" still tells you what went wrong — while making the error safe to log
-/// and safe to send to a peer that must not see the argument.
+/// Serde puts rejected values in quotes, and so do most of the libraries a
+/// service will wrap. Redacting the span rather than dropping the whole
+/// message keeps the diagnosis — "invalid type: string, expected a number"
+/// still tells you what went wrong — while making the error safe to log and
+/// safe to send to a peer that must not see the argument.
 pub fn redact_values(message: &str) -> String {
     let mut out = String::with_capacity(message.len());
-    let mut inside = false;
+    let mut quote = None;
+    let mut escaped = false;
     for c in message.chars() {
-        match (c, inside) {
-            ('`', false) => {
-                out.push_str("`…");
-                inside = true;
+        if let Some(delimiter) = quote {
+            if delimiter == '"' && escaped {
+                escaped = false;
+            } else if delimiter == '"' && c == '\\' {
+                escaped = true;
+            } else if c == delimiter {
+                out.push(delimiter);
+                quote = None;
             }
-            ('`', true) => {
-                out.push('`');
-                inside = false;
-            }
-            (_, false) => out.push(c),
-            (_, true) => {}
+            continue;
+        }
+        if matches!(c, '`' | '"') {
+            out.push(c);
+            out.push('…');
+            quote = Some(c);
+        } else {
+            out.push(c);
         }
     }
     out
