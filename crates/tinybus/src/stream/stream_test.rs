@@ -840,15 +840,32 @@ async fn reading_past_the_callers_own_limit_is_an_error_not_a_silent_truncation(
 #[tokio::test]
 async fn a_reader_whose_connection_went_away_reports_it_rather_than_a_clean_eof() {
     // No outcome is ever recorded when the receiving side simply disappears, and
-    // an unfinished payload must not be mistaken for a finished one.
-    let (client, service) = bus().await;
-    let writer = client
-        .open_stream(&BusName::new(SINK).unwrap(), StreamDescriptor::default())
+    // an unfinished payload must not be mistaken for a finished one. A bare
+    // receiver, because the shared fixture's service holds its own connection —
+    // a legitimate thing for a service to do, and a cycle that keeps the
+    // receiving side alive past the point this test needs it gone.
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let receiver = Connection::connect(bus.connect().await.unwrap())
         .await
         .unwrap();
-    let mut reader = service.accept_stream(&writer.stream_ref()).unwrap();
+    receiver.request_name("ai.tinyhumans.Vanishing").await.unwrap();
+    let client = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+
+    let writer = client
+        .open_stream(
+            &BusName::new("ai.tinyhumans.Vanishing").unwrap(),
+            StreamDescriptor::default(),
+        )
+        .await
+        .unwrap();
+    let mut reader = receiver.accept_stream(&writer.stream_ref()).unwrap();
+    // Leaked rather than dropped: a dropped writer aborts, which would record an
+    // outcome and test the wrong path.
     std::mem::forget(writer);
-    drop(service);
+    drop(receiver);
 
     let error = tokio::time::timeout(Duration::from_secs(5), reader.next_chunk())
         .await
