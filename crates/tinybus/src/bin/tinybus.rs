@@ -613,4 +613,81 @@ mod tests {
         .unwrap();
         assert!(service.unique_name().is_some());
     }
+
+    #[tokio::test]
+    async fn module_commands_and_invalid_json_fail_with_a_running_broker() {
+        let (_dir, address, _service) = broker_and_service().await;
+        let commands = [
+            ModulesCommand::List {
+                state: Some("ready".into()),
+                json: true,
+            },
+            ModulesCommand::Show {
+                name: "missing".into(),
+                json: false,
+            },
+            ModulesCommand::Scan {
+                paths: vec![PathBuf::from("/not/a/module")],
+                dry_run: true,
+            },
+            ModulesCommand::Load {
+                path: PathBuf::from("/not/a/module"),
+                config: "{}".into(),
+            },
+            ModulesCommand::Stop {
+                name: "missing".into(),
+                deadline_ms: 1_000,
+            },
+            ModulesCommand::Enable {
+                name: "missing".into(),
+            },
+            ModulesCommand::Disable {
+                name: "missing".into(),
+            },
+            ModulesCommand::Doctor,
+        ];
+        for command in commands {
+            assert!(run_modules(&address, Duration::from_secs(2), command).await.is_err());
+        }
+
+        for command in [
+            Command::Call {
+                destination: DESTINATION.into(),
+                path: PATH.into(),
+                interface: INTERFACE.into(),
+                member: "Echo".into(),
+                args: "not json".into(),
+            },
+            Command::Emit {
+                path: PATH.into(),
+                interface: INTERFACE.into(),
+                member: "Changed".into(),
+                args: "not json".into(),
+            },
+        ] {
+            assert!(run(Cli {
+                address: Some(address.clone()),
+                timeout: 1,
+                command,
+            })
+            .await
+            .is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_module_stop_deadline_cannot_outlive_the_call_deadline() {
+        let (_dir, address, _service) = broker_and_service().await;
+        let error = run_modules(
+            &address,
+            Duration::from_millis(10),
+            ModulesCommand::Stop {
+                name: "missing".into(),
+                deadline_ms: 10,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("shorter than the RPC timeout"));
+    }
 }
