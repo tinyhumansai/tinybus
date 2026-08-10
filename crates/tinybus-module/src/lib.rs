@@ -887,13 +887,11 @@ mod tests {
                 },
             )
         };
+        println!("startup code: {code}");
         assert_eq!(code, TB_OK);
-        let hello: Message = serde_json::from_slice(
-            &outgoing_rx
-                .recv_timeout(Duration::from_secs(1))
-                .expect("module did not send Hello"),
-        )
-        .unwrap();
+        let captured = outgoing_rx.recv_timeout(Duration::from_secs(1));
+        println!("captured hello: {}", captured.is_ok());
+        let hello: Message = serde_json::from_slice(&captured.expect("module did not send Hello")).unwrap();
         let reply = Message::method_return(
             &hello.header,
             serde_json::Value::String(":module.1".to_string()),
@@ -903,6 +901,7 @@ mod tests {
             unsafe { (out.deliver)(out.module_ctx, reply.as_ptr(), reply.len()) },
             TB_OK
         );
+        println!("replied to hello");
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
         while !HOST_READY.load(Ordering::Acquire) {
             assert!(
