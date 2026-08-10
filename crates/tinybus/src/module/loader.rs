@@ -275,9 +275,11 @@ mod tests {
             Ok(_) => panic!("missing module unexpectedly loaded"),
             Err(error) => error,
         };
-        assert!(missing_error
-            .to_string()
-            .contains("dynamic loader rejected the artifact"));
+        assert!(
+            missing_error
+                .to_string()
+                .contains("dynamic loader rejected the artifact")
+        );
 
         use std::os::unix::ffi::OsStrExt;
         let nul_path = Path::new(std::ffi::OsStr::from_bytes(b"module\0name"));

@@ -317,7 +317,10 @@ mod tests {
                 let syn::ImplItem::Fn(method) = item else {
                     return true;
                 };
-                method.attrs.iter().all(|attr| !attr.path().is_ident("tinybus"))
+                method
+                    .attrs
+                    .iter()
+                    .all(|attr| !attr.path().is_ident("tinybus"))
             })
         }));
     }
