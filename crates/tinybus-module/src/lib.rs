@@ -650,6 +650,12 @@ mod tests {
             .await
     }
 
+    fn blocking_host_state_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        HOST_STATE_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .blocking_lock()
+    }
+
     unsafe extern "C" fn host_send(_: *mut c_void, _: *const u8, _: usize) -> i32 {
         HOST_SEND_CODE.load(Ordering::Acquire)
     }
@@ -947,9 +953,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn configured_startup_builds_a_runtime_announces_ready_and_shuts_down() {
-        let _host_state = host_state_guard().await;
+    #[test]
+    fn configured_startup_builds_a_runtime_announces_ready_and_shuts_down() {
+        let _host_state = blocking_host_state_guard();
         HOST_READY.store(false, Ordering::Release);
         HOST_SEND_CODE.store(TB_OK, Ordering::Release);
         HOST_FAULTED.store(false, Ordering::Release);
