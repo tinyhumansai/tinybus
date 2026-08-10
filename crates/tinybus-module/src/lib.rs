@@ -127,11 +127,7 @@ impl tracing::Subscriber for HostSubscriber {
 struct LogVisitor(String);
 
 impl tracing::field::Visit for LogVisitor {
-    fn record_debug(
-        &mut self,
-        field: &tracing::field::Field,
-        value: &dyn std::fmt::Debug,
-    ) {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         use std::fmt::Write as _;
 
         if !self.0.is_empty() {
