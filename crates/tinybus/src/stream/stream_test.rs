@@ -901,3 +901,36 @@ async fn neither_end_of_a_stream_prints_the_payload_when_debugged() {
     assert!(printed.contains("StreamWriter"), "{printed}");
     assert!(printed.contains("StreamReader"), "{printed}");
 }
+
+#[tokio::test]
+async fn one_peers_open_streams_do_not_consume_another_peers_slots() {
+    // The cap is per peer for the same reason every other queue on the bus is:
+    // a busy peer must not be able to starve a quiet one.
+    let (client, service) = bus().await;
+    service.set_stream_limits(StreamLimits {
+        max_streams_per_peer: 1,
+        ..StreamLimits::default()
+    });
+    let destination = BusName::new(SINK).unwrap();
+
+    let bus_handle = MemoryBus::new();
+    let _hog = client
+        .open_stream(&destination, StreamDescriptor::default())
+        .await
+        .unwrap();
+    // A second stream from the same peer is refused…
+    assert!(
+        client
+            .open_stream(&destination, StreamDescriptor::default())
+            .await
+            .is_err()
+    );
+    drop(bus_handle);
+
+    // …while a different peer is unaffected by the first one's spending.
+    let other = service
+        .open_stream(&destination, StreamDescriptor::default())
+        .await
+        .expect("another peer's slots are its own");
+    assert!(!other.stream_ref().id.is_empty());
+}
