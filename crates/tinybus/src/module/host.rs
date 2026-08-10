@@ -745,6 +745,7 @@ impl ModuleHost {
         } else if reason.contains("dependency")
             || reason.contains("required interface")
             || reason.contains("same bus name")
+            || reason.contains("bus name is already owned")
             || reason.contains("same module name")
         {
             ModuleState::Unresolved {
