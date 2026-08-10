@@ -98,13 +98,9 @@ fn payload(len: usize) -> Vec<u8> {
 /// A broker, a sink service that owns [`SINK`], and a client.
 async fn bus() -> (Connection, Connection) {
     let bus = MemoryBus::new();
-    let broker = Broker::new();
-    let listener = bus.listener();
-    tokio::spawn(async move {
-        let _ = broker.serve(Box::new(listener)).await;
-    });
+    Broker::new().spawn(bus.clone());
 
-    let service = Connection::connect(Box::new(bus.connect().await.unwrap()))
+    let service = Connection::connect(bus.connect().await.unwrap())
         .await
         .unwrap();
     let sink = Sink::new();
@@ -115,7 +111,7 @@ async fn bus() -> (Connection, Connection) {
         .unwrap();
     service.request_name(SINK).await.unwrap();
 
-    let client = Connection::connect(Box::new(bus.connect().await.unwrap()))
+    let client = Connection::connect(bus.connect().await.unwrap())
         .await
         .unwrap();
     (client, service)
@@ -529,16 +525,12 @@ async fn a_service_gets_the_stream_interface_without_exporting_anything() {
     // A connection that has exported no objects at all still answers `Open`:
     // bulk transfer is plumbing, not something each service opts into.
     let bus = MemoryBus::new();
-    let broker = Broker::new();
-    let listener = bus.listener();
-    tokio::spawn(async move {
-        let _ = broker.serve(Box::new(listener)).await;
-    });
-    let bare = Connection::connect(Box::new(bus.connect().await.unwrap()))
+    Broker::new().spawn(bus.clone());
+    let bare = Connection::connect(bus.connect().await.unwrap())
         .await
         .unwrap();
     bare.request_name("ai.tinyhumans.Bare").await.unwrap();
-    let client = Connection::connect(Box::new(bus.connect().await.unwrap()))
+    let client = Connection::connect(bus.connect().await.unwrap())
         .await
         .unwrap();
 
