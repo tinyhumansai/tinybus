@@ -452,6 +452,9 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains("expected u64"), "{text}");
         assert!(!text.contains("0xdeadbeef"), "{text}");
+        // The double-quoted half is the one serde uses for a rejected *string*,
+        // which is the shape a token or a recovery phrase arrives in.
+        assert!(!text.contains("seed phrase here"), "{text}");
     }
 
     #[test]
@@ -459,7 +462,18 @@ mod tests {
         // A truncated message must not leak the tail just because its closing
         // backtick never arrived.
         assert_eq!(redact_values("bad token `abc"), "bad token `…");
+        assert_eq!(redact_values("bad token \"abc"), "bad token \"…");
         assert_eq!(redact_values("no quotes here"), "no quotes here");
+    }
+
+    #[test]
+    fn a_backtick_inside_a_quoted_value_does_not_end_the_redaction_early() {
+        // Otherwise a value chosen to contain a backtick would close the span
+        // and put its own tail back into the message.
+        assert_eq!(
+            redact_values("invalid: \"a`b`c\", expected u64"),
+            "invalid: \"…\", expected u64"
+        );
     }
 
     #[test]
