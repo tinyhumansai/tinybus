@@ -826,6 +826,7 @@ mod tests {
             vec![
                 MemberName::new("Echo").unwrap(),
                 MemberName::new("Boom").unwrap(),
+                MemberName::new("Panic").unwrap(),
                 MemberName::new("Hang").unwrap(),
             ]
         }
@@ -834,6 +835,7 @@ mod tests {
             match member.as_str() {
                 "Echo" => Ok(args),
                 "Boom" => Err(Error::failed("as requested")),
+                "Panic" => panic!("secret panic payload"),
                 "Hang" => {
                     tokio::time::sleep(Duration::from_secs(3600)).await;
                     Ok(Value::Null)
@@ -886,6 +888,43 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.wire_name(), Error::FAILED);
         assert!(err.to_string().contains("as requested"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_panicking_module_method_becomes_an_error_reply_rather_than_an_abort() {
+        let (client, service) = pair().await;
+        service.__set_panic_handler(Arc::new(|| Error::MethodFailed {
+            name: "ai.tinyhumans.tinybus.Error.ModulePanicked".to_string(),
+            message: "module panicked at fixture.rs:12:3".to_string(),
+        }));
+        let error = client
+            .call_raw(call("Panic", serde_json::json!([])), DEFAULT_TIMEOUT)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.wire_name(),
+            "ai.tinyhumans.tinybus.Error.ModulePanicked"
+        );
+        let reply = client
+            .call_raw(call("Echo", serde_json::json!(["alive"])), DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_eq!(reply, serde_json::json!(["alive"]));
+    }
+
+    #[tokio::test]
+    async fn a_panic_reply_carries_the_location_but_never_the_payload() {
+        let (client, service) = pair().await;
+        service.__set_panic_handler(Arc::new(|| Error::MethodFailed {
+            name: "ai.tinyhumans.tinybus.Error.ModulePanicked".to_string(),
+            message: "module panicked at fixture.rs:12:3".to_string(),
+        }));
+        let error = client
+            .call_raw(call("Panic", serde_json::json!([])), DEFAULT_TIMEOUT)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("fixture.rs:12:3"));
+        assert!(!error.to_string().contains("secret panic payload"));
     }
 
     #[tokio::test]
