@@ -89,6 +89,20 @@ struct LoadedModule {
     transport: Arc<ModuleTransport>,
 }
 
+impl LoadedModule {
+    fn snapshot(&self) -> ModuleInfo {
+        let mut info = self.info.clone();
+        if self.transport.is_faulted()
+            && !matches!(info.state, ModuleState::Stopped | ModuleState::Disabled)
+        {
+            info.state = ModuleState::Faulted {
+                reason: "module reported an unrecoverable fault".to_string(),
+            };
+        }
+        info
+    }
+}
+
 /// Loads trusted cdylib modules into one embedded broker.
 pub struct ModuleHost {
     inner: Arc<ModuleHostInner>,
@@ -162,7 +176,7 @@ impl ModuleHost {
             .lock()
             .expect("module list lock")
             .iter()
-            .map(|module| module.info.clone())
+            .map(LoadedModule::snapshot)
             .collect::<Vec<_>>();
         modules.extend(
             self.inner
@@ -638,7 +652,7 @@ impl ModuleControl for ModuleHostInner {
             .lock()
             .expect("module list lock")
             .iter()
-            .map(|module| module.info.clone())
+            .map(LoadedModule::snapshot)
             .collect::<Vec<_>>();
         modules.extend(
             self.rejected
