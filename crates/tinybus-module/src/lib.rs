@@ -850,6 +850,8 @@ mod tests {
     #[test]
     fn configured_startup_builds_a_runtime_announces_ready_and_shuts_down() {
         HOST_READY.store(false, Ordering::Release);
+        HOST_SEND_CODE.store(TB_OK, Ordering::Release);
+        HOST_FAULTED.store(false, Ordering::Release);
         let config = br#"{"answer":42}"#;
         let host = host(config);
         let mut out = TbModuleVtable::default();
