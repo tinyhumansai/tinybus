@@ -184,6 +184,15 @@ impl ModuleHost {
             .filter(|path| has_library_extension(path))
             .collect::<Vec<_>>();
         paths.sort();
+        let loaded_files = self
+            .inner
+            .loaded
+            .lock()
+            .expect("module list lock")
+            .iter()
+            .map(|module| module.info.file.clone())
+            .collect::<HashSet<_>>();
+        paths.retain(|path| !loaded_files.contains(&safe_file_name(path)));
 
         let mut outcomes = Vec::new();
         let mut pending = Vec::new();
