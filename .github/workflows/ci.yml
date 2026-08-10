@@ -73,7 +73,9 @@ jobs:
               exit 1
             fi
           done
-          TINYBUS_TEST_MODULE="$PWD/$module" TINYBUS_TEST_MODULE_TWO="$PWD/$module_two" TINYBUS_TEST_WRONG_TARGET="$PWD/$wrong_target" cargo llvm-cov --workspace --all-features --fail-under-file-lines 90 -- --include-ignored
+          # Port traits declare contracts only; their transport implementations
+          # exercise those contracts, but traits have no executable body to cover.
+          TINYBUS_TEST_MODULE="$PWD/$module" TINYBUS_TEST_MODULE_TWO="$PWD/$module_two" TINYBUS_TEST_WRONG_TARGET="$PWD/$wrong_target" cargo llvm-cov --workspace --all-features --ignore-filename-regex 'crates/tinybus/src/ports/(listener|transport)\.rs$' --fail-under-file-lines 90 -- --include-ignored
 
   # The bus is meant to be embeddable on every platform OpenHuman ships on. The
   # socket adapter remains Unix-only, while the in-process module transport
