@@ -107,7 +107,7 @@ interface `ai.tinyhumans.tinybus.Bus`.
 | `ListModules` | `[]` | every module known to the embedded host |
 | `GetModule` | `[name]` | module identity, ABI facts and state, or `null` |
 | `GetModuleManifest` | `[name]` | the declared module manifest, or `null` |
-| `LoadModule` | `[path]` | the newly loaded module record |
+| `LoadModule` | `[path, config?]` | the newly loaded module record; config is JSON |
 | `StopModule` | `[name, deadline_ms]` | the stopped module record |
 | `EnableModule` | `[name, on]` | the updated module record |
 | `RescanModules` | `[]` | modules loaded from configured search paths |

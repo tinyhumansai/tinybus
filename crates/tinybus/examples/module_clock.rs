@@ -2,18 +2,35 @@
 
 use tinybus::{Connection, Result};
 
-struct Clock;
+#[derive(serde::Deserialize)]
+struct ClockConfig {
+    #[serde(default)]
+    prefix: String,
+}
+
+struct Clock {
+    prefix: String,
+}
 
 #[tinybus::interface(name = "ai.tinyhumans.openhuman.Clock")]
 impl Clock {
     async fn now(&self) -> Result<String> {
-        Ok(format!("{:?}", std::time::SystemTime::now()))
+        Ok(format!(
+            "{}{:?}",
+            self.prefix,
+            std::time::SystemTime::now()
+        ))
     }
 }
 
-async fn setup(connection: Connection) -> Result<()> {
+async fn setup(connection: Connection, config: ClockConfig) -> Result<()> {
     connection
-        .serve_at("/ai/tinyhumans/openhuman/Clock".try_into()?, Clock)
+        .serve_at(
+            "/ai/tinyhumans/openhuman/Clock".try_into()?,
+            Clock {
+                prefix: config.prefix,
+            },
+        )
         .await?;
     connection
         .request_name("ai.tinyhumans.openhuman.Clock")
@@ -23,6 +40,7 @@ async fn setup(connection: Connection) -> Result<()> {
 
 tinybus_module::module_export! {
     setup = setup,
+    config = ClockConfig,
     worker_threads = 1,
     provides = ["ai.tinyhumans.openhuman.Clock"],
     requires = [],

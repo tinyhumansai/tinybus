@@ -5,6 +5,11 @@ plain data, opaque pointers, borrowed byte slices and `extern "C"` callbacks.
 No Rust allocation, trait object, future, Tokio type, panic payload or
 `repr(Rust)` value crosses it.
 
+The tail of the host vtable contains a borrowed JSON configuration slice. It is
+valid for the init call; the SDK deserializes it into module-owned memory before
+returning. Configuration decode failures return a numeric status and never
+include attacker-controlled values in host logs.
+
 ## Symbols
 
 Every module exports exactly these revisioned symbols:

@@ -33,6 +33,13 @@ restart.
 6. Resolve dependencies and reject missing providers, cycles and name clashes.
 7. Call `tinybus_module_init_v1`, receive its vtable, and attach the transport.
 
+The host vtable also carries borrowed JSON configuration. The SDK copies and
+deserializes it during initialization; the module never retains a pointer into
+host memory. `module_export!` accepts `config = MyConfig` for an async setup
+function shaped `setup(Connection, MyConfig)`, while the original
+`setup(Connection)` form ignores configuration. Operators can pass the value
+with `tinybus modules load <path> --config '{...}'`.
+
 One refusal is returned independently and does not stop other artifacts in a
 directory. Errors contain only a sanitized basename and a fixed reason.
 

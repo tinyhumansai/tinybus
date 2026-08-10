@@ -113,6 +113,9 @@ enum ModulesCommand {
     Load {
         /// Path to the `.so`, `.dylib`, or `.dll`.
         path: PathBuf,
+        /// JSON object passed to the module's setup function.
+        #[arg(long, default_value = "{}")]
+        config: String,
     },
     /// Stop a loaded module without unloading its library.
     Stop {
@@ -319,9 +322,13 @@ async fn run_modules(address: &PathBuf, timeout: Duration, command: ModulesComma
             println!("{}", serde_json::to_string_pretty(&modules)?);
             Ok(())
         }
-        ModulesCommand::Load { path } => {
+        ModulesCommand::Load { path, config } => {
+            let config: serde_json::Value = serde_json::from_str(&config)?;
             let module: serde_json::Value = bus
-                .call("LoadModule", (path.to_string_lossy().to_string(),))
+                .call(
+                    "LoadModule",
+                    (path.to_string_lossy().to_string(), config),
+                )
                 .await?;
             println!("{}", serde_json::to_string_pretty(&module)?);
             Ok(())
