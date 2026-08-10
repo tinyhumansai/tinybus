@@ -435,27 +435,36 @@ impl ModuleHost {
             .filter(|path| has_library_extension(path))
             .collect::<Vec<_>>();
         paths.sort();
-        Ok(paths
-            .into_iter()
-            .map(|path| {
-                let inspected = check_file(&path)
-                    .and_then(|()| loader::load(&path, self.inner.strict.load(Ordering::Acquire)))
-                    .and_then(|artifact| {
-                        let mut info =
-                            self.validate(&path, &artifact.descriptor, &artifact.manifest)?;
-                        if let Err(error) = self.ensure_dependencies(&artifact.manifest, &path) {
-                            info.state = ModuleState::Unresolved {
-                                reason: error.to_string(),
-                            };
-                        }
-                        Ok(info)
-                    });
-                match inspected {
-                    Ok(info) => info,
-                    Err(error) => rejection_info(&error),
-                }
-            })
-            .collect())
+        let mut results = Vec::new();
+        let mut admitted = Vec::new();
+        for path in paths {
+            let inspected = check_file(&path)
+                .and_then(|()| loader::load(&path, self.inner.strict.load(Ordering::Acquire)))
+                .and_then(|artifact| {
+                    let info = self.validate(&path, &artifact.descriptor, &artifact.manifest)?;
+                    Ok((artifact, info))
+                });
+            match inspected {
+                Ok((artifact, info)) => admitted.push((artifact, info)),
+                Err(error) => results.push(rejection_info(&error)),
+            }
+        }
+        let manifests = admitted
+            .iter()
+            .map(|(artifact, _)| artifact.manifest.clone())
+            .collect::<Vec<_>>();
+        let resolution = crate::module::resolve::resolve(&manifests, &self.provided_interfaces());
+        let mut admitted = admitted.into_iter().map(Some).collect::<Vec<_>>();
+        for (index, reason) in resolution.unresolved {
+            let (_, mut info) = admitted[index].take().expect("resolver index is valid");
+            info.state = ModuleState::Unresolved { reason };
+            results.push(info);
+        }
+        for index in resolution.order {
+            let (_, info) = admitted[index].take().expect("resolver index is valid");
+            results.push(info);
+        }
+        Ok(results)
     }
 
     /// Stop every module within the supplied deadline per module.
