@@ -648,7 +648,8 @@ fn a_module_directory_owned_by_another_user_is_refused() {
 
 #[test]
 fn a_file_that_is_not_a_regular_file_is_skipped() {
-    let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let directory = tempfile::tempdir_in(valid.parent().expect("module artifact has a parent"))
+        .unwrap();
     let error = check_file(directory.path()).unwrap_err();
     assert!(error.to_string().contains("not a regular file"));
 }
