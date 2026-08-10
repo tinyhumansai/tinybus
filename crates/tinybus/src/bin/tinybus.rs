@@ -727,4 +727,62 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("shorter than the RPC timeout"));
     }
+
+    #[tokio::test]
+    #[ignore = "requires TINYBUS_TEST_MODULE to point at the built cdylib"]
+    async fn module_cli_controls_a_real_dynamic_module_lifecycle() {
+        let path = PathBuf::from(std::env::var_os("TINYBUS_TEST_MODULE").unwrap());
+        let (_dir, address, _host) = broker_with_module_host().await;
+        let timeout = Duration::from_secs(2);
+
+        run_modules(
+            &address,
+            timeout,
+            ModulesCommand::Load {
+                path,
+                config: r#"{"prefix":"cli:"}"#.into(),
+            },
+        )
+        .await
+        .unwrap();
+        run_modules(
+            &address,
+            timeout,
+            ModulesCommand::List {
+                state: None,
+                json: true,
+            },
+        )
+        .await
+        .unwrap();
+        run_modules(
+            &address,
+            timeout,
+            ModulesCommand::Show {
+                name: "tinybus".into(),
+                json: false,
+            },
+        )
+        .await
+        .unwrap();
+        run_modules(
+            &address,
+            timeout,
+            ModulesCommand::Stop {
+                name: "tinybus".into(),
+                deadline_ms: 500,
+            },
+        )
+        .await
+        .unwrap();
+        run_modules(
+            &address,
+            timeout,
+            ModulesCommand::Disable {
+                name: "tinybus".into(),
+            },
+        )
+        .await
+        .unwrap();
+    }
 }
