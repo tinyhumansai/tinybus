@@ -19,6 +19,7 @@ use crate::connection::Connection;
 use crate::events::{Event, EventBus, EventBusConfig, EventHandler};
 use crate::message::Message;
 use crate::name::{InterfaceName, MemberName, ObjectPath};
+use crate::ports::Transport;
 use crate::transport::memory::MemoryBus;
 
 /// A miniature stand-in for OpenHuman's `DomainEvent`.
