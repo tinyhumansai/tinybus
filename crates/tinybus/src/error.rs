@@ -369,37 +369,35 @@ impl Error {
     }
 }
 
-/// Replace every quoted span — backtick or double-quote — with `…`.
+/// Replace every backtick- or double-quoted span with `…`.
 ///
-/// serde puts the values it rejected in backticks, and so do most of the
-/// libraries a service will wrap. Redacting the span rather than dropping the
-/// whole message keeps the diagnostic — "invalid type: integer, expected a
-/// string" still tells you what went wrong — while making the error safe to log
-/// and safe to send to a peer that must not see the argument.
-///
-/// Double quotes are redacted too because serde uses *those* for the one case
-/// that matters most: a rejected string arrives as `invalid type: string
-/// "hunter2", expected …`, and a rejected string is the shape an access token,
-/// a passphrase or a recovery phrase has. Redacting only backticks would leave
-/// exactly the values this function exists to keep out of the message.
+/// Serde puts rejected values in quotes, and so do most of the libraries a
+/// service will wrap. Redacting the span rather than dropping the whole
+/// message keeps the diagnosis — "invalid type: string, expected a number"
+/// still tells you what went wrong — while making the error safe to log and
+/// safe to send to a peer that must not see the argument.
 pub fn redact_values(message: &str) -> String {
     let mut out = String::with_capacity(message.len());
-    let mut inside: Option<char> = None;
+    let mut quote = None;
+    let mut escaped = false;
     for c in message.chars() {
-        match inside {
-            None if c == '`' || c == '"' => {
-                out.push(c);
-                out.push('…');
-                inside = Some(c);
+        if let Some(delimiter) = quote {
+            if delimiter == '"' && escaped {
+                escaped = false;
+            } else if delimiter == '"' && c == '\\' {
+                escaped = true;
+            } else if c == delimiter {
+                out.push(delimiter);
+                quote = None;
             }
-            // Only the same quote character closes the span, so a backtick
-            // inside a quoted value cannot end the redaction early.
-            Some(open) if c == open => {
-                out.push(c);
-                inside = None;
-            }
-            None => out.push(c),
-            Some(_) => {}
+            continue;
+        }
+        if matches!(c, '`' | '"') {
+            out.push(c);
+            out.push('…');
+            quote = Some(c);
+        } else {
+            out.push(c);
         }
     }
     out
