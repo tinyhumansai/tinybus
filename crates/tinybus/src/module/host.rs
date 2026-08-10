@@ -247,12 +247,17 @@ impl ModuleHost {
         init: TbModuleInit,
         config: serde_json::Value,
     ) -> Result<ModuleInfo> {
+        let rejected_manifest = manifest.clone();
         let artifact = LoadedArtifact {
             descriptor,
             manifest,
             init,
         };
-        self.activate(file.as_ref(), artifact, config)
+        let result = self.activate(file.as_ref(), artifact, config);
+        if let Err(error) = &result {
+            self.record_manifest_rejection(error, rejected_manifest);
+        }
+        result
     }
 
     /// Load one module and pass JSON configuration to its setup function.
@@ -651,6 +656,34 @@ impl ModuleHost {
             rejected.push(info);
         }
     }
+
+    fn record_manifest_rejection(&self, error: &Error, manifest: ModuleManifest) {
+        let Error::ModuleRefused { file, reason } = error else {
+            return;
+        };
+        let info = ModuleInfo {
+            name: sanitize_untrusted(&manifest.module.name),
+            version: sanitize_untrusted(&manifest.module.version.to_string()),
+            file: file.clone(),
+            state: ModuleState::Rejected {
+                reason: reason.clone(),
+            },
+            manifest,
+            rustc_version: String::new(),
+            rustc_mismatch: false,
+            enabled: false,
+        };
+        let mut rejected = self
+            .inner
+            .rejected
+            .lock()
+            .expect("rejected module list lock");
+        if let Some(existing) = rejected.iter_mut().find(|known| known.file == info.file) {
+            *existing = info;
+        } else {
+            rejected.push(info);
+        }
+    }
 }
 
 impl ModuleControl for ModuleHostInner {
@@ -761,10 +794,19 @@ impl ModuleControl for ModuleHostInner {
 
     fn unavailable_for(&self, bus_name: &BusName) -> Option<Error> {
         let loaded = self.loaded.lock().expect("module list lock");
-        let module = loaded
+        let loaded_info = loaded
             .iter()
-            .find(|module| &module.info.manifest.bus_name == bus_name)?;
-        let info = module.snapshot();
+            .find(|module| &module.info.manifest.bus_name == bus_name)
+            .map(LoadedModule::snapshot);
+        drop(loaded);
+        let info = loaded_info.or_else(|| {
+            self.rejected
+                .lock()
+                .expect("rejected module list lock")
+                .iter()
+                .find(|module| &module.manifest.bus_name == bus_name)
+                .cloned()
+        })?;
         let detail = state_detail(&info.state)
             .unwrap_or("module is not accepting calls")
             .to_string();
