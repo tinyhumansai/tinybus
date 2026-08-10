@@ -1245,6 +1245,31 @@ mod tests {
         broker_task.abort();
     }
 
+    #[tokio::test]
+    async fn a_call_to_a_rejected_module_names_the_state_rather_than_timing_out() {
+        let bus = MemoryBus::new();
+        let broker = Broker::new();
+        let broker_task = broker.spawn(bus.clone());
+        let host = ModuleHost::new(broker);
+        let mut descriptor = TbAbiDescriptor::current("clock", "0.1.0");
+        descriptor.magic = 0;
+        unsafe { host.attach_raw("clock.so", descriptor, manifest(), init_that_must_not_run) }
+            .unwrap_err();
+
+        let connection = Connection::connect(bus.connect().await.unwrap()).await.unwrap();
+        let proxy = connection
+            .proxy(
+                "ai.tinyhumans.module.Clock",
+                "/ai/tinyhumans/module/Clock",
+                "ai.tinyhumans.module.Clock",
+            )
+            .unwrap();
+        let error = proxy.call::<()>("Call", ()).await.unwrap_err();
+        assert_eq!(error.wire_name(), "ai.tinyhumans.tinybus.Error.ModuleUnavailable");
+        assert!(error.to_string().contains("rejected"), "{error}");
+        broker_task.abort();
+    }
+
     #[test]
     fn a_module_compiled_with_panic_abort_is_refused_because_a_panic_would_kill_the_host() {
         let broker = Broker::new();
