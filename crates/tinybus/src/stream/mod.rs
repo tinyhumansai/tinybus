@@ -662,6 +662,18 @@ impl StreamWriter {
     }
 }
 
+impl std::fmt::Debug for StreamWriter {
+    /// Deliberately never the payload: a writer is printed in error paths, and
+    /// the bytes going through it are the caller's data.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamWriter")
+            .field("destination", &self.destination)
+            .field("id", &self.id)
+            .field("sent", &self.sent)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Drop for StreamWriter {
     /// A dropped writer aborts, so a sender that fails halfway does not leave
     /// the receiver holding a window open until the idle reaper notices.
