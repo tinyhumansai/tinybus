@@ -19,7 +19,8 @@ use crate::name::{BusName, InterfaceName, MemberName, ObjectPath};
 use crate::stream::{
     MAX_CHUNK_LEN, STREAM_INTERFACE, STREAM_PATH, StreamDescriptor, StreamLimits, StreamRef,
 };
-use crate::transport::memory::MemoryBus;
+use crate::ports::Transport;
+use crate::transport::memory::{MemoryBus, MemoryTransport};
 
 const SINK: &str = "ai.tinyhumans.Sink";
 const SINK_PATH: &str = "/ai/tinyhumans/Sink";
@@ -642,21 +643,37 @@ async fn a_malformed_open_is_a_bad_arguments_error_that_does_not_quote_the_body(
 }
 
 #[tokio::test]
-async fn a_stream_call_with_no_member_is_rejected_rather_than_dispatched() {
-    let (client, _service) = bus().await;
-    let mut message = Message::method_call(
+async fn a_stream_call_with_no_member_is_rejected_by_the_receiver() {
+    // Sent down a bare transport rather than through `call_raw`, which runs
+    // `Message::validate` before enqueueing: going through the client would
+    // prove only that the *sender* refuses to build this message, and the
+    // property under test is that a receiver refuses to dispatch one. A peer
+    // running someone else's implementation is exactly who sends it.
+    let (mine, theirs) = MemoryTransport::pair();
+    let receiver = Connection::attach(Arc::new(theirs));
+    let mut malformed = Message::method_call(
         BusName::new(SINK).unwrap(),
         ObjectPath::new(STREAM_PATH).unwrap(),
         InterfaceName::new(STREAM_INTERFACE).unwrap(),
         MemberName::new("Open").unwrap(),
         serde_json::json!([StreamDescriptor::default()]),
     );
-    message.header.member = None;
-    let error = client
-        .call_raw(message, Duration::from_secs(5))
+    malformed.header.member = None;
+    malformed.header.serial = 1;
+    mine.send(malformed).await.unwrap();
+
+    let reply = tokio::time::timeout(Duration::from_secs(5), mine.recv())
         .await
-        .unwrap_err();
-    assert_eq!(error.wire_name(), "ai.tinyhumans.tinybus.Error.Protocol");
+        .expect("the receiver must answer rather than drop the call")
+        .unwrap()
+        .expect("the transport is still open");
+    assert_eq!(reply.header.kind, crate::message::MessageKind::Error);
+    assert_eq!(
+        reply.header.error_name.as_deref(),
+        Some("ai.tinyhumans.tinybus.Error.Protocol"),
+        "{reply:?}"
+    );
+    drop(receiver);
 }
 
 #[tokio::test]
