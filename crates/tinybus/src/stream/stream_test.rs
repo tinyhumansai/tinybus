@@ -16,10 +16,10 @@ use crate::connection::Connection;
 use crate::error::{Error, Result};
 use crate::message::Message;
 use crate::name::{BusName, InterfaceName, MemberName, ObjectPath};
+use crate::ports::Transport;
 use crate::stream::{
     MAX_CHUNK_LEN, STREAM_INTERFACE, STREAM_PATH, StreamDescriptor, StreamLimits, StreamRef,
 };
-use crate::ports::Transport;
 use crate::transport::memory::{MemoryBus, MemoryTransport};
 
 const SINK: &str = "ai.tinyhumans.Sink";
@@ -948,4 +948,32 @@ async fn one_peers_open_streams_do_not_consume_another_peers_slots() {
         .await
         .expect("another peer's slots are its own");
     assert!(!other.stream_ref().id.is_empty());
+}
+
+#[tokio::test]
+async fn a_receiver_does_not_reserve_memory_for_a_length_the_sender_merely_claimed() {
+    // `total_len` arrives from the peer before any payload does. Sizing a
+    // buffer from it would let a peer declare the maximum on each stream it is
+    // allowed and make the receiver reserve gigabytes for bytes it never sends
+    // — the frame-length allocation problem, one layer up. The capacity of the
+    // returned buffer is what tells the two behaviours apart.
+    let (client, service) = bus().await;
+    let destination = BusName::new(SINK).unwrap();
+    let claimed = 200 * 1024 * 1024;
+    let mut writer = client
+        .open_stream(&destination, StreamDescriptor::with_len(claimed))
+        .await
+        .unwrap();
+    let stream = writer.stream_ref();
+    let mut reader = service.accept_stream(&stream).unwrap();
+    writer.write_chunk(b"four").await.unwrap();
+    drop(writer);
+
+    let bytes = reader.read_to_end_capped(claimed).await.unwrap_or_default();
+    assert!(
+        bytes.capacity() as u64 <= MAX_CHUNK_LEN as u64,
+        "reserved {} bytes for a {claimed}-byte claim carrying {} bytes",
+        bytes.capacity(),
+        bytes.len()
+    );
 }
