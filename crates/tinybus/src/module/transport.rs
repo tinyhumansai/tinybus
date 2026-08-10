@@ -257,6 +257,13 @@ impl ModuleTransport {
                         .await
                         .is_err()
                     {
+                        self.context.faulted.store(true, Ordering::Release);
+                        self.context.ready_notify.notify_waiters();
+                        self.context
+                            .inbound
+                            .lock()
+                            .expect("host inbound lock")
+                            .take();
                         return Err(Error::transport(
                             "module stopped draining its queue within the deadline",
                         ));
