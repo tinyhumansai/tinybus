@@ -481,17 +481,23 @@ impl ModuleHost {
             descriptor.tinybus_patch.into(),
         );
         if !host_version.compatible_series().accepts(&module_version) {
-            return Err(refuse(format!(
-                "tinybus version is incompatible: host {host_version}, module {module_version}"
-            )));
+            return Err(Error::module_refused(
+                path,
+                format!(
+                    "tinybus version is incompatible: host {host_version}, module {module_version}"
+                ),
+            ));
         }
         let missing_features = descriptor.tinybus_feature_bits & !build_info::FEATURE_BITS;
         if missing_features != 0 {
             let bit = 1u64 << missing_features.trailing_zeros();
-            return Err(refuse(format!(
-                "module requires unavailable tinybus feature {}",
-                build_info::feature_name(bit)
-            )));
+            return Err(Error::module_refused(
+                path,
+                format!(
+                    "module requires unavailable tinybus feature {}",
+                    build_info::feature_name(bit)
+                ),
+            ));
         }
 
         let rustc = sanitized_field(&descriptor.rustc_version)
