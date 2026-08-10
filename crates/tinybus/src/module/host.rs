@@ -885,7 +885,7 @@ mod tests {
             .unwrap_err();
         let text = error.to_string();
         assert!(text.contains(crate::VERSION), "{text}");
-        assert!(text.contains("99.0.0"), "{text}");
+        assert!(text.contains("99.1.0"), "{text}");
     }
 
     #[test]
