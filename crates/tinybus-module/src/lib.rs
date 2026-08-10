@@ -634,6 +634,7 @@ mod tests {
 
     static HOST_SEND_CODE: AtomicI32 = AtomicI32::new(TB_OK);
     static HOST_WAKES: AtomicUsize = AtomicUsize::new(0);
+    static HOST_LOGS: AtomicUsize = AtomicUsize::new(0);
     static HOST_READY: AtomicBool = AtomicBool::new(false);
     static HOST_FAULTED: AtomicBool = AtomicBool::new(false);
     static START_OUTGOING: OnceLock<StdMutex<Option<SyncSender<Vec<u8>>>>> = OnceLock::new();
@@ -660,7 +661,9 @@ mod tests {
         HOST_WAKES.fetch_add(1, Ordering::AcqRel);
     }
 
-    unsafe extern "C" fn host_log(_: *mut c_void, _: u32, _: *const u8, _: usize) {}
+    unsafe extern "C" fn host_log(_: *mut c_void, level: u32, _: *const u8, _: usize) {
+        HOST_LOGS.store(level as usize, Ordering::Release);
+    }
 
     unsafe extern "C" fn host_fault(_: *mut c_void, _: *const u8, _: usize) {
         HOST_FAULTED.store(true, Ordering::Release);
@@ -857,6 +860,45 @@ mod tests {
         transport.close().await.unwrap();
         assert!(transport.recv().await.unwrap().is_none());
         assert_eq!(transport.describe(), "module");
+    }
+
+    #[test]
+    fn host_calls_and_subscriber_forward_logs_at_their_original_level() {
+        let calls = HostCalls(host(&[]));
+        HOST_SEND_CODE.store(TB_OK, Ordering::Release);
+        HOST_WAKES.store(0, Ordering::Release);
+        HOST_LOGS.store(0, Ordering::Release);
+        HOST_READY.store(false, Ordering::Release);
+        HOST_FAULTED.store(false, Ordering::Release);
+        assert_eq!(calls.send(b"frame"), TB_OK);
+        calls.wake();
+        calls.log(4, b"debug");
+        calls.ready();
+        calls.fault();
+        assert_eq!(HOST_WAKES.load(Ordering::Acquire), 1);
+        assert_eq!(HOST_LOGS.load(Ordering::Acquire), 4);
+        assert!(HOST_READY.load(Ordering::Acquire));
+        assert!(HOST_FAULTED.load(Ordering::Acquire));
+
+        let subscriber = HostSubscriber {
+            host: calls,
+            next_span: AtomicU64::new(1),
+            max_level: tracing::level_filters::LevelFilter::INFO,
+        };
+        assert!(subscriber.enabled(&tracing::Metadata::new(
+            "event",
+            "test",
+            tracing::Level::INFO,
+            None,
+            None,
+            None,
+            tracing::field::FieldSet::new(&[], tracing::callsite::Identifier(&CALLSITE)),
+            tracing::metadata::Kind::EVENT,
+        )));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(answer = 42, "module log");
+        });
+        assert_eq!(HOST_LOGS.load(Ordering::Acquire), 3);
     }
 
     #[test]
