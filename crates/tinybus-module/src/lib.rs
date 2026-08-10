@@ -629,6 +629,56 @@ macro_rules! module_export {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize};
+
+    static HOST_SEND_CODE: AtomicI32 = AtomicI32::new(TB_OK);
+    static HOST_WAKES: AtomicUsize = AtomicUsize::new(0);
+    static HOST_READY: AtomicBool = AtomicBool::new(false);
+    static HOST_FAULTED: AtomicBool = AtomicBool::new(false);
+
+    unsafe extern "C" fn host_send(_: *mut c_void, _: *const u8, _: usize) -> i32 {
+        HOST_SEND_CODE.load(Ordering::Acquire)
+    }
+
+    unsafe extern "C" fn host_wake(_: *mut c_void) {
+        HOST_WAKES.fetch_add(1, Ordering::AcqRel);
+    }
+
+    unsafe extern "C" fn host_log(_: *mut c_void, _: u32, _: *const u8, _: usize) {}
+
+    unsafe extern "C" fn host_fault(_: *mut c_void, _: *const u8, _: usize) {
+        HOST_FAULTED.store(true, Ordering::Release);
+    }
+
+    unsafe extern "C" fn host_ready(_: *mut c_void) {
+        HOST_READY.store(true, Ordering::Release);
+    }
+
+    fn host(config: &[u8]) -> TbHostVtable {
+        TbHostVtable {
+            size: size_of::<TbHostVtable>() as u32,
+            _reserved: 0,
+            host_ctx: std::ptr::null_mut(),
+            send: host_send,
+            wake: host_wake,
+            log: host_log,
+            fault: host_fault,
+            config: tinybus::module::abi::TbSlice {
+                ptr: config.as_ptr(),
+                len: config.len(),
+            },
+            ready: host_ready,
+        }
+    }
+
+    fn message() -> Message {
+        Message::signal(
+            "/org/example/Module".parse().unwrap(),
+            "org.example.Module".parse().unwrap(),
+            "Changed".parse().unwrap(),
+            serde_json::Value::Null,
+        )
+    }
 
     #[test]
     fn a_module_whose_queue_is_full_reports_backpressure_rather_than_blocking_the_broker() {
@@ -694,5 +744,75 @@ mod tests {
         }));
         let code = unsafe { shutdown(std::ptr::from_ref(&state).cast_mut().cast(), 1) };
         assert_eq!(code, TB_PANICKED);
+    }
+
+    #[test]
+    fn deliver_and_shutdown_validate_their_arguments_and_closed_state() {
+        assert_eq!(unsafe { deliver(std::ptr::null_mut(), std::ptr::null(), 0) }, TB_BAD_ARGUMENT);
+        assert_eq!(unsafe { shutdown(std::ptr::null_mut(), 1) }, TB_BAD_ARGUMENT);
+        let state = RuntimeState {
+            inbound: StdMutex::new(None),
+            runtime: StdMutex::new(None),
+        };
+        let bytes = b"{}";
+        assert_eq!(
+            unsafe { deliver(std::ptr::from_ref(&state).cast_mut().cast(), bytes.as_ptr(), bytes.len()) },
+            TB_CLOSED
+        );
+        assert_eq!(unsafe { shutdown(std::ptr::from_ref(&state).cast_mut().cast(), 1) }, TB_CLOSED);
+    }
+
+    #[tokio::test]
+    async fn module_transport_maps_host_results_and_wakes_after_receiving() {
+        let (sender, receiver) = mpsc::channel(2);
+        let transport = ModuleTransport {
+            host: HostCalls(host(&[])),
+            inbound: Mutex::new(receiver),
+            detach_on_panic: true,
+        };
+        for (code, expected) in [
+            (TB_BACKPRESSURE, "backpressure"),
+            (TB_CLOSED, "connection closed"),
+            (TB_BAD_ARGUMENT, "module host refused a frame"),
+        ] {
+            HOST_SEND_CODE.store(code, Ordering::Release);
+            assert!(transport.send(message()).await.unwrap_err().to_string().contains(expected));
+        }
+        HOST_SEND_CODE.store(TB_OK, Ordering::Release);
+        HOST_FAULTED.store(false, Ordering::Release);
+        let mut panic_message = message();
+        panic_message.header.error_name = Some(MODULE_PANIC_ERROR.to_string());
+        transport.send(panic_message).await.unwrap();
+        assert!(HOST_FAULTED.load(Ordering::Acquire));
+        HOST_WAKES.store(0, Ordering::Release);
+        sender.send(serde_json::to_vec(&message()).unwrap()).await.unwrap();
+        assert_eq!(transport.recv().await.unwrap().unwrap(), message());
+        assert_eq!(HOST_WAKES.load(Ordering::Acquire), 1);
+        transport.close().await.unwrap();
+        assert!(transport.recv().await.unwrap().is_none());
+        assert_eq!(transport.describe(), "module");
+    }
+
+    #[test]
+    fn start_functions_reject_invalid_host_and_config_before_spawning_a_runtime() {
+        let mut out = TbModuleVtable::default();
+        assert_eq!(
+            unsafe { start_module(std::ptr::null(), &mut out, 1, true, |_| async { Ok(()) }) },
+            TB_BAD_ARGUMENT
+        );
+        let mut short = host(&[]);
+        short.size = 0;
+        assert_eq!(
+            unsafe { start_module(&short, &mut out, 1, true, |_| async { Ok(()) }) },
+            TB_BAD_ARGUMENT
+        );
+        let config = b"not json";
+        let invalid_config = host(config);
+        assert_eq!(
+            unsafe {
+                start_module_with_config::<u32, _, _>(&invalid_config, &mut out, 1, true, |_, _| async { Ok(()) })
+            },
+            TB_BAD_ARGUMENT
+        );
     }
 }
