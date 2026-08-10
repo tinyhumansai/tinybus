@@ -1184,10 +1184,6 @@ fn unix_directory_refusal(owner: u32, mode: u32, current_uid: u32) -> Option<&'s
     }
 }
 
-#[cfg(test)]
-#[path = "tests.rs"]
-mod tests;
-
 #[cfg(windows)]
 fn check_directory(path: &Path) -> Result<()> {
     let metadata = std::fs::symlink_metadata(path)
@@ -1350,3 +1346,7 @@ fn windows_directory_grants_untrusted_write(path: &Path) -> Result<bool> {
     unsafe { LocalFree(descriptor) };
     Ok(result)
 }
+
+#[cfg(test)]
+#[path = "host_test.rs"]
+mod tests;

@@ -617,10 +617,13 @@ fn a_refusal_names_the_file_but_never_the_path_or_the_descriptor_bytes() {
 fn a_world_writable_module_directory_is_refused_before_any_dlopen() {
     use std::os::unix::fs::PermissionsExt;
 
-    let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let directory = tempfile::tempdir().unwrap();
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
-    let error = check_directory(directory.path()).unwrap_err();
-    assert!(error.to_string().contains("writable by another user"));
+    let metadata = std::fs::metadata(directory.path()).unwrap();
+    assert_eq!(
+        unix_directory_refusal(metadata.uid(), metadata.permissions().mode(), metadata.uid()),
+        Some("module directory is writable by another user")
+    );
 }
 
 #[cfg(unix)]
