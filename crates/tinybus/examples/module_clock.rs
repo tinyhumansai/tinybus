@@ -49,3 +49,23 @@ tinybus_module::module_export! {
     optional = [],
     lazy = false,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tinybus::Interface;
+
+    #[test]
+    fn a_declared_method_list_matches_the_interfaces_dispatch_table() {
+        let slice = tinybus_module_manifest_v1();
+        let bytes = unsafe { std::slice::from_raw_parts(slice.ptr, slice.len) };
+        let manifest: tinybus::module::manifest::ModuleManifest =
+            serde_json::from_slice(bytes).unwrap();
+        let declared = &manifest.provides[0].methods;
+        let dispatched = Clock {
+            prefix: String::new(),
+        }
+        .members();
+        assert_eq!(declared, &dispatched);
+    }
+}
