@@ -891,10 +891,8 @@ mod tests {
         let captured = outgoing_rx.recv_timeout(Duration::from_secs(1));
         let hello: Message =
             serde_json::from_slice(&captured.expect("module did not send Hello")).unwrap();
-        let reply = Message::method_return(
-            &hello.header,
-            serde_json::Value::String(":1.1".to_string()),
-        );
+        let reply =
+            Message::method_return(&hello.header, serde_json::Value::String(":1.1".to_string()));
         let reply = serde_json::to_vec(&reply).unwrap();
         assert_eq!(
             unsafe { (out.deliver)(out.module_ctx, reply.as_ptr(), reply.len()) },
