@@ -522,11 +522,20 @@ impl ModuleHost {
         let transport_for_broker: Arc<dyn Transport> = transport.clone();
         let unique = self.inner.broker.attach(transport_for_broker);
         let reserved_change = if artifact.manifest.lazy_init {
-            Some(
-                self.inner
-                    .broker
-                    .reserve_module_name(&unique, admitted.manifest.bus_name.clone())?,
-            )
+            match self
+                .inner
+                .broker
+                .reserve_module_name(&unique, admitted.manifest.bus_name.clone())
+            {
+                Ok(change) => Some(change),
+                Err(_) => {
+                    let _ = transport.stop_sync(Duration::from_millis(0));
+                    return Err(Error::module_refused(
+                        path,
+                        "module bus name is already owned",
+                    ));
+                }
+            }
         } else {
             None
         };
