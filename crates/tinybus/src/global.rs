@@ -250,7 +250,10 @@ mod tests {
             .init_over(Box::new(transport.connect().await.unwrap()), config())
             .await
             .unwrap();
-        assert_eq!(initialised.config().interface.as_str(), "ai.tinyhumans.test.Events");
+        assert_eq!(
+            initialised.config().interface.as_str(),
+            "ai.tinyhumans.test.Events"
+        );
         assert!(std::ptr::eq(bus.get().unwrap(), initialised));
 
         let manifest = PeerManifest::new("test-host", crate::Version::parse("1.0.0").unwrap());
