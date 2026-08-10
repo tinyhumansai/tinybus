@@ -454,7 +454,7 @@ impl ModuleHost {
             .map(|module| module.transport.clone())
             .collect::<Vec<_>>();
         for transport in transports {
-            let _ = tokio::task::spawn_blocking(move || transport.shutdown_sync(deadline)).await;
+            let _ = tokio::task::spawn_blocking(move || transport.stop_sync(deadline)).await;
         }
         for module in self
             .inner
