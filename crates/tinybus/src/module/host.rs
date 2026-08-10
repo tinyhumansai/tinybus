@@ -100,7 +100,10 @@ impl LoadedModule {
                 reason: "module reported an unrecoverable fault".to_string(),
             };
         } else if self.transport.is_ready()
-            && matches!(info.state, ModuleState::Resolved | ModuleState::Initializing)
+            && matches!(
+                info.state,
+                ModuleState::Resolved | ModuleState::Initializing
+            )
         {
             info.state = ModuleState::Ready;
         }
@@ -750,7 +753,10 @@ impl ModuleControl for ModuleHostInner {
             .iter_mut()
             .find(|module| &module.unique_name == unique_name)?;
         if !module.transport.is_faulted()
-            || matches!(module.info.state, ModuleState::Stopped | ModuleState::Disabled)
+            || matches!(
+                module.info.state,
+                ModuleState::Stopped | ModuleState::Disabled
+            )
         {
             return None;
         }
@@ -863,8 +869,14 @@ fn check_allowlist(path: &Path) -> Result<()> {
     }
     let source = std::fs::read_to_string(&allowlist)
         .map_err(|_| Error::module_refused(path, "module allowlist is unreadable"))?;
-    let file_name = path.file_name().and_then(|value| value.to_str()).unwrap_or("");
-    let file_stem = path.file_stem().and_then(|value| value.to_str()).unwrap_or("");
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    let file_stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
     let expected = source.lines().find_map(|line| {
         let line = line.split('#').next()?.trim();
         if line.is_empty() || line.starts_with('[') {
@@ -872,12 +884,8 @@ fn check_allowlist(path: &Path) -> Result<()> {
         }
         let (key, value) = line.split_once('=')?;
         let key = key.trim().trim_matches(['"', '\'']);
-        (key == file_name || key == file_stem).then(|| {
-            value
-                .trim()
-                .trim_matches(['"', '\''])
-                .to_ascii_lowercase()
-        })
+        (key == file_name || key == file_stem)
+            .then(|| value.trim().trim_matches(['"', '\'']).to_ascii_lowercase())
     });
     let Some(expected) = expected else {
         return Err(Error::module_refused(

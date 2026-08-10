@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use tokio::sync::{Mutex, Notify, OnceCell, mpsc};
 
 use crate::error::{Error, Result};
-use crate::message::{Message, MessageKind};
 use crate::message::codec::MAX_FRAME_LEN;
+use crate::message::{Message, MessageKind};
 use crate::module::abi::{
     TB_BACKPRESSURE, TB_BAD_ARGUMENT, TB_CLOSED, TB_OK, TbHostVtable, TbModuleVtable,
 };
@@ -126,9 +126,8 @@ impl ModuleTransport {
                 if code != TB_OK {
                     return Err("module initialization failed".to_string());
                 }
-                self.initialize(module).map_err(|_| {
-                    "module returned an invalid vtable".to_string()
-                })?;
+                self.initialize(module)
+                    .map_err(|_| "module returned an invalid vtable".to_string())?;
                 Ok(())
             })
             .await;
@@ -226,10 +225,7 @@ impl Transport for ModuleTransport {
         if message.header.kind == MessageKind::MethodCall && !self.is_ready() {
             self.pending.lock().await.push_back(message);
             if !self.drain_started.swap(true, Ordering::AcqRel) {
-                let transport = self
-                    .self_ref
-                    .upgrade()
-                    .ok_or(Error::ConnectionClosed)?;
+                let transport = self.self_ref.upgrade().ok_or(Error::ConnectionClosed)?;
                 tokio::spawn(transport.drain_pending());
             }
             return Ok(());

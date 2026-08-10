@@ -475,7 +475,11 @@ fn module_state_bodies(member: &str, value: &Value) -> Vec<Value> {
         .map(|module| {
             let old = match member {
                 "LoadModule" | "RescanModules" => "discovered",
-                "EnableModule" if matches!(module.state, crate::module::host::ModuleState::Disabled) => "ready",
+                "EnableModule"
+                    if matches!(module.state, crate::module::host::ModuleState::Disabled) =>
+                {
+                    "ready"
+                }
                 "EnableModule" => "disabled",
                 "StopModule" => "ready",
                 _ => "discovered",
@@ -551,9 +555,7 @@ async fn reader_task(broker: Broker, transport: Arc<dyn Transport>, id: u64, nam
             .expect("module control lock")
             .as_ref()
             .and_then(Weak::upgrade);
-        if let Some((module, old, new)) =
-            control.and_then(|control| control.peer_detached(&name))
-        {
+        if let Some((module, old, new)) = control.and_then(|control| control.peer_detached(&name)) {
             broker
                 .announce_module_state(serde_json::json!([
                     module,
