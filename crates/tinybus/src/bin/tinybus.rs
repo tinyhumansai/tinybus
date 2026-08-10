@@ -758,9 +758,41 @@ mod tests {
         run_modules(
             &address,
             timeout,
+            ModulesCommand::List {
+                state: None,
+                json: false,
+            },
+        )
+        .await
+        .unwrap();
+        run_modules(
+            &address,
+            timeout,
             ModulesCommand::Show {
                 name: "tinybus".into(),
                 json: false,
+            },
+        )
+        .await
+        .unwrap();
+        run_modules(
+            &address,
+            timeout,
+            ModulesCommand::Show {
+                name: "tinybus".into(),
+                json: true,
+            },
+        )
+        .await
+        .unwrap();
+        run_modules(&address, timeout, ModulesCommand::Doctor)
+            .await
+            .unwrap();
+        run_modules(
+            &address,
+            timeout,
+            ModulesCommand::Enable {
+                name: "tinybus".into(),
             },
         )
         .await
