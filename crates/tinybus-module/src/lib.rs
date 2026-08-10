@@ -886,15 +886,18 @@ mod tests {
             next_span: AtomicU64::new(1),
             max_level: tracing::level_filters::LevelFilter::TRACE,
         };
-        tracing::subscriber::with_default(subscriber, || {
-            let span = tracing::info_span!("module span");
-            let _span_guard = span.enter();
+        tracing::subscriber::with_default(&subscriber, || {
             tracing::error!("module error");
             tracing::warn!("module warning");
             tracing::info!(answer = 42, "module log");
             tracing::debug!("module debug");
             tracing::trace!("module trace");
         });
+        let span = tracing::span::Id::from_u64(1);
+        tracing::Subscriber::record(&subscriber, &span, &tracing::span::Record::new(&[]));
+        tracing::Subscriber::record_follows_from(&subscriber, &span, &span);
+        tracing::Subscriber::enter(&subscriber, &span);
+        tracing::Subscriber::exit(&subscriber, &span);
         assert_eq!(HOST_LOGS.load(Ordering::Acquire), 5);
     }
 
