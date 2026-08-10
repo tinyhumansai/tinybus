@@ -45,6 +45,9 @@ pub const PEER_QUEUE_CAPACITY: usize = 256;
 pub struct Broker {
     router: Arc<Mutex<Router>>,
     id: String,
+    // `Weak`, not `Arc`: the module host owns this broker, so a strong
+    // reference back would form a cycle and leak both. Callers tolerate a
+    // failed upgrade by falling back to the ordinary routing error.
     #[cfg(feature = "modules")]
     modules: Arc<Mutex<Option<Weak<dyn crate::module::host::ModuleControl>>>>,
 }
@@ -424,6 +427,19 @@ impl Broker {
     /// user has been staring at a spinner. Subscribers still have to have asked
     /// for it; the broker does not push it at peers that did not.
     pub(crate) async fn announce_name_change(&self, change: NameChange) {
+        self.broadcast_bus_signal(
+            "NameOwnerChanged",
+            serde_json::json!([change.name, change.old_owner, change.new_owner]),
+        )
+        .await;
+    }
+
+    #[cfg(feature = "modules")]
+    pub(crate) async fn announce_module_state(&self, body: Value) {
+        self.broadcast_bus_signal("ModuleStateChanged", body).await;
+    }
+
+    async fn broadcast_bus_signal(&self, member: &str, body: Value) {
         let signal = Message {
             header: crate::message::Header {
                 kind: MessageKind::Signal,
@@ -440,40 +456,7 @@ impl Broker {
                     InterfaceName::new(crate::BUS_INTERFACE)
                         .expect("the bus interface constant is valid"),
                 ),
-                member: Some(
-                    MemberName::new("NameOwnerChanged").expect("literal is a valid member"),
-                ),
-                error_name: None,
-            },
-            body: serde_json::json!([change.name, change.old_owner, change.new_owner]),
-        };
-
-        let targets = self
-            .router
-            .lock()
-            .expect("router lock")
-            .broadcast_targets(&signal);
-        for target in targets {
-            let _ = target.try_send(signal.clone());
-        }
-    }
-
-    #[cfg(feature = "modules")]
-    pub(crate) async fn announce_module_state(&self, body: Value) {
-        let signal = Message {
-            header: crate::message::Header {
-                kind: MessageKind::Signal,
-                serial: 0,
-                reply_serial: None,
-                sender: Some(BusName::new(crate::BUS_NAME).expect("bus name is valid")),
-                destination: None,
-                path: Some(ObjectPath::new(crate::BUS_PATH).expect("bus path is valid")),
-                interface: Some(
-                    InterfaceName::new(crate::BUS_INTERFACE).expect("bus interface is valid"),
-                ),
-                member: Some(
-                    MemberName::new("ModuleStateChanged").expect("literal is a valid member"),
-                ),
+                member: Some(MemberName::new(member).expect("literal is a valid member")),
                 error_name: None,
             },
             body,
