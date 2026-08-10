@@ -434,22 +434,30 @@ mod tests {
 
     #[test]
     fn native_errors_render_their_operation_and_type_details() {
-        assert!(NativeRequestError::UnregisteredHandler { method: "missing".into() }
+        assert!(
+            NativeRequestError::UnregisteredHandler {
+                method: "missing".into()
+            }
             .to_string()
-            .contains("missing"));
-        assert!(NativeRequestError::TypeMismatch {
-            method: "typed".into(),
-            expected: "Expected",
-            actual: "Actual",
-        }
-        .to_string()
-        .contains("expected Expected, got Actual"));
-        assert!(NativeRequestError::HandlerFailed {
-            method: "failed".into(),
-            message: "reason".into(),
-        }
-        .to_string()
-        .contains("reason"));
+            .contains("missing")
+        );
+        assert!(
+            NativeRequestError::TypeMismatch {
+                method: "typed".into(),
+                expected: "Expected",
+                actual: "Actual",
+            }
+            .to_string()
+            .contains("expected Expected, got Actual")
+        );
+        assert!(
+            NativeRequestError::HandlerFailed {
+                method: "failed".into(),
+                message: "reason".into(),
+            }
+            .to_string()
+            .contains("reason")
+        );
     }
 
     #[test]
