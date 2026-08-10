@@ -196,7 +196,9 @@ mod platform {
     pub(super) type Handle = *mut c_void;
 
     pub(super) fn open(path: &Path) -> Result<Handle> {
-        let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+        let canonical = std::fs::canonicalize(path)
+            .map_err(|_| Error::module_refused(path, "module artifact path is invalid"))?;
+        let wide: Vec<u16> = canonical.as_os_str().encode_wide().chain([0]).collect();
         let handle = unsafe {
             LoadLibraryExW(
                 wide.as_ptr(),
