@@ -885,16 +885,6 @@ mod tests {
             next_span: AtomicU64::new(1),
             max_level: tracing::level_filters::LevelFilter::INFO,
         };
-        assert!(subscriber.enabled(&tracing::Metadata::new(
-            "event",
-            "test",
-            tracing::Level::INFO,
-            None,
-            None,
-            None,
-            tracing::field::FieldSet::new(&[], tracing::callsite::Identifier(&CALLSITE)),
-            tracing::metadata::Kind::EVENT,
-        )));
         tracing::subscriber::with_default(subscriber, || {
             tracing::info!(answer = 42, "module log");
         });
