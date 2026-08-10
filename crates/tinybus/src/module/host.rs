@@ -818,7 +818,7 @@ impl ModuleControl for ModuleHostInner {
                 .ok_or_else(|| Error::failed("module is not loaded"))?;
             let old = module.snapshot().state;
             if matches!(
-                old,
+                &old,
                 ModuleState::Stopped | ModuleState::Faulted { .. } | ModuleState::Failed { .. }
             ) {
                 return Err(Error::ModuleUnavailable {
@@ -856,7 +856,7 @@ impl ModuleControl for ModuleHostInner {
             .ok_or_else(|| Error::failed("module is not known"))?;
         let old = module.snapshot().state;
         if matches!(
-            old,
+            &old,
             ModuleState::Stopped | ModuleState::Failed { .. } | ModuleState::Faulted { .. }
         ) {
             return Err(Error::ModuleUnavailable {

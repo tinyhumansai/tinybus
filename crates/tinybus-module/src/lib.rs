@@ -15,8 +15,7 @@ use async_trait::async_trait;
 use tinybus::message::Message;
 use tinybus::message::codec::MAX_FRAME_LEN;
 use tinybus::module::abi::{
-    TB_BACKPRESSURE, TB_BAD_ARGUMENT, TB_CLOSED, TB_OK, TB_PANICKED, TB_TIMEOUT, TbHostVtable,
-    TbModuleVtable,
+    TB_BACKPRESSURE, TB_BAD_ARGUMENT, TB_CLOSED, TB_OK, TB_PANICKED, TbHostVtable, TbModuleVtable,
 };
 use tinybus::{Connection, Error, Result, Transport};
 use tokio::sync::{Mutex, mpsc};
