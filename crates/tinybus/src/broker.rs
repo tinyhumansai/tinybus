@@ -170,7 +170,20 @@ impl Broker {
                     .router
                     .lock()
                     .expect("router lock")
-                    .resolve(&destination)?;
+                    .resolve(&destination);
+                #[cfg(feature = "modules")]
+                let target = target.or_else(|error| {
+                    let control = self
+                        .modules
+                        .lock()
+                        .expect("module control lock")
+                        .as_ref()
+                        .and_then(Weak::upgrade);
+                    Err(control
+                        .and_then(|control| control.unavailable_for(&destination))
+                        .unwrap_or(error))
+                });
+                let target = target?;
                 target
                     .send(message)
                     .await

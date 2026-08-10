@@ -135,6 +135,7 @@ pub(crate) trait ModuleControl: Send + Sync {
     fn enable(&self, name: &str, enabled: bool) -> Result<ModuleInfo>;
     fn rescan(self: Arc<Self>, paths: Vec<PathBuf>, dry_run: bool) -> Result<Vec<ModuleInfo>>;
     fn peer_detached(&self, unique_name: &BusName) -> Option<(String, ModuleState, ModuleState)>;
+    fn unavailable_for(&self, bus_name: &BusName) -> Option<Error>;
 }
 
 impl ModuleHost {
@@ -744,6 +745,26 @@ impl ModuleControl for ModuleHostInner {
         };
         module.info.state = new.clone();
         Some((module.info.name.clone(), old, new))
+    }
+
+    fn unavailable_for(&self, bus_name: &BusName) -> Option<Error> {
+        let loaded = self.loaded.lock().expect("module list lock");
+        let module = loaded
+            .iter()
+            .find(|module| &module.info.manifest.bus_name == bus_name)?;
+        let info = module.snapshot();
+        let detail = state_detail(&info.state)
+            .unwrap_or("module is not accepting calls")
+            .to_string();
+        (!matches!(
+            info.state,
+            ModuleState::Ready | ModuleState::Serving | ModuleState::Initializing
+        ))
+        .then(|| Error::ModuleUnavailable {
+            module: info.name,
+            state: state_name(&info.state).to_string(),
+            detail,
+        })
     }
 }
 
