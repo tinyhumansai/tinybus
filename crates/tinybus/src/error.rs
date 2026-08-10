@@ -491,7 +491,11 @@ mod tests {
                 detail: "bad".into(),
             },
             Error::module_refused(std::path::Path::new("module.so"), "bad"),
-            Error::ModuleUnavailable("module".into()),
+            Error::ModuleUnavailable {
+                module: "module".into(),
+                state: "refused".into(),
+                detail: "bad".into(),
+            },
             Error::path("path", "bad"),
             Error::FeatureDisabled("thing", "uds"),
             Error::Json(serde_json::from_str::<serde_json::Value>("{").unwrap_err()),
