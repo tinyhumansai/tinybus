@@ -709,35 +709,72 @@ fn a_file_that_is_not_a_regular_file_is_skipped() {
 fn module_host_helpers_preserve_safe_names_states_and_allowlist_decisions() {
     let states = [
         ModuleState::Discovered,
-        ModuleState::Rejected { reason: "no".into() },
-        ModuleState::Unresolved { reason: "no".into() },
+        ModuleState::Rejected {
+            reason: "no".into(),
+        },
+        ModuleState::Unresolved {
+            reason: "no".into(),
+        },
         ModuleState::Resolved,
         ModuleState::Initializing,
         ModuleState::Ready,
         ModuleState::Serving,
-        ModuleState::Faulted { reason: "no".into() },
-        ModuleState::Failed { reason: "no".into() },
+        ModuleState::Faulted {
+            reason: "no".into(),
+        },
+        ModuleState::Failed {
+            reason: "no".into(),
+        },
         ModuleState::Stopped,
         ModuleState::Disabled,
     ];
     assert_eq!(states.iter().map(state_name).collect::<Vec<_>>().len(), 11);
     assert_eq!(state_detail(&states[1]), Some("no"));
     assert_eq!(state_detail(&states[0]), None);
-    assert_eq!(sanitized_field(b"clock\0ignored"), Some("clock".to_string()));
+    assert_eq!(
+        sanitized_field(b"clock\0ignored"),
+        Some("clock".to_string())
+    );
     assert_eq!(sanitized_field(b"bad\nname"), None);
     assert_eq!(safe_file_name(Path::new("/private/clock.so")), "clock.so");
     assert_eq!(safe_file_name(Path::new("/")), "module");
-    assert!(has_library_extension(Path::new(if cfg!(windows) { "clock.dll" } else if cfg!(target_os = "macos") { "clock.dylib" } else { "clock.so" })));
+    assert!(has_library_extension(Path::new(if cfg!(windows) {
+        "clock.dll"
+    } else if cfg!(target_os = "macos") {
+        "clock.dylib"
+    } else {
+        "clock.so"
+    })));
     assert!(!has_library_extension(Path::new("clock.txt")));
 
     let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
-    let module = directory.path().join(if cfg!(windows) { "clock.dll" } else if cfg!(target_os = "macos") { "clock.dylib" } else { "clock.so" });
+    let module = directory.path().join(if cfg!(windows) {
+        "clock.dll"
+    } else if cfg!(target_os = "macos") {
+        "clock.dylib"
+    } else {
+        "clock.so"
+    });
     std::fs::write(&module, b"module bytes").unwrap();
     assert!(check_file(&module).is_ok());
     std::fs::write(directory.path().join("modules.toml"), "other = \"00\"\n").unwrap();
-    assert!(check_file(&module).unwrap_err().to_string().contains("absent"));
-    std::fs::write(directory.path().join("modules.toml"), "clock = \"not-a-hash\"\n").unwrap();
-    assert!(check_file(&module).unwrap_err().to_string().contains("invalid hash"));
+    assert!(
+        check_file(&module)
+            .unwrap_err()
+            .to_string()
+            .contains("absent")
+    );
+    std::fs::write(
+        directory.path().join("modules.toml"),
+        "clock = \"not-a-hash\"\n",
+    )
+    .unwrap();
+    assert!(
+        check_file(&module)
+            .unwrap_err()
+            .to_string()
+            .contains("invalid hash")
+    );
     let refused = Error::module_refused(&module, "nope");
     let info = rejection_info(&refused);
     assert!(matches!(info.state, ModuleState::Rejected { .. }));
