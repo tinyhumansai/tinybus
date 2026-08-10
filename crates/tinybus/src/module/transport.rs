@@ -364,3 +364,45 @@ unsafe extern "C" fn host_ready(ctx: *mut c_void) {
         context.ready_notify.notify_waiters();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct CaptureLevel(Arc<AtomicBool>);
+
+    impl tracing::Subscriber for CaptureLevel {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            if *event.metadata().level() == tracing::Level::ERROR {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[test]
+    fn a_module_log_line_reaches_the_hosts_subscriber_with_its_level() {
+        let (_transport, host) = ModuleTransport::new("logger".to_string(), Vec::new());
+        let observed = Arc::new(AtomicBool::new(false));
+        let bytes = b"module log line";
+        tracing::subscriber::with_default(CaptureLevel(observed.clone()), || unsafe {
+            (host.log)(host.host_ctx, 1, bytes.as_ptr(), bytes.len());
+        });
+        assert!(observed.load(Ordering::Acquire));
+    }
+}
