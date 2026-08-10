@@ -683,7 +683,7 @@ impl ModuleHost {
     }
 
     fn record_rejection(&self, error: &Error) {
-        let Error::ModuleRefused { file, reason } = error else {
+        let Error::ModuleRefused { .. } = error else {
             return;
         };
         let info = rejection_info(error);
