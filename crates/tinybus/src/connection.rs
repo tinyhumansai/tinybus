@@ -1071,22 +1071,15 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(connection.list_modules().await.unwrap().is_empty());
-        assert!(connection.module("missing").await.unwrap().is_none());
-        assert!(
-            connection
-                .module_manifest("missing")
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert!(connection.rescan_modules().await.unwrap().is_empty());
+        assert!(connection.list_modules().await.is_err());
+        assert!(connection.module("missing").await.is_err());
+        assert!(connection.module_manifest("missing").await.is_err());
+        assert!(connection.rescan_modules().await.is_err());
         assert!(
             connection
                 .scan_modules([std::path::Path::new("/definitely/not/a/module")], true)
                 .await
-                .unwrap()
-                .is_empty()
+                .is_err()
         );
         assert!(
             connection
