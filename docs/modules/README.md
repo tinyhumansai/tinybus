@@ -1,8 +1,9 @@
 # Module documentation
 
-One document per module in `crates/tinybus/src/`. Each answers the questions a
-rustdoc page cannot: why the module exists, what it deliberately does not do,
-and which of its behaviours other modules are relying on.
+One design reference per module in `crates/tinybus/src/`: a focused README when
+the rationale exceeds source rustdoc, otherwise the module-level rustdoc itself.
+Each records why the module exists, what it deliberately does not do, and which
+behaviours other modules rely on.
 
 | Module | Document |
 | --- | --- |
