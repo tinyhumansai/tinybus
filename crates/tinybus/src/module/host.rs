@@ -1717,6 +1717,33 @@ mod tests {
         .unwrap();
         task.abort();
     }
+
+    #[test]
+    #[ignore = "requires TINYBUS_TEST_MODULE and TINYBUS_TEST_MODULE_TWO"]
+    fn two_modules_exporting_the_same_symbol_name_each_resolve_to_their_own() {
+        let first = PathBuf::from(
+            std::env::var_os("TINYBUS_TEST_MODULE").expect("TINYBUS_TEST_MODULE"),
+        );
+        let second = PathBuf::from(
+            std::env::var_os("TINYBUS_TEST_MODULE_TWO").expect("TINYBUS_TEST_MODULE_TWO"),
+        );
+        let first = loader::load(&first).unwrap();
+        let second = loader::load(&second).unwrap();
+        assert_eq!(first.manifest.module.name, "tinybus");
+        assert_eq!(second.manifest.module.name, "module-clock-two");
+        assert_ne!(first.descriptor.module_name, second.descriptor.module_name);
+    }
+
+    #[test]
+    #[ignore = "requires TINYBUS_TEST_WRONG_TARGET"]
+    fn a_cdylib_built_for_a_different_target_is_refused_at_the_gate() {
+        let path = PathBuf::from(
+            std::env::var_os("TINYBUS_TEST_WRONG_TARGET").expect("TINYBUS_TEST_WRONG_TARGET"),
+        );
+        let host = ModuleHost::new(Broker::new());
+        let error = host.load_file(path).unwrap_err();
+        assert!(error.to_string().contains("target triple"), "{error}");
+    }
 }
 
 #[cfg(windows)]

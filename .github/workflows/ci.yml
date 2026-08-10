@@ -73,17 +73,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build example module
-        run: cargo build --locked --example module_clock --features modules,macros
+        run: cargo build --locked --example module_clock --example module_clock_two --example module_wrong_target --features modules,macros
       - name: Exercise the real loader (Unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
           module=$(find target/debug/examples -maxdepth 1 -type f \( -name 'libmodule_clock.so' -o -name 'libmodule_clock.dylib' \) -print -quit)
-          TINYBUS_TEST_MODULE="$PWD/$module" cargo test --locked --features modules,macros a_real_cdylib_loads_and_serves_a_call -- --ignored
+          module_two=$(find target/debug/examples -maxdepth 1 -type f \( -name 'libmodule_clock_two.so' -o -name 'libmodule_clock_two.dylib' \) -print -quit)
+          wrong_target=$(find target/debug/examples -maxdepth 1 -type f \( -name 'libmodule_wrong_target.so' -o -name 'libmodule_wrong_target.dylib' \) -print -quit)
+          TINYBUS_TEST_MODULE="$PWD/$module" TINYBUS_TEST_MODULE_TWO="$PWD/$module_two" TINYBUS_TEST_WRONG_TARGET="$PWD/$wrong_target" cargo test --locked --features modules,macros -- --ignored
       - name: Exercise the real loader (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $module = (Get-ChildItem target/debug/examples/module_clock.dll | Select-Object -First 1).FullName
+          $moduleTwo = (Get-ChildItem target/debug/examples/module_clock_two.dll | Select-Object -First 1).FullName
+          $wrongTarget = (Get-ChildItem target/debug/examples/module_wrong_target.dll | Select-Object -First 1).FullName
           $env:TINYBUS_TEST_MODULE = $module
-          cargo test --locked --features modules,macros a_real_cdylib_loads_and_serves_a_call -- --ignored
+          $env:TINYBUS_TEST_MODULE_TWO = $moduleTwo
+          $env:TINYBUS_TEST_WRONG_TARGET = $wrongTarget
+          cargo test --locked --features modules,macros -- --ignored
