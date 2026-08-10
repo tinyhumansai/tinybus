@@ -1,15 +1,16 @@
 //! Host-side transport bridge over the module C vtables.
 
+use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::{Mutex, Notify, OnceCell, mpsc};
 
 use crate::error::{Error, Result};
-use crate::message::Message;
+use crate::message::{Message, MessageKind};
 use crate::message::codec::MAX_FRAME_LEN;
 use crate::module::abi::{
     TB_BACKPRESSURE, TB_BAD_ARGUMENT, TB_CLOSED, TB_OK, TbHostVtable, TbModuleVtable,
@@ -29,12 +30,15 @@ struct HostContext {
 
 /// The broker-facing side of one loaded module.
 pub(crate) struct ModuleTransport {
+    self_ref: Weak<ModuleTransport>,
     module: StdMutex<Option<TbModuleVtable>>,
     inbound: Mutex<mpsc::Receiver<Vec<u8>>>,
     context: &'static HostContext,
     label: String,
     initializer: StdMutex<Option<(crate::module::abi::TbModuleInit, TbHostVtable)>>,
     init_result: OnceCell<std::result::Result<(), String>>,
+    pending: Mutex<VecDeque<Message>>,
+    drain_started: AtomicBool,
 }
 
 // `module_ctx` is opaque and all access to it goes through callbacks whose ABI
@@ -53,13 +57,16 @@ impl ModuleTransport {
             ready: AtomicBool::new(false),
             ready_notify: Notify::new(),
         }));
-        let transport = Arc::new(Self {
+        let transport = Arc::new_cyclic(|self_ref| Self {
+            self_ref: self_ref.clone(),
             module: StdMutex::new(None),
             inbound: Mutex::new(inbound_rx),
             context,
             label,
             initializer: StdMutex::new(None),
             init_result: OnceCell::new(),
+            pending: Mutex::new(VecDeque::new()),
+            drain_started: AtomicBool::new(false),
         });
         let config = context.config.lock().expect("module config lock");
         let config_slice = crate::module::abi::TbSlice {
@@ -151,6 +158,46 @@ impl ModuleTransport {
         self.context.faulted.load(Ordering::Acquire)
     }
 
+    async fn deliver_now(&self, message: Message) -> Result<()> {
+        if self.context.faulted.load(Ordering::Acquire) {
+            return Err(Error::ConnectionClosed);
+        }
+        let bytes = serde_json::to_vec(&message)?;
+        if bytes.len() > MAX_FRAME_LEN {
+            return Err(Error::protocol("module frame exceeds the size cap"));
+        }
+
+        loop {
+            let notified = self.context.wake.notified();
+            let module = *self.module.lock().expect("module vtable lock");
+            let Some(module) = module else {
+                return Err(Error::ConnectionClosed);
+            };
+            let code = unsafe { (module.deliver)(module.module_ctx, bytes.as_ptr(), bytes.len()) };
+            match code {
+                TB_OK => return Ok(()),
+                TB_BACKPRESSURE => notified.await,
+                TB_CLOSED => return Err(Error::ConnectionClosed),
+                TB_BAD_ARGUMENT => return Err(Error::protocol("module refused a valid frame")),
+                _ => return Err(Error::transport("module delivery callback failed")),
+            }
+        }
+    }
+
+    async fn drain_pending(self: Arc<Self>) {
+        self.wait_ready().await;
+        while !self.is_faulted() {
+            let message = self.pending.lock().await.pop_front();
+            let Some(message) = message else {
+                break;
+            };
+            if self.deliver_now(message).await.is_err() {
+                break;
+            }
+        }
+        self.drain_started.store(false, Ordering::Release);
+    }
+
     pub(crate) fn shutdown_sync(&self, deadline: Duration) -> i32 {
         let module = *self.module.lock().expect("module vtable lock");
         match module {
@@ -176,32 +223,18 @@ impl ModuleTransport {
 impl Transport for ModuleTransport {
     async fn send(&self, message: Message) -> Result<()> {
         self.ensure_initialized().await?;
-        self.wait_ready().await;
-        if self.context.faulted.load(Ordering::Acquire) {
-            return Err(Error::ConnectionClosed);
-        }
-        let bytes = serde_json::to_vec(&message)?;
-        if bytes.len() > MAX_FRAME_LEN {
-            return Err(Error::protocol("module frame exceeds the size cap"));
-        }
-
-        loop {
-            let notified = self.context.wake.notified();
-            let module = *self.module.lock().expect("module vtable lock");
-            let Some(module) = module else {
-                return Err(Error::ConnectionClosed);
-            };
-            let code = unsafe { (module.deliver)(module.module_ctx, bytes.as_ptr(), bytes.len()) };
-            match code {
-                TB_OK => return Ok(()),
-                TB_BACKPRESSURE => notified.await,
-                TB_CLOSED => return Err(Error::ConnectionClosed),
-                TB_BAD_ARGUMENT => {
-                    return Err(Error::protocol("module refused a valid frame"));
-                }
-                _ => return Err(Error::transport("module delivery callback failed")),
+        if message.header.kind == MessageKind::MethodCall && !self.is_ready() {
+            self.pending.lock().await.push_back(message);
+            if !self.drain_started.swap(true, Ordering::AcqRel) {
+                let transport = self
+                    .self_ref
+                    .upgrade()
+                    .ok_or(Error::ConnectionClosed)?;
+                tokio::spawn(transport.drain_pending());
             }
+            return Ok(());
         }
+        self.deliver_now(message).await
     }
 
     async fn recv(&self) -> Result<Option<Message>> {
