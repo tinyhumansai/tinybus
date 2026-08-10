@@ -716,8 +716,45 @@ impl Connection {
         args: impl FnOnce(&StreamRef) -> Value,
         bytes: &[u8],
     ) -> Result<R> {
+        self.call_with_stream_timeout(
+            destination,
+            path,
+            interface,
+            member,
+            args,
+            bytes,
+            DEFAULT_TIMEOUT,
+        )
+        .await
+    }
+
+    /// [`Connection::call_with_stream`] with an explicit deadline.
+    ///
+    /// `timeout` bounds two different waits: how long the callee has to answer,
+    /// and how long the receiver has to take any one chunk. Both are "the peer
+    /// has stopped making progress" deadlines rather than a budget for the
+    /// whole transfer, which is why one value fits both — but the call half is
+    /// the one worth thinking about, because the callee cannot reply until it
+    /// has read the payload. A large upload to a slow-but-healthy consumer
+    /// needs more than [`DEFAULT_TIMEOUT`] here, or it fails a call that was
+    /// still making progress.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn call_with_stream_timeout<R: DeserializeOwned>(
+        &self,
+        destination: BusName,
+        path: ObjectPath,
+        interface: InterfaceName,
+        member: MemberName,
+        args: impl FnOnce(&StreamRef) -> Value,
+        bytes: &[u8],
+        timeout: Duration,
+    ) -> Result<R> {
         let mut writer = self
-            .open_stream(&destination, StreamDescriptor::with_len(bytes.len() as u64))
+            .open_stream_with_timeout(
+                &destination,
+                StreamDescriptor::with_len(bytes.len() as u64),
+                timeout,
+            )
             .await?;
         let message = Message::method_call(
             destination,
@@ -730,7 +767,7 @@ impl Connection {
         // Both halves at once, and the first failure wins: the callee is
         // reading the stream while it answers, so waiting for either one before
         // starting the other is a deadlock, not a slow path.
-        let (reply, ()) = tokio::try_join!(self.call_raw(message, DEFAULT_TIMEOUT), async {
+        let (reply, ()) = tokio::try_join!(self.call_raw(message, timeout), async {
             writer.write(bytes).await?;
             writer.finish().await.map(|_| ())
         })?;
