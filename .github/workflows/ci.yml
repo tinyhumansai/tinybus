@@ -120,6 +120,11 @@ jobs:
           Copy-Item target/debug/examples/module_clock.dll $private
           Copy-Item target/debug/examples/module_clock_two.dll $private
           Copy-Item target/debug/examples/module_wrong_target.dll $private
+          $mixed = Join-Path $private mixed
+          New-Item -ItemType Directory -Force $mixed | Out-Null
+          Set-Acl -LiteralPath $mixed -AclObject $acl
+          Copy-Item target/debug/examples/module_clock.dll $mixed
+          Copy-Item target/debug/examples/module_wrong_target.dll $mixed
           $module = (Get-ChildItem "$private/module_clock.dll" | Select-Object -First 1).FullName
           $moduleTwo = (Get-ChildItem "$private/module_clock_two.dll" | Select-Object -First 1).FullName
           $wrongTarget = (Get-ChildItem "$private/module_wrong_target.dll" | Select-Object -First 1).FullName
@@ -128,4 +133,5 @@ jobs:
           $env:TINYBUS_TEST_MODULE = $module
           $env:TINYBUS_TEST_MODULE_TWO = $moduleTwo
           $env:TINYBUS_TEST_WRONG_TARGET = $wrongTarget
+          $env:TINYBUS_TEST_MODULE_DIRECTORY = $mixed
           cargo test --locked --no-default-features --features modules,macros -- --ignored

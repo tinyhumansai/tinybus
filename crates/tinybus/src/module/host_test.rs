@@ -819,15 +819,19 @@ async fn one_refused_module_does_not_stop_the_others_in_the_directory_from_loadi
     let invalid = PathBuf::from(
         std::env::var_os("TINYBUS_TEST_WRONG_TARGET").expect("TINYBUS_TEST_WRONG_TARGET"),
     );
-    let directory =
-        tempfile::tempdir_in(valid.parent().expect("module artifact has a parent")).unwrap();
-    let valid_copy = directory.path().join(valid.file_name().unwrap());
-    let invalid_copy = directory.path().join(invalid.file_name().unwrap());
-    std::fs::copy(valid, valid_copy).unwrap();
-    std::fs::copy(invalid, invalid_copy).unwrap();
+    let prepared_directory = std::env::var_os("TINYBUS_TEST_MODULE_DIRECTORY").map(PathBuf::from);
+    let temporary_directory = prepared_directory.is_none().then(|| {
+        tempfile::tempdir_in(valid.parent().expect("module artifact has a parent")).unwrap()
+    });
+    let directory = prepared_directory.as_deref().unwrap_or_else(|| {
+        let directory = temporary_directory.as_ref().unwrap().path();
+        std::fs::copy(&valid, directory.join(valid.file_name().unwrap())).unwrap();
+        std::fs::copy(&invalid, directory.join(invalid.file_name().unwrap())).unwrap();
+        directory
+    });
 
     let host = ModuleHost::new(Broker::new());
-    let outcomes = host.load_dir(directory.path()).unwrap();
+    let outcomes = host.load_dir(directory).unwrap();
     assert_eq!(outcomes.len(), 2);
     assert_eq!(
         outcomes.iter().filter(|outcome| outcome.is_ok()).count(),
