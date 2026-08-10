@@ -187,7 +187,7 @@ pub enum Error {
         /// Sanitized artifact basename.
         file: String,
         /// Fixed admission failure phrase.
-        reason: &'static str,
+        reason: String,
     },
 
     /// Filesystem or socket I/O failed.
@@ -224,14 +224,17 @@ impl Error {
     }
 
     /// Build a redacted module refusal from an artifact path.
-    pub fn module_refused(path: &std::path::Path, reason: &'static str) -> Self {
+    pub fn module_refused(path: &std::path::Path, reason: impl Into<String>) -> Self {
         let file = path
             .file_name()
             .and_then(|name| name.to_str())
             .map(sanitize_untrusted)
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| "module".to_string());
-        Self::ModuleRefused { file, reason }
+        Self::ModuleRefused {
+            file,
+            reason: reason.into(),
+        }
     }
 
     /// Build an [`Error::BadArguments`] from a serde failure, with the

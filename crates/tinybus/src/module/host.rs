@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize};
 use crate::broker::Broker;
 use crate::build_info;
 use crate::error::{Error, Result, sanitize_untrusted};
-use crate::module::abi::{TB_OK, TbAbiDescriptor, TbModuleVtable, field_bytes};
+use crate::module::abi::{
+    ABI_MAGIC, ABI_REVISION, DESCRIPTOR_PREFIX_SIZE, MAX_DESCRIPTOR_SIZE, TB_OK, TbAbiDescriptor,
+    TbModuleInit, TbModuleVtable, field_bytes,
+};
 use crate::module::loader::{self, LoadedArtifact};
 use crate::module::manifest::{
     MANIFEST_SCHEMA, ModuleIdentity, ModuleManifest, PanicPolicy,
@@ -153,6 +156,47 @@ impl ModuleHost {
     /// Load one newly installed module.
     pub fn load_file(&self, path: impl AsRef<Path>) -> Result<ModuleInfo> {
         self.load_file_with_config(path, serde_json::json!({}))
+    }
+
+    /// Admit and initialize an already-resolved module without calling the
+    /// platform loader.
+    ///
+    /// This is the testable seam beneath `dlopen`: callers must ensure `init`
+    /// and every pointer reachable through it remain valid for the process
+    /// lifetime, exactly as the real loader does by leaking its handle.
+    pub unsafe fn attach_raw(
+        &self,
+        file: impl AsRef<Path>,
+        descriptor: TbAbiDescriptor,
+        manifest: ModuleManifest,
+        init: TbModuleInit,
+    ) -> Result<ModuleInfo> {
+        unsafe {
+            self.attach_raw_with_config(
+                file,
+                descriptor,
+                manifest,
+                init,
+                serde_json::json!({}),
+            )
+        }
+    }
+
+    /// Configured form of [`ModuleHost::attach_raw`].
+    pub unsafe fn attach_raw_with_config(
+        &self,
+        file: impl AsRef<Path>,
+        descriptor: TbAbiDescriptor,
+        manifest: ModuleManifest,
+        init: TbModuleInit,
+        config: serde_json::Value,
+    ) -> Result<ModuleInfo> {
+        let artifact = LoadedArtifact {
+            descriptor,
+            manifest,
+            init,
+        };
+        self.activate(file.as_ref(), artifact, config)
     }
 
     /// Load one module and pass JSON configuration to its setup function.
@@ -404,6 +448,18 @@ impl ModuleHost {
         manifest: &ModuleManifest,
     ) -> Result<ModuleInfo> {
         let refuse = |reason| Error::module_refused(path, reason);
+        if descriptor.magic != ABI_MAGIC {
+            return Err(refuse("ABI magic does not match"));
+        }
+        if descriptor.abi_revision != ABI_REVISION {
+            return Err(refuse("ABI revision does not match"));
+        }
+        if !(DESCRIPTOR_PREFIX_SIZE..=MAX_DESCRIPTOR_SIZE).contains(&descriptor.descriptor_size) {
+            return Err(refuse("descriptor size is invalid"));
+        }
+        if descriptor.descriptor_size < size_of::<TbAbiDescriptor>() as u32 {
+            return Err(refuse("descriptor is too small"));
+        }
         if descriptor.pointer_width != usize::BITS {
             return Err(refuse("pointer width does not match"));
         }
@@ -425,10 +481,17 @@ impl ModuleHost {
             descriptor.tinybus_patch.into(),
         );
         if !host_version.compatible_series().accepts(&module_version) {
-            return Err(refuse("tinybus version is incompatible"));
+            return Err(refuse(format!(
+                "tinybus version is incompatible: host {host_version}, module {module_version}"
+            )));
         }
-        if descriptor.tinybus_feature_bits & !build_info::FEATURE_BITS != 0 {
-            return Err(refuse("module requires unavailable tinybus features"));
+        let missing_features = descriptor.tinybus_feature_bits & !build_info::FEATURE_BITS;
+        if missing_features != 0 {
+            let bit = 1u64 << missing_features.trailing_zeros();
+            return Err(refuse(format!(
+                "module requires unavailable tinybus feature {}",
+                build_info::feature_name(bit)
+            )));
         }
 
         let rustc = sanitized_field(&descriptor.rustc_version)
@@ -535,7 +598,7 @@ impl ModuleHost {
             rustc_version: String::new(),
             rustc_mismatch: false,
             enabled: false,
-            reason: Some((*reason).to_string()),
+            reason: Some(reason.clone()),
         };
         let mut rejected = self
             .inner

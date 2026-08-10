@@ -5,18 +5,17 @@ use std::path::Path;
 use crate::error::{Error, Result};
 use crate::module::abi::{
     ABI_MAGIC, ABI_REVISION, DESCRIPTOR_PREFIX_SIZE, MAX_DESCRIPTOR_SIZE, TbAbiDescriptor,
-    TbHostVtable, TbModuleVtable, TbSlice,
+    TbModuleInit, TbSlice,
 };
 use crate::module::manifest::ModuleManifest;
 
-pub(crate) type InitFn = unsafe extern "C" fn(*const TbHostVtable, *mut TbModuleVtable) -> i32;
 type ManifestFn = unsafe extern "C" fn() -> TbSlice;
 
 #[derive(Clone)]
 pub(crate) struct LoadedArtifact {
     pub(crate) descriptor: TbAbiDescriptor,
     pub(crate) manifest: ModuleManifest,
-    pub(crate) init: InitFn,
+    pub(crate) init: TbModuleInit,
 }
 
 #[repr(C)]
@@ -61,7 +60,7 @@ pub(crate) fn load(path: &Path) -> Result<LoadedArtifact> {
     let manifest = serde_json::from_slice(bytes)
         .map_err(|_| Error::module_refused(path, "manifest is not valid JSON"))?;
 
-    let init: InitFn = unsafe {
+    let init: TbModuleInit = unsafe {
         std::mem::transmute(platform::symbol(handle, b"tinybus_module_init_v1\0", path)?)
     };
     Ok(LoadedArtifact {

@@ -24,6 +24,9 @@ pub const TB_TIMEOUT: i32 = -4;
 /// A pointer, length, or frame was invalid.
 pub const TB_BAD_ARGUMENT: i32 = -5;
 
+/// Revision-one module initialization entrypoint.
+pub type TbModuleInit = unsafe extern "C" fn(*const TbHostVtable, *mut TbModuleVtable) -> i32;
+
 /// A borrowed byte slice returned across the ABI.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
