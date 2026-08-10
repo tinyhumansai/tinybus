@@ -1036,7 +1036,7 @@ fn safe_file_name(path: &Path) -> String {
 
 fn check_file(path: &Path) -> Result<()> {
     #[cfg(unix)]
-    let metadata = {
+    let file = {
         use std::os::unix::fs::OpenOptionsExt;
 
         #[cfg(target_os = "macos")]
@@ -1050,11 +1050,13 @@ fn check_file(path: &Path) -> Result<()> {
             .read(true)
             .custom_flags(O_NOFOLLOW)
             .open(path)
-            .and_then(|file| file.metadata())
             .map_err(|_| Error::module_refused(path, "artifact metadata is unavailable"))?
     };
     #[cfg(windows)]
-    let metadata = std::fs::symlink_metadata(path)
+    let file = std::fs::File::open(path)
+        .map_err(|_| Error::module_refused(path, "artifact metadata is unavailable"))?;
+    let metadata = file
+        .metadata()
         .map_err(|_| Error::module_refused(path, "artifact metadata is unavailable"))?;
     if !metadata.file_type().is_file() {
         return Err(Error::module_refused(
@@ -1074,10 +1076,10 @@ fn check_file(path: &Path) -> Result<()> {
             "artifact extension is not loadable",
         ));
     }
-    check_allowlist(path)
+    check_allowlist(path, file)
 }
 
-fn check_allowlist(path: &Path) -> Result<()> {
+fn check_allowlist(path: &Path, file: std::fs::File) -> Result<()> {
     let Some(directory) = path.parent() else {
         return Ok(());
     };
@@ -1117,8 +1119,6 @@ fn check_allowlist(path: &Path) -> Result<()> {
             "module allowlist contains an invalid hash",
         ));
     }
-    let file = std::fs::File::open(path)
-        .map_err(|_| Error::module_refused(path, "artifact is unreadable"))?;
     let actual = crate::module::hash::file_hex(file)
         .map_err(|_| Error::module_refused(path, "artifact hash could not be read"))?;
     if actual != expected {
