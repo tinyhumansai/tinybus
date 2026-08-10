@@ -1017,9 +1017,5 @@ async fn reaping_an_idle_stream_wakes_the_sender_parked_against_its_window() {
         .expect("the reaper must wake a parked write, not leave it to time out")
         .unwrap()
         .unwrap_err();
-    assert_ne!(
-        error.wire_name(),
-        "ai.tinyhumans.tinybus.Error.Timeout",
-        "the write should fail because the stream was reaped, not on its deadline: {error}"
-    );
+    panic!("DEBUG the parked write returned: {} / {error}", error.wire_name());
 }
