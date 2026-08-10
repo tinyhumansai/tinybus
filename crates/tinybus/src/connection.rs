@@ -806,6 +806,15 @@ impl<F: Future> Future for CatchUnwind<F> {
 }
 
 async fn dispatch(inner: &Inner, header: &Header, body: Value) -> Result<Value> {
+    // Streams are answered before the object tree is consulted, and without the
+    // service having exported anything: bulk transfer is bus plumbing, and a
+    // service that forgot to export it would be a service you cannot send a
+    // file to. It also means a peer cannot shadow the stream interface by
+    // exporting its own at that address.
+    if StreamRegistry::handles(header) {
+        return inner.streams.dispatch(header, body).await;
+    }
+
     let (Some(path), Some(interface), Some(member)) =
         (&header.path, &header.interface, &header.member)
     else {
