@@ -1081,7 +1081,13 @@ mod tests {
                     continue;
                 };
                 if message.header.kind == crate::message::MessageKind::MethodCall {
-                    let reply = crate::Message::method_return(&message.header, message.body);
+                    let body = message
+                        .body
+                        .as_array()
+                        .and_then(|values| values.first())
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    let reply = crate::Message::method_return(&message.header, body);
                     let bytes = serde_json::to_vec(&reply).expect("fake reply serializes");
                     let _ = unsafe {
                         send(
