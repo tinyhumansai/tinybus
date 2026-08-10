@@ -922,6 +922,23 @@ mod tests {
             },
             TB_BAD_ARGUMENT
         );
+        let mut invalid_slice = host(&[]);
+        invalid_slice.config = tinybus::module::abi::TbSlice {
+            ptr: std::ptr::null(),
+            len: 1,
+        };
+        assert_eq!(
+            unsafe {
+                start_module_with_config::<u32, _, _>(
+                    &invalid_slice,
+                    &mut out,
+                    1,
+                    true,
+                    |_, _| async { Ok(()) },
+                )
+            },
+            TB_BAD_ARGUMENT
+        );
     }
 
     #[test]
@@ -973,5 +990,10 @@ mod tests {
         );
         assert_eq!(unsafe { (out.shutdown)(out.module_ctx, 10) }, TB_OK);
         assert_eq!(unsafe { (out.shutdown)(out.module_ctx, 10) }, TB_CLOSED);
+        let mut second = TbModuleVtable::default();
+        assert_eq!(
+            unsafe { start_module(&host, &mut second, 1, true, |_| async { Ok(()) }) },
+            TB_CLOSED
+        );
     }
 }
