@@ -91,6 +91,13 @@ struct LoadedModule {
     transition_from: Option<ModuleState>,
 }
 
+#[derive(Clone, Copy)]
+enum RefusalClass {
+    Rejected,
+    Unresolved,
+    Failed,
+}
+
 impl LoadedModule {
     fn snapshot(&self) -> ModuleInfo {
         let mut info = self.info.clone();
@@ -259,17 +266,12 @@ impl ModuleHost {
         init: TbModuleInit,
         config: serde_json::Value,
     ) -> Result<ModuleInfo> {
-        let rejected_manifest = manifest.clone();
         let artifact = LoadedArtifact {
             descriptor,
             manifest,
             init,
         };
-        let result = self.activate(file.as_ref(), artifact, config);
-        if let Err(error) = &result {
-            self.record_manifest_rejection(error, rejected_manifest);
-        }
-        result
+        self.activate(file.as_ref(), artifact, config)
     }
 
     /// Load one module and pass JSON configuration to its setup function.
@@ -294,14 +296,14 @@ impl ModuleHost {
             let artifact = loader::load(path, self.inner.strict.load(Ordering::Acquire))?;
             let rejected_manifest = artifact.manifest.clone();
             if let Err(error) = self.ensure_dependencies(&artifact.manifest, path) {
-                self.record_manifest_rejection(&error, rejected_manifest);
+                self.record_manifest_rejection(
+                    &error,
+                    rejected_manifest,
+                    RefusalClass::Unresolved,
+                );
                 return Err(error);
             }
-            let result = self.activate(path, artifact, config);
-            if let Err(error) = &result {
-                self.record_manifest_rejection(error, rejected_manifest);
-            }
-            result
+            self.activate(path, artifact, config)
         })();
         if let Err(error) = &result {
             self.record_rejection(error);
@@ -360,12 +362,15 @@ impl ModuleHost {
         for (index, reason) in resolution.unresolved {
             let (path, artifact) = pending[index].take().expect("resolver index is valid");
             let error = Error::module_refused(&path, reason);
-            self.record_manifest_rejection(&error, artifact.manifest);
+            self.record_manifest_rejection(
+                &error,
+                artifact.manifest,
+                RefusalClass::Unresolved,
+            );
             outcomes.push(Err(error));
         }
         for index in resolution.order {
             let (path, artifact) = pending[index].take().expect("resolver index is valid");
-            let rejected_manifest = artifact.manifest.clone();
             let config = self
                 .inner
                 .configs
@@ -376,10 +381,15 @@ impl ModuleHost {
                 .unwrap_or_else(|| serde_json::json!({}));
             let result = self
                 .ensure_dependencies(&artifact.manifest, &path)
+                .map_err(|error| {
+                    self.record_manifest_rejection(
+                        &error,
+                        artifact.manifest.clone(),
+                        RefusalClass::Unresolved,
+                    );
+                    error
+                })
                 .and_then(|()| self.activate(&path, artifact, config));
-            if let Err(error) = &result {
-                self.record_manifest_rejection(error, rejected_manifest);
-            }
             outcomes.push(result);
         }
         for error in outcomes.iter().filter_map(|outcome| outcome.as_ref().err()) {
@@ -499,7 +509,17 @@ impl ModuleHost {
         config: serde_json::Value,
     ) -> Result<ModuleInfo> {
         let _admission = self.inner.admission.lock().expect("module admission lock");
-        let mut admitted = self.validate(path, &artifact.descriptor, &artifact.manifest)?;
+        let manifest = artifact.manifest.clone();
+        let mut admitted = self
+            .validate(path, &artifact.descriptor, &artifact.manifest)
+            .map_err(|error| {
+                self.record_manifest_rejection(
+                    &error,
+                    manifest.clone(),
+                    RefusalClass::Rejected,
+                );
+                error
+            })?;
         if self
             .inner
             .loaded
@@ -508,11 +528,16 @@ impl ModuleHost {
             .iter()
             .any(|loaded| loaded.info.name == admitted.name)
         {
-            return Err(Error::module_refused(path, "module name is already loaded"));
+            let error = Error::module_refused(path, "module name is already loaded");
+            self.record_manifest_rejection(&error, manifest, RefusalClass::Unresolved);
+            return Err(error);
         }
 
-        let config = serde_json::to_vec(&config)
-            .map_err(|_| Error::module_refused(path, "module configuration is invalid"))?;
+        let config = serde_json::to_vec(&config).map_err(|_| {
+            let error = Error::module_refused(path, "module configuration is invalid");
+            self.record_manifest_rejection(&error, manifest.clone(), RefusalClass::Rejected);
+            error
+        })?;
         let (transport, host_vtable) = ModuleTransport::new(admitted.name.clone(), config);
         if artifact.manifest.lazy_init {
             admitted.state = ModuleState::Resolved;
@@ -523,11 +548,15 @@ impl ModuleHost {
             let code = unsafe { (artifact.init)(&host_vtable, &mut module_vtable) };
             transport.clear_config();
             if code != TB_OK {
-                return Err(Error::module_refused(path, "module initialization failed"));
+                let error = Error::module_refused(path, "module initialization failed");
+                self.record_manifest_rejection(&error, manifest, RefusalClass::Failed);
+                return Err(error);
             }
-            transport
-                .initialize(module_vtable)
-                .map_err(|_| Error::module_refused(path, "module returned an invalid vtable"))?;
+            if transport.initialize(module_vtable).is_err() {
+                let error = Error::module_refused(path, "module returned an invalid vtable");
+                self.record_manifest_rejection(&error, manifest, RefusalClass::Failed);
+                return Err(error);
+            }
         }
 
         let transport_for_broker: Arc<dyn Transport> = transport.clone();
@@ -540,10 +569,12 @@ impl ModuleHost {
             Ok(change) => change,
             Err(_) => {
                 let _ = transport.stop_sync(Duration::from_millis(0));
-                return Err(Error::module_refused(
+                let error = Error::module_refused(
                     path,
                     "module bus name is already owned",
-                ));
+                );
+                self.record_manifest_rejection(&error, manifest, RefusalClass::Unresolved);
+                return Err(error);
             }
         };
         let broker = self.inner.broker.clone();
@@ -687,27 +718,25 @@ impl ModuleHost {
         }
     }
 
-    fn record_manifest_rejection(&self, error: &Error, manifest: ModuleManifest) {
+    fn record_manifest_rejection(
+        &self,
+        error: &Error,
+        manifest: ModuleManifest,
+        class: RefusalClass,
+    ) {
         let Error::ModuleRefused { file, reason } = error else {
             return;
         };
-        let state = if reason.contains("initialization") {
-            ModuleState::Failed {
+        let state = match class {
+            RefusalClass::Rejected => ModuleState::Rejected {
                 reason: reason.clone(),
-            }
-        } else if reason.contains("dependency")
-            || reason.contains("required interface")
-            || reason.contains("same bus name")
-            || reason.contains("bus name is already owned")
-            || reason.contains("same module name")
-        {
-            ModuleState::Unresolved {
+            },
+            RefusalClass::Unresolved => ModuleState::Unresolved {
                 reason: reason.clone(),
-            }
-        } else {
-            ModuleState::Rejected {
+            },
+            RefusalClass::Failed => ModuleState::Failed {
                 reason: reason.clone(),
-            }
+            },
         };
         let info = ModuleInfo {
             name: sanitize_untrusted(&manifest.module.name),
