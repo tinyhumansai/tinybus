@@ -61,7 +61,9 @@ pub fn decode(text: &str) -> Result<Vec<u8>> {
                     if !last || position < 2 {
                         return Err(Error::protocol("base64 chunk has misplaced padding"));
                     }
-                    kept = position - 1;
+                    // Only the *first* pad fixes the length; the second is more
+                    // of the same padding, not a shorter group again.
+                    kept = kept.min(position - 1);
                     0
                 }
                 _ => decode_symbol(byte)?,
