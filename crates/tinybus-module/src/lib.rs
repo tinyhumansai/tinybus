@@ -947,8 +947,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn configured_startup_builds_a_runtime_announces_ready_and_shuts_down() {
+    #[tokio::test]
+    async fn configured_startup_builds_a_runtime_announces_ready_and_shuts_down() {
         let _host_state = host_state_guard().await;
         HOST_READY.store(false, Ordering::Release);
         HOST_SEND_CODE.store(TB_OK, Ordering::Release);
