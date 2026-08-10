@@ -22,6 +22,8 @@
 //! parsed by a process that has no business seeing them.
 
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "modules")]
+use std::sync::Weak;
 
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -43,6 +45,8 @@ pub const PEER_QUEUE_CAPACITY: usize = 256;
 pub struct Broker {
     router: Arc<Mutex<Router>>,
     id: String,
+    #[cfg(feature = "modules")]
+    modules: Arc<Mutex<Option<Weak<dyn crate::module::host::ModuleControl>>>>,
 }
 
 impl Broker {
@@ -50,6 +54,8 @@ impl Broker {
     pub fn new() -> Self {
         Self {
             router: Arc::new(Mutex::new(Router::default())),
+            #[cfg(feature = "modules")]
+            modules: Arc::new(Mutex::new(None)),
             // The id changes per broker *process*, so a peer that reconnects
             // can tell "the bus restarted" (every name is gone, re-register)
             // from "my socket blipped" (state is intact).
@@ -60,6 +66,14 @@ impl Broker {
     /// This broker's id, as reported by the bus's `GetId`.
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    #[cfg(feature = "modules")]
+    pub(crate) fn set_module_control(
+        &self,
+        control: Weak<dyn crate::module::host::ModuleControl>,
+    ) {
+        *self.modules.lock().expect("module control lock") = Some(control);
     }
 
     /// Serve until the listener stops accepting.
@@ -200,6 +214,20 @@ impl Broker {
         member: &MemberName,
         body: Value,
     ) -> (Result<Value>, Vec<NameChange>) {
+        #[cfg(feature = "modules")]
+        if matches!(
+            member.as_str(),
+            "ListModules"
+                | "GetModule"
+                | "GetModuleManifest"
+                | "LoadModule"
+                | "StopModule"
+                | "EnableModule"
+                | "RescanModules"
+        ) {
+            return (self.module_method(member, body), Vec::new());
+        }
+
         let mut changes = Vec::new();
         let mut router = self.router.lock().expect("router lock");
 
@@ -258,6 +286,56 @@ impl Broker {
         })();
 
         (result, changes)
+    }
+
+    #[cfg(feature = "modules")]
+    fn module_method(&self, member: &MemberName, body: Value) -> Result<Value> {
+        use std::path::PathBuf;
+        use std::time::Duration;
+
+        let control = self
+            .modules
+            .lock()
+            .expect("module control lock")
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| Error::failed("module host is not installed"))?;
+
+        match member.as_str() {
+            "ListModules" => Ok(serde_json::to_value(control.list())?),
+            "GetModule" => {
+                let (name,): (String,) = parse_args(member, body)?;
+                Ok(serde_json::to_value(
+                    control.list().into_iter().find(|module| module.name == name),
+                )?)
+            }
+            "GetModuleManifest" => {
+                let (name,): (String,) = parse_args(member, body)?;
+                Ok(serde_json::to_value(
+                    control
+                        .list()
+                        .into_iter()
+                        .find(|module| module.name == name)
+                        .map(|module| module.manifest),
+                )?)
+            }
+            "LoadModule" => {
+                let (path,): (String,) = parse_args(member, body)?;
+                Ok(serde_json::to_value(control.load(PathBuf::from(path))?)?)
+            }
+            "StopModule" => {
+                let (name, deadline_ms): (String, u64) = parse_args(member, body)?;
+                Ok(serde_json::to_value(
+                    control.stop(&name, Duration::from_millis(deadline_ms))?,
+                )?)
+            }
+            "EnableModule" => {
+                let (name, enabled): (String, bool) = parse_args(member, body)?;
+                Ok(serde_json::to_value(control.enable(&name, enabled)?)?)
+            }
+            "RescanModules" => Ok(serde_json::to_value(control.rescan()?)?),
+            _ => unreachable!("caller filters module members"),
+        }
     }
 
     /// Broadcast `NameOwnerChanged`.
