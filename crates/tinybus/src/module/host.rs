@@ -130,7 +130,11 @@ impl ModuleHost {
     ) -> Result<ModuleInfo> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
-            check_directory(parent)?;
+            check_directory(if parent.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                parent
+            })?;
         }
         check_file(path)?;
         let artifact = loader::load(path)?;
