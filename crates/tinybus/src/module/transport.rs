@@ -241,32 +241,81 @@ impl ModuleTransport {
 
     async fn drain_pending(self: Arc<Self>) {
         self.wait_ready().await;
-        while !self.is_faulted() {
-            let message = self.pending.lock().await.pop_front();
-            let Some(message) = message else {
-                break;
-            };
-            if self.deliver_now(message).await.is_err() {
-                let remaining = {
-                    let mut pending = self.pending.lock().await;
-                    let remaining = pending.len();
-                    pending.clear();
-                    remaining
+        loop {
+            while !self.is_faulted() {
+                let message = self.pending.lock().await.pop_front();
+                let Some(message) = message else {
+                    break;
                 };
-                self.context
-                    .inflight
-                    .fetch_sub(remaining + 1, Ordering::AcqRel);
-                self.context.faulted.store(true, Ordering::Release);
-                self.context.ready_notify.notify_waiters();
-                self.context
-                    .inbound
-                    .lock()
-                    .expect("host inbound lock")
-                    .take();
-                break;
+                if self.deliver_now(message).await.is_err() {
+                    self.fault_pending(message).await;
+                    return;
+                }
+            }
+            if self.is_faulted() {
+                self.drain_started.store(false, Ordering::Release);
+                return;
+            }
+            // A `send` that pushed while the loop observed an empty queue saw
+            // `drain_started == true` and skipped spawning its own drainer, so
+            // it is this loop's job to pick the message up. Clear the flag only
+            // while holding the queue lock, and return only once the queue is
+            // genuinely empty; the lock makes the check-and-clear atomic with a
+            // concurrent push.
+            let restart = {
+                let mut pending = self.pending.lock().await;
+                let empty = pending.is_empty();
+                if empty {
+                    self.drain_started.store(false, Ordering::Release);
+                }
+                !empty
+            };
+            if !restart {
+                return;
+            }
+            // Fall back into the drain loop for the newly queued messages.
+        }
+    }
+
+    /// Answer every still-queued call — and the one that just failed to
+    /// deliver — with `ModuleUnavailable`, then fault the module, so callers
+    /// learn the delivery failed instead of waiting out their deadline.
+    async fn fault_pending(&self, failed: Message) {
+        let cleared = {
+            let mut pending = self.pending.lock().await;
+            std::mem::take(&mut *pending)
+        };
+        // Each of these calls incremented `inflight` when it was queued. The
+        // synthesized error replies below travel back through `recv`, which
+        // refunds one slot per reply, so no manual adjustment is needed.
+        let sender = self
+            .context
+            .inbound
+            .lock()
+            .expect("host inbound lock")
+            .clone();
+        if let Some(sender) = sender {
+            for queued in cleared.iter().chain([&failed]) {
+                if queued.header.kind == MessageKind::MethodCall {
+                    let error = Error::ModuleUnavailable {
+                        module: self.label.clone(),
+                        state: "faulted".to_string(),
+                        detail: "module stopped accepting calls".to_string(),
+                    };
+                    let reply = Message::error_reply(&queued.header, &error);
+                    if let Ok(bytes) = serde_json::to_vec(&reply) {
+                        let _ = sender.try_send(bytes);
+                    }
+                }
             }
         }
-        self.drain_started.store(false, Ordering::Release);
+        self.context.faulted.store(true, Ordering::Release);
+        self.context.ready_notify.notify_waiters();
+        self.context
+            .inbound
+            .lock()
+            .expect("host inbound lock")
+            .take();
     }
 
     pub(crate) fn shutdown_sync(&self, deadline: Duration) -> i32 {
