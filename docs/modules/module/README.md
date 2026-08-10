@@ -25,13 +25,17 @@ restart.
 
 ## Loading sequence
 
-1. Check directory ownership/mode and require a regular platform library file.
+1. Check every directory component's ownership/mode, require a regular
+   platform library file no larger than 512 MiB, and enforce `modules.toml`
+   when present.
 2. Load eagerly and locally (`RTLD_NOW | RTLD_LOCAL` on Unix).
 3. Resolve `TINYBUS_MODULE_ABI_V1` against that specific handle.
 4. Read and validate only the frozen 16-byte descriptor prefix.
 5. Validate the full descriptor, then parse the manifest.
 6. Resolve dependencies and reject missing providers, cycles and name clashes.
 7. Call `tinybus_module_init_v1`, receive its vtable, and attach the transport.
+   A manifest with `lazy_init = true` defers this step until its first method
+   call; racing first calls share one initialization and retain their order.
 
 The host vtable also carries borrowed JSON configuration. The SDK copies and
 deserializes it during initialization; the module never retains a pointer into
@@ -42,6 +46,13 @@ with `tinybus modules load <path> --config '{...}'`.
 For directory discovery, embedding hosts call `ModuleHost::set_config(name,
 value)` (or the builder-form `with_config`) before `load_dir`; the value is
 selected by the admitted manifest name.
+
+The optional `modules.toml` file is authoritative for its directory. Keys are
+artifact file names (or stems) and values are lowercase SHA-256 hashes. An
+artifact absent from the file or with a mismatched hash is refused. Search
+precedence is `OPENHUMAN_MODULE_PATH`, the platform user data directory, then
+the platform system directory. `tinybus modules scan --path <dir> --dry-run`
+performs admission and dependency checks without initializing or attaching.
 
 One refusal is returned independently and does not stop other artifacts in a
 directory. Errors contain only a sanitized basename and a fixed reason.

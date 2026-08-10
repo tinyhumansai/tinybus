@@ -110,7 +110,7 @@ interface `ai.tinyhumans.tinybus.Bus`.
 | `LoadModule` | `[path, config?]` | the newly loaded module record; config is JSON |
 | `StopModule` | `[name, deadline_ms]` | the stopped module record |
 | `EnableModule` | `[name, on]` | the updated module record |
-| `RescanModules` | `[]` | modules loaded from configured search paths |
+| `RescanModules` | `[]` or `[paths, dry_run]` | modules loaded or inspected from configured/explicit search paths |
 
 `ai.tinyhumans.tinybus.Bus` is reserved; `RequestName` for it always fails. So
 does `RequestName` for a unique name.
@@ -122,7 +122,9 @@ learns a service died without polling it.
 An embedded module host also exposes the additive module members above. A
 broker without one returns `UnknownMethod`; the wire protocol version remains
 1 because old peers can still parse every message. Module state changes are
-announced as `ModuleStateChanged` with the changed module record as its body.
+announced as `ModuleStateChanged` with body
+`[module, old_state, new_state, detail]`; `detail` is `null` unless the new
+state has a safe refusal or fault reason.
 Name ownership changes still announce when a module attaches or stops.
 
 ## Match rules

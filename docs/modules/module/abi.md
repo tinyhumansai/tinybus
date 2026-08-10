@@ -11,6 +11,9 @@ returning. Configuration decode failures return a numeric status and never
 include attacker-controlled values in host logs.
 The host zeroes and releases its serialized copy immediately after init
 returns; modules must not retain the borrowed pointer.
+The final host callback, `ready`, marks completion of asynchronous setup. This
+keeps a lazy module's reserved name routable during initialization without
+announcing ownership before its objects are serving.
 
 ## Symbols
 
