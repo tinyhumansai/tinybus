@@ -424,10 +424,8 @@ impl StreamRegistry {
             .expect("stream registry lock")
             .remove(&id);
 
-        let mut gate = stream.gate.blocking_lock_fallback();
-        let received = gate.received;
-        gate.chunks = None;
-        drop(gate);
+        let received = stream.received.load(Ordering::Relaxed);
+        stream.seal();
 
         if received != total_len {
             stream.finish(Outcome::Aborted("the sender closed a truncated stream"));
