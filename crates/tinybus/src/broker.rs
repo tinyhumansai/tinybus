@@ -428,7 +428,7 @@ impl Broker {
     }
 
     #[cfg(feature = "modules")]
-    async fn announce_module_state(&self, body: Value) {
+    pub(crate) async fn announce_module_state(&self, body: Value) {
         let signal = Message {
             header: crate::message::Header {
                 kind: MessageKind::Signal,
@@ -510,6 +510,27 @@ async fn reader_task(broker: Broker, transport: Arc<dyn Transport>, id: u64, nam
     let changes = broker.router.lock().expect("router lock").detach(id);
     for change in changes {
         broker.announce_name_change(change).await;
+    }
+    #[cfg(feature = "modules")]
+    {
+        let control = broker
+            .modules
+            .lock()
+            .expect("module control lock")
+            .as_ref()
+            .and_then(Weak::upgrade);
+        if let Some((module, old, new)) =
+            control.and_then(|control| control.peer_detached(&name))
+        {
+            broker
+                .announce_module_state(serde_json::json!([
+                    module,
+                    crate::module::host::state_name(&old),
+                    crate::module::host::state_name(&new),
+                    crate::module::host::state_detail(&new)
+                ]))
+                .await;
+        }
     }
 }
 

@@ -87,6 +87,7 @@ pub struct ModuleInfo {
 struct LoadedModule {
     info: ModuleInfo,
     transport: Arc<ModuleTransport>,
+    unique_name: BusName,
 }
 
 impl LoadedModule {
@@ -130,6 +131,7 @@ pub(crate) trait ModuleControl: Send + Sync {
     fn stop(&self, name: &str, deadline: Duration) -> Result<ModuleInfo>;
     fn enable(&self, name: &str, enabled: bool) -> Result<ModuleInfo>;
     fn rescan(self: Arc<Self>) -> Result<Vec<ModuleInfo>>;
+    fn peer_detached(&self, unique_name: &BusName) -> Option<(String, ModuleState, ModuleState)>;
 }
 
 impl ModuleHost {
@@ -488,6 +490,7 @@ impl ModuleHost {
             .push(LoadedModule {
                 info: admitted.clone(),
                 transport,
+                unique_name: unique,
             });
         Ok(admitted)
     }
@@ -730,6 +733,50 @@ impl ModuleControl for ModuleHostInner {
             }
         }
         Ok(loaded)
+    }
+
+    fn peer_detached(&self, unique_name: &BusName) -> Option<(String, ModuleState, ModuleState)> {
+        let mut loaded = self.loaded.lock().expect("module list lock");
+        let module = loaded
+            .iter_mut()
+            .find(|module| &module.unique_name == unique_name)?;
+        if !module.transport.is_faulted()
+            || matches!(module.info.state, ModuleState::Stopped | ModuleState::Disabled)
+        {
+            return None;
+        }
+        let old = module.info.state.clone();
+        let new = ModuleState::Faulted {
+            reason: "module reported an unrecoverable fault".to_string(),
+        };
+        module.info.state = new.clone();
+        Some((module.info.name.clone(), old, new))
+    }
+}
+
+pub(crate) fn state_name(state: &ModuleState) -> &'static str {
+    match state {
+        ModuleState::Discovered => "discovered",
+        ModuleState::Rejected { .. } => "rejected",
+        ModuleState::Unresolved { .. } => "unresolved",
+        ModuleState::Resolved => "resolved",
+        ModuleState::Initializing => "initializing",
+        ModuleState::Ready => "ready",
+        ModuleState::Serving => "serving",
+        ModuleState::Faulted { .. } => "faulted",
+        ModuleState::Failed { .. } => "failed",
+        ModuleState::Stopped => "stopped",
+        ModuleState::Disabled => "disabled",
+    }
+}
+
+pub(crate) fn state_detail(state: &ModuleState) -> Option<&str> {
+    match state {
+        ModuleState::Rejected { reason }
+        | ModuleState::Unresolved { reason }
+        | ModuleState::Faulted { reason }
+        | ModuleState::Failed { reason } => Some(reason),
+        _ => None,
     }
 }
 
