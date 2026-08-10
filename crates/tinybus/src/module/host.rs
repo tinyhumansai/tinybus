@@ -1038,9 +1038,73 @@ mod tests {
     use crate::Connection;
     use crate::module::abi::TbAbiDescriptor;
     use crate::transport::memory::MemoryBus;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     static INIT_RAN: AtomicBool = AtomicBool::new(false);
+    static LAZY_INIT_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    struct FakeModule {
+        tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+    }
+
+    unsafe extern "C" fn fake_deliver(ctx: *mut std::ffi::c_void, ptr: *const u8, len: usize) -> i32 {
+        if ctx.is_null() || ptr.is_null() {
+            return crate::module::abi::TB_BAD_ARGUMENT;
+        }
+        let module = unsafe { &*ctx.cast::<FakeModule>() };
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();
+        match module.tx.try_send(bytes) {
+            Ok(()) => TB_OK,
+            Err(std::sync::mpsc::TrySendError::Full(_)) => crate::module::abi::TB_BACKPRESSURE,
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => crate::module::abi::TB_CLOSED,
+        }
+    }
+
+    unsafe extern "C" fn fake_shutdown(_: *mut std::ffi::c_void, _: u64) -> i32 {
+        TB_OK
+    }
+
+    unsafe extern "C" fn lazy_echo_init(
+        host: *const crate::module::abi::TbHostVtable,
+        out: *mut TbModuleVtable,
+    ) -> i32 {
+        LAZY_INIT_COUNT.fetch_add(1, Ordering::AcqRel);
+        let host = unsafe { *host };
+        let host_ctx = host.host_ctx as usize;
+        let send = host.send;
+        let ready = host.ready;
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
+        std::thread::spawn(move || {
+            unsafe { ready(host_ctx as *mut std::ffi::c_void) };
+            while let Ok(bytes) = rx.recv() {
+                let Ok(message) = serde_json::from_slice::<crate::Message>(&bytes) else {
+                    continue;
+                };
+                if message.header.kind == crate::message::MessageKind::MethodCall {
+                    let reply = crate::Message::method_return(&message.header, message.body);
+                    let bytes = serde_json::to_vec(&reply).expect("fake reply serializes");
+                    let _ = unsafe {
+                        send(
+                            host_ctx as *mut std::ffi::c_void,
+                            bytes.as_ptr(),
+                            bytes.len(),
+                        )
+                    };
+                }
+            }
+        });
+        let module = Box::into_raw(Box::new(FakeModule { tx }));
+        unsafe {
+            *out = TbModuleVtable {
+                size: size_of::<TbModuleVtable>() as u32,
+                _reserved: 0,
+                module_ctx: module.cast(),
+                deliver: fake_deliver,
+                shutdown: fake_shutdown,
+            };
+        }
+        TB_OK
+    }
 
     unsafe extern "C" fn init_that_must_not_run(
         _: *const crate::module::abi::TbHostVtable,
@@ -1070,6 +1134,46 @@ mod tests {
             worker_threads: 1,
             on_panic: PanicPolicy::Detach,
         }
+    }
+
+    #[tokio::test]
+    async fn a_lazy_module_initializes_on_the_first_call_and_two_racing_callers_initialize_it_once()
+    {
+        LAZY_INIT_COUNT.store(0, Ordering::Release);
+        let (listener, client) = MemoryBus::new(8);
+        let broker = Broker::new();
+        let broker_task = broker.spawn(listener);
+        let host = ModuleHost::new(broker);
+        let mut lazy_manifest = manifest();
+        lazy_manifest.lazy_init = true;
+        let info = unsafe {
+            host.attach_raw(
+                "clock.so",
+                TbAbiDescriptor::current("clock", "0.1.0"),
+                lazy_manifest,
+                lazy_echo_init,
+            )
+        }
+        .unwrap();
+        assert_eq!(info.state, ModuleState::Resolved);
+        assert_eq!(LAZY_INIT_COUNT.load(Ordering::Acquire), 0);
+
+        let connection = Connection::connect(Box::new(client)).await.unwrap();
+        let proxy = connection
+            .proxy(
+                "ai.tinyhumans.module.Clock",
+                "/ai/tinyhumans/module/Clock",
+                "ai.tinyhumans.module.Clock",
+            )
+            .unwrap();
+        let first = proxy.call::<_, String>("Echo", ("first",));
+        let second = proxy.call::<_, String>("Echo", ("second",));
+        let (first, second) = tokio::join!(first, second);
+        assert_eq!(first.unwrap(), "first");
+        assert_eq!(second.unwrap(), "second");
+        assert_eq!(LAZY_INIT_COUNT.load(Ordering::Acquire), 1);
+        assert_eq!(host.list()[0].state, ModuleState::Ready);
+        broker_task.abort();
     }
 
     #[test]
