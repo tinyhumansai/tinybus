@@ -99,4 +99,4 @@ jobs:
           $env:TINYBUS_TEST_MODULE = $module
           $env:TINYBUS_TEST_MODULE_TWO = $moduleTwo
           $env:TINYBUS_TEST_WRONG_TARGET = $wrongTarget
-          cargo test --locked --features modules,macros -- --ignored
+          cargo test --locked --no-default-features --features modules,macros -- --ignored
