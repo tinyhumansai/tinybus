@@ -143,10 +143,14 @@ impl ModuleTransport {
     }
 
     pub(crate) async fn wait_ready(&self) {
-        while !self.context.ready.load(Ordering::Acquire)
-            && !self.context.faulted.load(Ordering::Acquire)
-        {
-            self.context.ready_notify.notified().await;
+        loop {
+            let notified = self.context.ready_notify.notified();
+            if self.context.ready.load(Ordering::Acquire)
+                || self.context.faulted.load(Ordering::Acquire)
+            {
+                return;
+            }
+            notified.await;
         }
     }
 
@@ -174,8 +178,12 @@ impl ModuleTransport {
     }
 
     pub(crate) async fn wait_initializing(&self) {
-        while !self.init_started() {
-            self.context.init_notify.notified().await;
+        loop {
+            let notified = self.context.init_notify.notified();
+            if self.init_started() {
+                return;
+            }
+            notified.await;
         }
     }
 
