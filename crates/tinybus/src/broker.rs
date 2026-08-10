@@ -21,9 +21,9 @@
 //! service pass credentials over the bus without them being logged, cached, or
 //! parsed by a process that has no business seeing them.
 
-use std::sync::{Arc, Mutex};
 #[cfg(feature = "modules")]
 use std::sync::Weak;
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -69,10 +69,7 @@ impl Broker {
     }
 
     #[cfg(feature = "modules")]
-    pub(crate) fn set_module_control(
-        &self,
-        control: Weak<dyn crate::module::host::ModuleControl>,
-    ) {
+    pub(crate) fn set_module_control(&self, control: Weak<dyn crate::module::host::ModuleControl>) {
         *self.modules.lock().expect("module control lock") = Some(control);
     }
 
@@ -306,7 +303,10 @@ impl Broker {
             "GetModule" => {
                 let (name,): (String,) = parse_args(member, body)?;
                 Ok(serde_json::to_value(
-                    control.list().into_iter().find(|module| module.name == name),
+                    control
+                        .list()
+                        .into_iter()
+                        .find(|module| module.name == name),
                 )?)
             }
             "GetModuleManifest" => {

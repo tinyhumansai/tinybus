@@ -105,7 +105,8 @@ impl ModuleHost {
 
     /// Snapshot all admitted modules.
     pub fn list(&self) -> Vec<ModuleInfo> {
-        self.inner.loaded
+        self.inner
+            .loaded
             .lock()
             .expect("module list lock")
             .iter()
@@ -129,7 +130,11 @@ impl ModuleHost {
     pub fn load_dir(&self, directory: impl AsRef<Path>) -> Result<Vec<Result<ModuleInfo>>> {
         let directory = directory.as_ref();
         check_directory(directory)?;
-        let mut directories = self.inner.directories.lock().expect("module directory lock");
+        let mut directories = self
+            .inner
+            .directories
+            .lock()
+            .expect("module directory lock");
         if !directories.iter().any(|known| known == directory) {
             directories.push(directory.to_path_buf());
         }
@@ -207,7 +212,8 @@ impl ModuleHost {
     /// Stop every module within the supplied deadline per module.
     pub async fn shutdown(&self, deadline: Duration) {
         let transports = self
-            .inner.loaded
+            .inner
+            .loaded
             .lock()
             .expect("module list lock")
             .iter()
@@ -216,7 +222,13 @@ impl ModuleHost {
         for transport in transports {
             let _ = tokio::task::spawn_blocking(move || transport.shutdown_sync(deadline)).await;
         }
-        for module in self.inner.loaded.lock().expect("module list lock").iter_mut() {
+        for module in self
+            .inner
+            .loaded
+            .lock()
+            .expect("module list lock")
+            .iter_mut()
+        {
             module.info.state = ModuleState::Stopped;
         }
     }
@@ -224,7 +236,8 @@ impl ModuleHost {
     fn activate(&self, path: &Path, artifact: LoadedArtifact) -> Result<ModuleInfo> {
         let admitted = self.validate(path, &artifact.descriptor, &artifact.manifest)?;
         if self
-            .inner.loaded
+            .inner
+            .loaded
             .lock()
             .expect("module list lock")
             .iter()
@@ -252,7 +265,8 @@ impl ModuleHost {
             );
         }
         tracing::info!(module = %admitted.name, "module loaded");
-        self.inner.loaded
+        self.inner
+            .loaded
             .lock()
             .expect("module list lock")
             .push(LoadedModule {
@@ -343,7 +357,8 @@ impl ModuleHost {
     }
 
     fn provided_interfaces(&self) -> HashSet<String> {
-        self.inner.loaded
+        self.inner
+            .loaded
             .lock()
             .expect("module list lock")
             .iter()
