@@ -371,18 +371,18 @@ impl StreamRegistry {
             )));
         }
 
-        let mut gate = stream.gate.lock().await;
-        let Some(chunks) = gate.chunks.clone() else {
+        let gate = stream.gate.lock().await;
+        let Some(chunks) = stream.writer() else {
             return Err(Error::StreamAborted {
                 reason: "the stream is already closed".to_string(),
             });
         };
-        if seq != gate.next_seq {
+        if seq != stream.next_seq.load(Ordering::Relaxed) {
             drop(gate);
             self.kill(&id, &stream, "the sender wrote chunks out of order");
             return Err(Error::protocol("stream chunk arrived out of order"));
         }
-        let received = gate.received + chunk.len() as u64;
+        let received = stream.received.load(Ordering::Relaxed) + chunk.len() as u64;
         if received > limits.max_stream_len
             || stream.declared_len.is_some_and(|total| received > total)
         {
@@ -392,8 +392,8 @@ impl StreamRegistry {
                 limit: limits.max_stream_len,
             });
         }
-        gate.next_seq += 1;
-        gate.received = received;
+        stream.next_seq.fetch_add(1, Ordering::Relaxed);
+        stream.received.store(received, Ordering::Relaxed);
         stream.touch();
         // The window is the whole flow-control story: this await is where a
         // sender that has run ahead of the reader waits, and the reply it is
