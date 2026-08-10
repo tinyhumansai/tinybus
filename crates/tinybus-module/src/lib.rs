@@ -590,3 +590,43 @@ macro_rules! module_export {
         }
     };
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_module_whose_queue_is_full_reports_backpressure_rather_than_blocking_the_broker() {
+        let (sender, _receiver) = mpsc::channel(1);
+        sender.try_send(vec![1]).unwrap();
+        let state = RuntimeState {
+            inbound: StdMutex::new(Some(sender)),
+            runtime: StdMutex::new(None),
+        };
+        let bytes = b"{}";
+        let code = unsafe {
+            deliver(
+                std::ptr::from_ref(&state).cast_mut().cast(),
+                bytes.as_ptr(),
+                bytes.len(),
+            )
+        };
+        assert_eq!(code, TB_BACKPRESSURE);
+    }
+
+    #[test]
+    fn a_frame_over_the_size_cap_is_rejected_rather_than_truncated() {
+        let state = RuntimeState {
+            inbound: StdMutex::new(None),
+            runtime: StdMutex::new(None),
+        };
+        let code = unsafe {
+            deliver(
+                std::ptr::from_ref(&state).cast_mut().cast(),
+                std::ptr::NonNull::<u8>::dangling().as_ptr(),
+                MAX_FRAME_LEN + 1,
+            )
+        };
+        assert_eq!(code, TB_BAD_ARGUMENT);
+    }
+}
