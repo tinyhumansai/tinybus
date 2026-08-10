@@ -272,8 +272,10 @@ mod tests {
     fn unix_loader_refuses_missing_and_nul_containing_paths() {
         let missing = Path::new("/definitely/not/a/tinybus-module.so");
         assert!(
-            load(missing, false)
-                .unwrap_err()
+            match load(missing, false) {
+                Err(error) => error,
+                Ok(_) => panic!("missing module unexpectedly loaded"),
+            }
                 .to_string()
                 .contains("dynamic loader rejected the artifact")
         );
