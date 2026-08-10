@@ -1747,28 +1747,19 @@ mod tests {
 
 #[cfg(windows)]
 fn check_directory(path: &Path) -> Result<()> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map_err(|_| Error::module_refused(path, "module directory is unavailable"))?
-            .join(path)
-    };
-    for component in absolute.ancestors() {
-        let metadata = std::fs::symlink_metadata(component)
-            .map_err(|_| Error::module_refused(path, "module directory is unavailable"))?;
-        if !metadata.file_type().is_dir() {
-            return Err(Error::module_refused(
-                path,
-                "module search path contains a non-directory component",
-            ));
-        }
-        if windows_directory_grants_untrusted_write(component)? {
-            return Err(Error::module_refused(
-                path,
-                "module directory is writable by another user",
-            ));
-        }
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|_| Error::module_refused(path, "module directory is unavailable"))?;
+    if !metadata.file_type().is_dir() {
+        return Err(Error::module_refused(
+            path,
+            "module search path is not a directory",
+        ));
+    }
+    if windows_directory_grants_untrusted_write(path)? {
+        return Err(Error::module_refused(
+            path,
+            "module directory is writable by another user",
+        ));
     }
     Ok(())
 }
