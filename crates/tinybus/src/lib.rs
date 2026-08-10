@@ -100,6 +100,9 @@ pub use crate::ports::{Listener, Transport};
 pub use crate::proxy::Proxy;
 pub use crate::router::MatchRule;
 pub use crate::service::Interface;
+pub use crate::stream::{
+    StreamDescriptor, StreamLimits, StreamReader, StreamRef, StreamWriter, MAX_CHUNK_LEN,
+};
 pub use crate::version::{
     Compatibility, InterfaceVersion, PeerManifest, PeerRecord, Version, VersionRange,
 };
