@@ -627,7 +627,11 @@ macro_rules! module_export {
 }
 
 #[cfg(test)]
-mod tests {
+#[path = "test.rs"]
+mod tests;
+
+#[cfg(any())]
+mod inline_tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize};
     use std::sync::{OnceLock, mpsc::SyncSender};
