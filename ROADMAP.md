@@ -98,6 +98,14 @@ sender is responsible for the file's lifetime.
 - [ ] A TypeScript client, because some integrations genuinely want the Node
       ecosystem and shelling out to it is worse than speaking the protocol
 
+## M7 — external service activation
+
+The trusted-module loader is not a replacement for activating isolated service
+processes. A later milestone must define service-file discovery, process
+launching, delivery of calls queued during startup, crash-loop prevention, and
+how activatable names appear in inspection APIs before bus-driven activation is
+safe to claim.
+
 ## Not planned
 
 - **A network transport.** The bus is local by construction, and every

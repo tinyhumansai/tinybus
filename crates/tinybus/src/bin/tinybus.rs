@@ -9,7 +9,7 @@
 //! bus you debug by adding logging to two processes and restarting both; with
 //! it, "did the kernel actually call the wallet" is one command.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
@@ -128,6 +128,9 @@ enum ModulesCommand {
     Stop {
         /// Stable module name.
         name: String,
+        /// Milliseconds the host waits for the module to stop.
+        #[arg(long, default_value_t = 5_000)]
+        deadline_ms: u64,
     },
     /// Enable a known module for future scans.
     Enable {
@@ -280,7 +283,7 @@ async fn run(cli: Cli) -> Result<()> {
     }
 }
 
-async fn run_modules(address: &PathBuf, timeout: Duration, command: ModulesCommand) -> Result<()> {
+async fn run_modules(address: &Path, timeout: Duration, command: ModulesCommand) -> Result<()> {
     let connection = connect(address).await?;
     let bus = connection
         .proxy(tinybus::BUS_NAME, tinybus::BUS_PATH, tinybus::BUS_INTERFACE)?
@@ -342,9 +345,14 @@ async fn run_modules(address: &PathBuf, timeout: Duration, command: ModulesComma
             println!("{}", serde_json::to_string_pretty(&module)?);
             Ok(())
         }
-        ModulesCommand::Stop { name } => {
+        ModulesCommand::Stop { name, deadline_ms } => {
+            if Duration::from_millis(deadline_ms) >= timeout {
+                return Err(Error::failed(
+                    "module stop deadline must be shorter than the RPC timeout",
+                ));
+            }
             let module: serde_json::Value = bus
-                .call("StopModule", (name, timeout.as_millis() as u64))
+                .call("StopModule", (name, deadline_ms))
                 .await?;
             println!("{}", serde_json::to_string_pretty(&module)?);
             Ok(())
@@ -365,7 +373,7 @@ async fn run_modules(address: &PathBuf, timeout: Duration, command: ModulesComma
             for module in modules {
                 let state = module["state"].as_str().unwrap_or("unknown");
                 let mismatch = module["rustc_mismatch"].as_bool().unwrap_or(false);
-                if state != "loaded" || mismatch {
+                if !matches!(state, "ready" | "serving") || mismatch {
                     problems += 1;
                     println!(
                         "{}: state={state}, rustc_mismatch={mismatch}",
@@ -381,7 +389,7 @@ async fn run_modules(address: &PathBuf, timeout: Duration, command: ModulesComma
     }
 }
 
-async fn connect(address: &PathBuf) -> Result<Connection> {
+async fn connect(address: &Path) -> Result<Connection> {
     Connection::connect(Box::new(UnixTransport::connect(address).await?)).await
 }
 
