@@ -731,9 +731,8 @@ mod tests {
         assert_eq!(code, TB_BAD_ARGUMENT);
     }
 
-    #[test]
-    fn an_invalid_manifest_declaration_returns_a_null_slice_instead_of_unwinding() {
-        let slice = manifest_slice(ManifestDeclaration {
+    fn invalid_manifest_declaration() -> ManifestDeclaration<'static> {
+        ManifestDeclaration {
             name: "invalid",
             version: "not-semver",
             provides: &[],
@@ -743,13 +742,14 @@ mod tests {
             optional: &[],
             lazy: false,
             worker_threads: 1,
-        });
-        assert!(slice.ptr.is_null());
-        assert_eq!(slice.len, 0);
+        }
     }
 
     #[test]
     fn a_manifest_declaration_exports_the_declared_surface_and_dependencies() {
+        let invalid = manifest_slice(invalid_manifest_declaration());
+        assert!(invalid.ptr.is_null());
+        assert_eq!(invalid.len, 0);
         let slice = manifest_slice(ManifestDeclaration {
             name: "clock",
             version: "1.2.3",
