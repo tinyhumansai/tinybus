@@ -242,10 +242,14 @@ impl Error {
             .map(sanitize_untrusted)
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| "module".to_string());
-        Self::ModuleRefused {
-            file,
-            reason: sanitize_untrusted(&reason.into()),
-        }
+        let reason = reason.into();
+        let reason = reason
+            .split_whitespace()
+            .map(sanitize_untrusted)
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        Self::ModuleRefused { file, reason }
     }
 
     /// Build an [`Error::BadArguments`] from a serde failure, with the
@@ -433,6 +437,6 @@ mod tests {
         let Error::ModuleRefused { reason, .. } = error else {
             panic!("expected module refusal");
         };
-        assert_eq!(reason, "loaderexposedsecretpathandspaces");
+        assert_eq!(reason, "loader exposed secretpath and spaces");
     }
 }
