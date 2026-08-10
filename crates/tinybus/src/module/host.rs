@@ -51,6 +51,9 @@ pub struct ModuleInfo {
     pub rustc_mismatch: bool,
     /// Whether discovery should admit this module on future scans.
     pub enabled: bool,
+    /// Fixed admission reason for a rejected artifact.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 struct LoadedModule {
@@ -67,6 +70,7 @@ struct ModuleHostInner {
     broker: Broker,
     strict: AtomicBool,
     loaded: Mutex<Vec<LoadedModule>>,
+    rejected: Mutex<Vec<ModuleInfo>>,
     directories: Mutex<Vec<PathBuf>>,
     warned: AtomicBool,
 }
@@ -88,6 +92,7 @@ impl ModuleHost {
             broker: broker.clone(),
             strict: AtomicBool::new(false),
             loaded: Mutex::new(Vec::new()),
+            rejected: Mutex::new(Vec::new()),
             directories: Mutex::new(Vec::new()),
             warned: AtomicBool::new(false),
         });
@@ -105,13 +110,23 @@ impl ModuleHost {
 
     /// Snapshot all admitted modules.
     pub fn list(&self) -> Vec<ModuleInfo> {
-        self.inner
+        let mut modules = self
+            .inner
             .loaded
             .lock()
             .expect("module list lock")
             .iter()
             .map(|module| module.info.clone())
-            .collect()
+            .collect::<Vec<_>>();
+        modules.extend(
+            self.inner
+                .rejected
+                .lock()
+                .expect("rejected module list lock")
+                .iter()
+                .cloned(),
+        );
+        modules
     }
 
     /// Load one newly installed module.
