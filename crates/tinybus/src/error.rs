@@ -201,6 +201,42 @@ pub enum Error {
         detail: String,
     },
 
+    /// No such bulk stream, or not one this peer opened.
+    ///
+    /// The two cases are deliberately one error: distinguishing them would let
+    /// a peer probe for streams running between two others.
+    #[error("no stream `{id}`")]
+    UnknownStream {
+        /// The handle that was presented. Minted by this peer, so quoting it
+        /// leaks nothing.
+        id: String,
+    },
+
+    /// A bulk stream ended before it was complete.
+    #[error("stream aborted: {reason}")]
+    StreamAborted {
+        /// Why it ended. Always crate-generated — never a peer's string, which
+        /// would be a peer writing into this process's logs.
+        reason: String,
+    },
+
+    /// A bulk stream would exceed what the receiver accepts.
+    #[error("stream exceeds the {limit}-byte limit")]
+    StreamTooLarge {
+        /// The receiver's cap, in bytes.
+        limit: u64,
+    },
+
+    /// This peer already has as many streams open as the receiver allows.
+    ///
+    /// Per peer, so a peer that opens streams and never finishes them runs out
+    /// of its own slots rather than everyone's.
+    #[error("already at the limit of {limit} open streams")]
+    TooManyStreams {
+        /// The receiver's per-peer cap.
+        limit: usize,
+    },
+
     /// Filesystem or socket I/O failed.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
