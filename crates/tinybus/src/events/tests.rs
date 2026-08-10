@@ -19,7 +19,6 @@ use crate::connection::Connection;
 use crate::events::{Event, EventBus, EventBusConfig, EventHandler};
 use crate::message::Message;
 use crate::name::{InterfaceName, MemberName, ObjectPath};
-use crate::ports::Transport;
 use crate::transport::memory::MemoryBus;
 
 /// A miniature stand-in for OpenHuman's `DomainEvent`.
@@ -472,7 +471,7 @@ async fn root_catalogs_and_awaited_publishing_keep_the_same_wire_shape() {
     );
     assert_eq!(root_bus.path_for("cron").unwrap().as_str(), "/cron");
     assert_eq!(root_bus.config().root, root_config.root);
-    assert_eq!(root_bus.connection().describe(), "memory");
+    assert_eq!(root_bus.connection().unique_name().as_str(), ":1.0");
 }
 
 #[test]
