@@ -450,39 +450,54 @@ unsafe extern "C" fn host_send(ctx: *mut c_void, ptr: *const u8, len: usize) -> 
 }
 
 unsafe extern "C" fn host_wake(ctx: *mut c_void) {
-    if let Some(context) = unsafe { ctx.cast::<HostContext>().as_ref() } {
-        context.wake.notify_one();
-    }
+    // A panic escaping a plain `extern "C"` frame aborts the process, so each
+    // host callback that a module can reach must contain its own unwinds.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if let Some(context) = unsafe { ctx.cast::<HostContext>().as_ref() } {
+            context.wake.notify_one();
+        }
+    }));
 }
 
 unsafe extern "C" fn host_log(ctx: *mut c_void, level: u32, ptr: *const u8, len: usize) {
-    if ctx.is_null() || ptr.is_null() {
-        return;
-    }
-    let len = len.min(4096);
-    let message = String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(ptr, len) });
-    match level {
-        1 => tracing::error!(target: "tinybus_module", message = %message),
-        2 => tracing::warn!(target: "tinybus_module", message = %message),
-        3 => tracing::info!(target: "tinybus_module", message = %message),
-        4 => tracing::debug!(target: "tinybus_module", message = %message),
-        _ => tracing::trace!(target: "tinybus_module", message = %message),
-    }
+    // `host_log` is the most exposed callback: the `tracing` macros run
+    // arbitrary subscriber code chosen by the embedding host, so a panicking
+    // subscriber must not be able to abort the process through the module.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if ctx.is_null() || ptr.is_null() {
+            return;
+        }
+        let len = len.min(4096);
+        let message = String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(ptr, len) });
+        match level {
+            1 => tracing::error!(target: "tinybus_module", message = %message),
+            2 => tracing::warn!(target: "tinybus_module", message = %message),
+            3 => tracing::info!(target: "tinybus_module", message = %message),
+            4 => tracing::debug!(target: "tinybus_module", message = %message),
+            _ => tracing::trace!(target: "tinybus_module", message = %message),
+        }
+    }));
 }
 
 unsafe extern "C" fn host_fault(ctx: *mut c_void, _: *const u8, _: usize) {
-    if let Some(context) = unsafe { ctx.cast::<HostContext>().as_ref() } {
-        context.faulted.store(true, Ordering::Release);
-        context.ready_notify.notify_waiters();
-        context.inbound.lock().expect("host inbound lock").take();
-    }
+    // `host_fault` exists so a misbehaving module is detached instead of
+    // taking the host down; an abort inside it would defeat that goal.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if let Some(context) = unsafe { ctx.cast::<HostContext>().as_ref() } {
+            context.faulted.store(true, Ordering::Release);
+            context.ready_notify.notify_waiters();
+            context.inbound.lock().expect("host inbound lock").take();
+        }
+    }));
 }
 
 unsafe extern "C" fn host_ready(ctx: *mut c_void) {
-    if let Some(context) = unsafe { ctx.cast::<HostContext>().as_ref() } {
-        context.ready.store(true, Ordering::Release);
-        context.ready_notify.notify_waiters();
-    }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if let Some(context) = unsafe { ctx.cast::<HostContext>().as_ref() } {
+            context.ready.store(true, Ordering::Release);
+            context.ready_notify.notify_waiters();
+        }
+    }));
 }
 
 #[cfg(test)]
