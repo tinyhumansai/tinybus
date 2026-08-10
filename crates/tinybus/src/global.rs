@@ -256,14 +256,16 @@ mod tests {
         );
         assert!(std::ptr::eq(bus.get().unwrap(), initialised));
 
-        let manifest = PeerManifest::new("test-host").version(crate::Version::parse("1.0.0").unwrap());
+        let manifest =
+            PeerManifest::new("test-host").version(crate::Version::parse("1.0.0").unwrap());
         bus.announce(&manifest).await.unwrap();
     }
 
     #[tokio::test]
     async fn announcing_before_initialisation_is_a_safe_no_op() {
         let bus: OnceBus<Tick> = OnceBus::new();
-        let manifest = PeerManifest::new("test-host").version(crate::Version::parse("1.0.0").unwrap());
+        let manifest =
+            PeerManifest::new("test-host").version(crate::Version::parse("1.0.0").unwrap());
         bus.announce(&manifest).await.unwrap();
     }
 }
