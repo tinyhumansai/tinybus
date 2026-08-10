@@ -334,9 +334,10 @@ mod tests {
         );
         assert!(interface_name(&args("other = \"value\"")).is_err());
 
-        let method = match &implementation(
+        let declared = implementation(
             "impl Example { #[tinybus(skip, name = \"WireName\")] async fn call(&self) -> tinybus::Result<()> { Ok(()) } }",
-        ).items[0] {
+        );
+        let method = match &declared.items[0] {
             ImplItem::Fn(method) => method,
             _ => unreachable!(),
         };
@@ -344,9 +345,10 @@ mod tests {
         assert!(attributes.skip);
         assert_eq!(attributes.name.as_deref(), Some("WireName"));
 
-        let invalid = match &implementation(
+        let invalid_declared = implementation(
             "impl Example { #[tinybus(unknown)] async fn call(&self) -> tinybus::Result<()> { Ok(()) } }",
-        ).items[0] {
+        );
+        let invalid = match &invalid_declared.items[0] {
             ImplItem::Fn(method) => method,
             _ => unreachable!(),
         };
