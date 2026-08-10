@@ -144,17 +144,23 @@ impl ModuleHost {
         config: serde_json::Value,
     ) -> Result<ModuleInfo> {
         let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            check_directory(if parent.as_os_str().is_empty() {
-                Path::new(".")
-            } else {
-                parent
-            })?;
+        let result = (|| {
+            if let Some(parent) = path.parent() {
+                check_directory(if parent.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    parent
+                })?;
+            }
+            check_file(path)?;
+            let artifact = loader::load(path)?;
+            self.ensure_dependencies(&artifact.manifest, path)?;
+            self.activate(path, artifact, config)
+        })();
+        if let Err(error) = &result {
+            self.record_rejection(error);
         }
-        check_file(path)?;
-        let artifact = loader::load(path)?;
-        self.ensure_dependencies(&artifact.manifest, path)?;
-        self.activate(path, artifact, config)
+        result
     }
 
     /// Discover and load every platform library in a private directory.
@@ -239,6 +245,9 @@ impl ModuleHost {
                     },
                 )));
             }
+        }
+        for error in outcomes.iter().filter_map(|outcome| outcome.as_ref().err()) {
+            self.record_rejection(error);
         }
         Ok(outcomes)
     }
@@ -383,6 +392,7 @@ impl ModuleHost {
             rustc_version: rustc,
             rustc_mismatch,
             enabled: true,
+            reason: None,
         })
     }
 
@@ -409,6 +419,40 @@ impl ModuleHost {
             .iter()
             .flat_map(|module| module.info.manifest.provides.iter().cloned())
             .collect()
+    }
+
+    fn record_rejection(&self, error: &Error) {
+        let Error::ModuleRefused { file, reason } = error else {
+            return;
+        };
+        let info = ModuleInfo {
+            name: file.clone(),
+            version: String::new(),
+            file: file.clone(),
+            state: ModuleState::Rejected,
+            manifest: ModuleManifest {
+                name: file.clone(),
+                version: String::new(),
+                provides: Vec::new(),
+                requires: Vec::new(),
+                optional: Vec::new(),
+                lazy: false,
+            },
+            rustc_version: String::new(),
+            rustc_mismatch: false,
+            enabled: false,
+            reason: Some((*reason).to_string()),
+        };
+        let mut rejected = self
+            .inner
+            .rejected
+            .lock()
+            .expect("rejected module list lock");
+        if let Some(existing) = rejected.iter_mut().find(|known| known.file == info.file) {
+            *existing = info;
+        } else {
+            rejected.push(info);
+        }
     }
 }
 
