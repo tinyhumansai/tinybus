@@ -26,31 +26,37 @@ static MANIFEST_BYTES: OnceLock<Vec<u8>> = OnceLock::new();
 
 /// Build and retain the exported manifest bytes for the process lifetime.
 #[doc(hidden)]
-pub fn manifest_slice(
-    name: &str,
-    version: &str,
-    provides: &[&str],
-    methods: &[&str],
-    signals: &[&str],
-    requires: &[&str],
-    optional: &[&str],
-    lazy: bool,
-    worker_threads: u32,
-) -> tinybus::module::abi::TbSlice {
+pub struct ManifestDeclaration<'a> {
+    pub name: &'a str,
+    pub version: &'a str,
+    pub provides: &'a [&'a str],
+    pub methods: &'a [&'a str],
+    pub signals: &'a [&'a str],
+    pub requires: &'a [&'a str],
+    pub optional: &'a [&'a str],
+    pub lazy: bool,
+    pub worker_threads: u32,
+}
+
+/// Build and retain the exported manifest bytes for the process lifetime.
+#[doc(hidden)]
+pub fn manifest_slice(declaration: ManifestDeclaration<'_>) -> tinybus::module::abi::TbSlice {
     use tinybus::module::manifest::{
         Dependency, MANIFEST_SCHEMA, ModuleIdentity, ModuleManifest, PanicPolicy, ProvidedInterface,
     };
     use tinybus::{BusName, InterfaceName, InterfaceVersion, ObjectPath, Version};
 
     let bytes = MANIFEST_BYTES.get_or_init(|| {
-        let package_version = Version::parse(version).expect("package version is semver");
+        let package_version =
+            Version::parse(declaration.version).expect("package version is semver");
         let provided = |(index, interface): (usize, &&str)| ProvidedInterface {
             version: InterfaceVersion::provided(
                 InterfaceName::new(*interface).expect("provided interface is valid"),
                 package_version.clone(),
             ),
             methods: if index == 0 {
-                methods
+                declaration
+                    .methods
                     .iter()
                     .map(|member| tinybus::MemberName::new(*member).expect("method is valid"))
                     .collect()
@@ -58,7 +64,8 @@ pub fn manifest_slice(
                 Vec::new()
             },
             signals: if index == 0 {
-                signals
+                declaration
+                    .signals
                     .iter()
                     .map(|member| tinybus::MemberName::new(*member).expect("signal is valid"))
                     .collect()
@@ -74,7 +81,8 @@ pub fn manifest_slice(
             optional,
             reason: String::new(),
         };
-        let bus_name = provides
+        let bus_name = declaration
+            .provides
             .first()
             .copied()
             .unwrap_or("ai.tinyhumans.module.Empty");
@@ -82,7 +90,7 @@ pub fn manifest_slice(
         serde_json::to_vec(&ModuleManifest {
             schema: MANIFEST_SCHEMA,
             module: ModuleIdentity {
-                name: name.to_string(),
+                name: declaration.name.to_string(),
                 version: package_version.clone(),
                 description: String::new(),
                 homepage: None,
@@ -90,16 +98,27 @@ pub fn manifest_slice(
             },
             bus_name: BusName::new(bus_name).expect("provided interface is a bus name"),
             object_path: ObjectPath::new(object_path).expect("derived object path is valid"),
-            provides: provides.iter().enumerate().map(provided).collect(),
-            requires: requires
+            provides: declaration
+                .provides
+                .iter()
+                .enumerate()
+                .map(provided)
+                .collect(),
+            requires: declaration
+                .requires
                 .iter()
                 .map(|interface| dependency(interface, false))
-                .chain(optional.iter().map(|interface| dependency(interface, true)))
+                .chain(
+                    declaration
+                        .optional
+                        .iter()
+                        .map(|interface| dependency(interface, true)),
+                )
                 .collect(),
             environment: Vec::new(),
             capabilities: Vec::new(),
-            lazy_init: lazy,
-            worker_threads,
+            lazy_init: declaration.lazy,
+            worker_threads: declaration.worker_threads,
             on_panic: PanicPolicy::Detach,
         })
         .expect("module manifest is serializable")
@@ -489,17 +508,17 @@ macro_rules! module_export {
 
         #[unsafe(no_mangle)]
         pub extern "C" fn tinybus_module_manifest_v1() -> ::tinybus::module::abi::TbSlice {
-            $crate::manifest_slice(
-                env!("CARGO_PKG_NAME"),
-                env!("CARGO_PKG_VERSION"),
-                &[$($provides),*],
-                &[$($methods),*],
-                &[$($signals),*],
-                &[$($requires),*],
-                &[$($optional),*],
-                $lazy,
-                $threads as u32,
-            )
+            $crate::manifest_slice($crate::ManifestDeclaration {
+                name: env!("CARGO_PKG_NAME"),
+                version: env!("CARGO_PKG_VERSION"),
+                provides: &[$($provides),*],
+                methods: &[$($methods),*],
+                signals: &[$($signals),*],
+                requires: &[$($requires),*],
+                optional: &[$($optional),*],
+                lazy: $lazy,
+                worker_threads: $threads as u32,
+            })
         }
 
         #[unsafe(no_mangle)]
@@ -549,17 +568,17 @@ macro_rules! module_export {
 
         #[unsafe(no_mangle)]
         pub extern "C" fn tinybus_module_manifest_v1() -> ::tinybus::module::abi::TbSlice {
-            $crate::manifest_slice(
-                env!("CARGO_PKG_NAME"),
-                env!("CARGO_PKG_VERSION"),
-                &[$($provides),*],
-                &[$($methods),*],
-                &[$($signals),*],
-                &[$($requires),*],
-                &[$($optional),*],
-                $lazy,
-                $threads as u32,
-            )
+            $crate::manifest_slice($crate::ManifestDeclaration {
+                name: env!("CARGO_PKG_NAME"),
+                version: env!("CARGO_PKG_VERSION"),
+                provides: &[$($providides),*],
+                methods: &[$($methods),*],
+                signals: &[$($signals),*],
+                requires: &[$($requires),*],
+                optional: &[$($optional),*],
+                lazy: $lazy,
+                worker_threads: $threads as u32,
+            })
         }
 
         #[unsafe(no_mangle)]
