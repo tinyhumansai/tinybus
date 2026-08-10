@@ -1644,6 +1644,16 @@ mod tests {
         assert!(error.to_string().contains("writable by another user"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_module_directory_owned_by_another_user_is_refused() {
+        assert_eq!(
+            unix_directory_refusal(1_001, 0o755, 1_000),
+            Some("module directory is owned by another user")
+        );
+        assert_eq!(unix_directory_refusal(0, 0o755, 1_000), None);
+    }
+
     #[test]
     fn a_file_that_is_not_a_regular_file_is_skipped() {
         let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
