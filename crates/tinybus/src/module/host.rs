@@ -13,7 +13,10 @@ use crate::build_info;
 use crate::error::{Error, Result, sanitize_untrusted};
 use crate::module::abi::{TB_OK, TbAbiDescriptor, TbModuleVtable, field_bytes};
 use crate::module::loader::{self, LoadedArtifact};
-use crate::module::manifest::ModuleManifest;
+use crate::module::manifest::{
+    MANIFEST_SCHEMA, ModuleIdentity, ModuleManifest, PanicPolicy,
+};
+use crate::name::{BusName, InterfaceName, ObjectPath};
 use crate::module::transport::ModuleTransport;
 use crate::ports::Transport;
 use crate::version::Version;
@@ -223,7 +226,7 @@ impl ModuleHost {
 
         let duplicate_names = duplicate_module_names(&pending);
         pending.retain(|(path, artifact)| {
-            if duplicate_names.contains(&artifact.manifest.name) {
+            if duplicate_names.contains(&artifact.manifest.module.name) {
                 outcomes.push(Err(Error::module_refused(
                     path,
                     "two artifacts declare the same module name",
@@ -234,9 +237,28 @@ impl ModuleHost {
             }
         });
 
+        let duplicate_bus_names = duplicate_bus_names(&pending);
+        pending.retain(|(path, artifact)| {
+            if duplicate_bus_names.contains(&artifact.manifest.bus_name) {
+                outcomes.push(Err(Error::module_refused(
+                    path,
+                    "two modules claim the same bus name",
+                )));
+                false
+            } else {
+                true
+            }
+        });
+
         let declared_providers: HashSet<String> = pending
             .iter()
-            .flat_map(|(_, artifact)| artifact.manifest.provides.iter().cloned())
+            .flat_map(|(_, artifact)| {
+                artifact
+                    .manifest
+                    .provides
+                    .iter()
+                    .map(|provided| provided.version.interface.to_string())
+            })
             .collect();
         let mut available = self.provided_interfaces();
         while !pending.is_empty() {
@@ -245,7 +267,10 @@ impl ModuleHost {
                     .manifest
                     .requires
                     .iter()
-                    .all(|dependency| available.contains(&dependency.interface))
+                    .filter(|dependency| !dependency.optional)
+                    .all(|dependency| {
+                        available.contains(dependency.interface.interface.as_str())
+                    })
             });
             if let Some(index) = ready {
                 let (path, artifact) = pending.remove(index);
@@ -255,22 +280,32 @@ impl ModuleHost {
                     .configs
                     .lock()
                     .expect("module config lock")
-                    .get(&artifact.manifest.name)
+                    .get(&artifact.manifest.module.name)
                     .cloned()
                     .unwrap_or_else(|| serde_json::json!({}));
                 let result = self.activate(&path, artifact, config);
                 if result.is_ok() {
-                    available.extend(provides);
+                    available.extend(
+                        provides
+                            .into_iter()
+                            .map(|provided| provided.version.interface.to_string()),
+                    );
                 }
                 outcomes.push(result);
                 continue;
             }
 
             for (path, artifact) in pending.drain(..) {
-                let missing = artifact.manifest.requires.iter().any(|dependency| {
-                    !available.contains(&dependency.interface)
-                        && !declared_providers.contains(&dependency.interface)
-                });
+                let missing = artifact
+                    .manifest
+                    .requires
+                    .iter()
+                    .filter(|dependency| !dependency.optional)
+                    .any(|dependency| {
+                        !available.contains(dependency.interface.interface.as_str())
+                            && !declared_providers
+                                .contains(dependency.interface.interface.as_str())
+                    });
                 outcomes.push(Err(Error::module_refused(
                     &path,
                     if missing {
@@ -404,17 +439,18 @@ impl ModuleHost {
             return Err(refuse("rustc version does not match in strict mode"));
         }
         if rustc_mismatch {
-            tracing::warn!(module = %sanitize_untrusted(&manifest.name), "module rustc differs from host");
+            tracing::warn!(module = %sanitize_untrusted(&manifest.module.name), "module rustc differs from host");
         }
 
         let name = sanitized_field(&descriptor.module_name)
             .ok_or_else(|| refuse("descriptor identity is invalid"))?;
         let version = sanitized_field(&descriptor.module_version)
             .ok_or_else(|| refuse("descriptor identity is invalid"))?;
-        if sanitize_untrusted(&manifest.name) != name
-            || sanitize_untrusted(&manifest.version) != version
-            || manifest.name.len() > 64
-            || manifest.version.len() > 32
+        if manifest.schema != MANIFEST_SCHEMA
+            || sanitize_untrusted(&manifest.module.name) != name
+            || sanitize_untrusted(&manifest.module.version.to_string()) != version
+            || manifest.module.name.len() > 64
+            || manifest.module.version.to_string().len() > 32
         {
             return Err(refuse("manifest identity does not match descriptor"));
         }
@@ -437,7 +473,8 @@ impl ModuleHost {
         if manifest
             .requires
             .iter()
-            .any(|dependency| !available.contains(&dependency.interface))
+            .filter(|dependency| !dependency.optional)
+            .any(|dependency| !available.contains(dependency.interface.interface.as_str()))
         {
             return Err(Error::module_refused(
                 path,
@@ -453,7 +490,15 @@ impl ModuleHost {
             .lock()
             .expect("module list lock")
             .iter()
-            .flat_map(|module| module.info.manifest.provides.iter().cloned())
+            .flat_map(|module| {
+                module
+                    .info
+                    .manifest
+                    .provides
+                    .iter()
+                    .map(|provided| provided.version.interface.to_string())
+                    .collect::<Vec<_>>()
+            })
             .collect()
     }
 
@@ -467,12 +512,25 @@ impl ModuleHost {
             file: file.clone(),
             state: ModuleState::Rejected,
             manifest: ModuleManifest {
-                name: file.clone(),
-                version: String::new(),
+                schema: MANIFEST_SCHEMA,
+                module: ModuleIdentity {
+                    name: file.clone(),
+                    version: Version::new(0, 0, 0),
+                    description: String::new(),
+                    homepage: None,
+                    license: String::new(),
+                },
+                bus_name: BusName::new("ai.tinyhumans.module.Rejected")
+                    .expect("literal bus name"),
+                object_path: ObjectPath::new("/ai/tinyhumans/module/Rejected")
+                    .expect("literal object path"),
                 provides: Vec::new(),
                 requires: Vec::new(),
-                optional: Vec::new(),
-                lazy: false,
+                environment: Vec::new(),
+                capabilities: Vec::new(),
+                lazy_init: false,
+                worker_threads: 1,
+                on_panic: PanicPolicy::Detach,
             },
             rustc_version: String::new(),
             rustc_mismatch: false,
@@ -560,7 +618,7 @@ fn duplicate_module_names(pending: &[(PathBuf, LoadedArtifact)]) -> HashSet<Stri
     let mut counts = HashMap::new();
     for (_, artifact) in pending {
         *counts
-            .entry(artifact.manifest.name.clone())
+            .entry(artifact.manifest.module.name.clone())
             .or_insert(0usize) += 1;
     }
     counts
