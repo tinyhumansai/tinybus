@@ -664,4 +664,21 @@ mod tests {
         };
         assert_eq!(code, TB_BAD_ARGUMENT);
     }
+
+    #[test]
+    fn an_invalid_manifest_declaration_returns_a_null_slice_instead_of_unwinding() {
+        let slice = manifest_slice(ManifestDeclaration {
+            name: "invalid",
+            version: "not-semver",
+            provides: &[],
+            methods: &[],
+            signals: &[],
+            requires: &[],
+            optional: &[],
+            lazy: false,
+            worker_threads: 1,
+        });
+        assert!(slice.ptr.is_null());
+        assert_eq!(slice.len, 0);
+    }
 }

@@ -423,4 +423,16 @@ mod tests {
             "no peer owns the name `ai.tinyhumans.openhuman.Voice`"
         );
     }
+
+    #[test]
+    fn module_refusal_sanitizes_an_untrusted_reason() {
+        let error = Error::module_refused(
+            std::path::Path::new("module.so"),
+            "loader exposed /secret/path and spaces",
+        );
+        let Error::ModuleRefused { reason, .. } = error else {
+            panic!("expected module refusal");
+        };
+        assert_eq!(reason, "loaderexposedsecretpathandspace");
+    }
 }
