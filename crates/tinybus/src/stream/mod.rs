@@ -712,6 +712,16 @@ pub struct StreamReader {
     declared_len: Option<u64>,
 }
 
+impl std::fmt::Debug for StreamReader {
+    /// The metadata, never the buffered chunks.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamReader")
+            .field("content_type", &self.content_type)
+            .field("declared_len", &self.declared_len)
+            .finish_non_exhaustive()
+    }
+}
+
 impl StreamReader {
     /// What the sender said the payload is, if anything.
     pub fn content_type(&self) -> Option<&str> {
