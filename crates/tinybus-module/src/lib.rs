@@ -762,7 +762,8 @@ mod tests {
             worker_threads: 2,
         });
         let bytes = unsafe { std::slice::from_raw_parts(slice.ptr, slice.len) };
-        let manifest: tinybus::module::ModuleManifest = serde_json::from_slice(bytes).unwrap();
+        let manifest: tinybus::module::manifest::ModuleManifest =
+            serde_json::from_slice(bytes).unwrap();
         assert_eq!(manifest.module.name, "clock");
         assert_eq!(manifest.provides.len(), 2);
         assert_eq!(manifest.provides[0].methods[0].as_str(), "Now");
