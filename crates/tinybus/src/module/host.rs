@@ -112,6 +112,8 @@ impl LoadedModule {
             )
         {
             info.state = ModuleState::Ready;
+        } else if self.transport.init_started() && matches!(info.state, ModuleState::Resolved) {
+            info.state = ModuleState::Initializing;
         }
         info
     }
@@ -517,7 +519,19 @@ impl ModuleHost {
         let ready_transport = transport.clone();
         let module_name = admitted.name.clone();
         let previous_state = state_name(&admitted.state);
+        let lazy_init = artifact.manifest.lazy_init;
         tokio::spawn(async move {
+            if lazy_init {
+                ready_transport.wait_initializing().await;
+                broker
+                    .announce_module_state(serde_json::json!([
+                        module_name.clone(),
+                        "resolved",
+                        "initializing",
+                        null
+                    ]))
+                    .await;
+            }
             ready_transport.wait_ready().await;
             if ready_transport.is_ready() {
                 if let Some(change) = reserved_change {
@@ -841,7 +855,13 @@ impl ModuleControl for ModuleHostInner {
         {
             return None;
         }
-        let old = module.info.state.clone();
+        let old = if module.transport.init_started()
+            && matches!(module.info.state, ModuleState::Resolved)
+        {
+            ModuleState::Initializing
+        } else {
+            module.info.state.clone()
+        };
         let new = if module.transport.init_failed() {
             ModuleState::Failed {
                 reason: "module initialization failed".to_string(),
