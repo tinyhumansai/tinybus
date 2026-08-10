@@ -18,6 +18,7 @@ use crate::module::abi::{
 use crate::ports::Transport;
 
 const HOST_QUEUE_CAPACITY: usize = 256;
+const MODULE_INIT_DEADLINE: Duration = Duration::from_secs(5);
 
 /// How long the host waits for a module to drain its queue before declaring it
 /// faulted. Bounded so a module that stops calling `wake` cannot park the
@@ -55,6 +56,12 @@ pub(crate) struct ModuleTransport {
 // contract requires thread safety. The vtable itself is immutable after init.
 unsafe impl Send for ModuleTransport {}
 unsafe impl Sync for ModuleTransport {}
+
+struct SendHostVtable(TbHostVtable);
+
+// The opaque host context is process-lifetime state and every callback is
+// required by the ABI to be thread-safe.
+unsafe impl Send for SendHostVtable {}
 
 impl ModuleTransport {
     pub(crate) fn new(label: String, config: Vec<u8>) -> (Arc<Self>, TbHostVtable) {
@@ -136,8 +143,25 @@ impl ModuleTransport {
                         Err("module has no initializer".to_string())
                     };
                 };
-                let mut module = TbModuleVtable::default();
-                let code = unsafe { init(&host, &mut module) };
+                // Module init is opaque synchronous code. Keep it off Tokio's
+                // worker threads and bound how long the broker waits; a timed
+                // out blocking task may remain wedged, so its borrowed config
+                // remains allocated rather than being invalidated underneath it.
+                let initialized = tokio::time::timeout(
+                    MODULE_INIT_DEADLINE,
+                    tokio::task::spawn_blocking(move || {
+                        let host = SendHostVtable(host);
+                        let mut module = TbModuleVtable::default();
+                        let code = unsafe { init(&host.0, &mut module) };
+                        (code, module)
+                    }),
+                )
+                .await;
+                let (code, module) = match initialized {
+                    Ok(Ok(initialized)) => initialized,
+                    Ok(Err(_)) => return Err("module initialization panicked".to_string()),
+                    Err(_) => return Err("module initialization exceeded its deadline".to_string()),
+                };
                 self.clear_config();
                 if code != TB_OK {
                     return Err("module initialization failed".to_string());
