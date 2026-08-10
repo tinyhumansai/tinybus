@@ -846,4 +846,33 @@ mod tests {
             TB_BAD_ARGUMENT
         );
     }
+
+    #[test]
+    fn configured_startup_builds_a_runtime_announces_ready_and_shuts_down() {
+        HOST_READY.store(false, Ordering::Release);
+        let config = br#"{"answer":42}"#;
+        let host = host(config);
+        let mut out = TbModuleVtable::default();
+        let code = unsafe {
+            start_module_with_config::<serde_json::Value, _, _>(
+                &host,
+                &mut out,
+                1,
+                true,
+                |_, parsed| async move {
+                    assert_eq!(parsed["answer"], 42);
+                    Ok(())
+                },
+            )
+        };
+        assert_eq!(code, TB_OK);
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while !HOST_READY.load(Ordering::Acquire) {
+            assert!(std::time::Instant::now() < deadline, "module did not become ready");
+            std::thread::yield_now();
+        }
+        assert_eq!(unsafe { (out.deliver)(out.module_ctx, std::ptr::null(), 0) }, TB_BAD_ARGUMENT);
+        assert_eq!(unsafe { (out.shutdown)(out.module_ctx, 10) }, TB_OK);
+        assert_eq!(unsafe { (out.shutdown)(out.module_ctx, 10) }, TB_CLOSED);
+    }
 }
