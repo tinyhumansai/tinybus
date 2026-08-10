@@ -1117,20 +1117,22 @@ fn check_directory(path: &Path) -> Result<()> {
                 "module search path contains a non-directory component",
             ));
         }
-        if metadata.uid() != uid && metadata.uid() != 0 {
-            return Err(Error::module_refused(
-                path,
-                "module directory is owned by another user",
-            ));
-        }
-        if metadata.mode() & 0o022 != 0 {
-            return Err(Error::module_refused(
-                path,
-                "module directory is writable by another user",
-            ));
+        if let Some(reason) = unix_directory_refusal(metadata.uid(), metadata.mode(), uid) {
+            return Err(Error::module_refused(path, reason));
         }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn unix_directory_refusal(owner: u32, mode: u32, current_uid: u32) -> Option<&'static str> {
+    if owner != current_uid && owner != 0 {
+        Some("module directory is owned by another user")
+    } else if mode & 0o022 != 0 {
+        Some("module directory is writable by another user")
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
