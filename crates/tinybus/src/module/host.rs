@@ -129,6 +129,9 @@ impl ModuleHost {
         config: serde_json::Value,
     ) -> Result<ModuleInfo> {
         let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            check_directory(parent)?;
+        }
         check_file(path)?;
         let artifact = loader::load(path)?;
         self.ensure_dependencies(&artifact.manifest, path)?;
@@ -344,7 +347,11 @@ impl ModuleHost {
             .ok_or_else(|| refuse("descriptor identity is invalid"))?;
         let version = sanitized_field(&descriptor.module_version)
             .ok_or_else(|| refuse("descriptor identity is invalid"))?;
-        if sanitize_untrusted(&manifest.name) != name || manifest.name.len() > 64 {
+        if sanitize_untrusted(&manifest.name) != name
+            || sanitize_untrusted(&manifest.version) != version
+            || manifest.name.len() > 64
+            || manifest.version.len() > 32
+        {
             return Err(refuse("manifest identity does not match descriptor"));
         }
 

@@ -122,7 +122,8 @@ learns a service died without polling it.
 An embedded module host also exposes the additive module members above. A
 broker without one returns `UnknownMethod`; the wire protocol version remains
 1 because old peers can still parse every message. Module state changes are
-observable through name ownership changes when a module attaches or stops.
+announced as `ModuleStateChanged` with the changed module record as its body.
+Name ownership changes still announce when a module attaches or stops.
 
 ## Match rules
 

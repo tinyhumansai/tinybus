@@ -182,6 +182,14 @@ impl Broker {
 
         let (result, changes) = self.bus_method(from, from_name, &member, message.body);
 
+        #[cfg(feature = "modules")]
+        let module_state = matches!(
+            member.as_str(),
+            "LoadModule" | "StopModule" | "EnableModule" | "RescanModules"
+        )
+        .then(|| result.as_ref().ok().cloned())
+        .flatten();
+
         let reply = match result {
             Ok(value) => Message::method_return(&header, value),
             Err(e) => Message::error_reply(&header, &e),
@@ -198,6 +206,10 @@ impl Broker {
 
         for change in changes {
             self.announce_name_change(change).await;
+        }
+        #[cfg(feature = "modules")]
+        if let Some(module_state) = module_state {
+            self.announce_module_state(module_state).await;
         }
         Ok(())
     }
@@ -391,6 +403,37 @@ impl Broker {
             body: serde_json::json!([change.name, change.old_owner, change.new_owner]),
         };
 
+        let targets = self
+            .router
+            .lock()
+            .expect("router lock")
+            .broadcast_targets(&signal);
+        for target in targets {
+            let _ = target.try_send(signal.clone());
+        }
+    }
+
+    #[cfg(feature = "modules")]
+    async fn announce_module_state(&self, body: Value) {
+        let signal = Message {
+            header: crate::message::Header {
+                kind: MessageKind::Signal,
+                serial: 0,
+                reply_serial: None,
+                sender: Some(BusName::new(crate::BUS_NAME).expect("bus name is valid")),
+                destination: None,
+                path: Some(ObjectPath::new(crate::BUS_PATH).expect("bus path is valid")),
+                interface: Some(
+                    InterfaceName::new(crate::BUS_INTERFACE)
+                        .expect("bus interface is valid"),
+                ),
+                member: Some(
+                    MemberName::new("ModuleStateChanged").expect("literal is a valid member"),
+                ),
+                error_name: None,
+            },
+            body,
+        };
         let targets = self
             .router
             .lock()

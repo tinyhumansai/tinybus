@@ -197,9 +197,13 @@ where
             let location = panic.location().map_or_else(
                 || "module panicked at an unknown location".to_string(),
                 |location| {
+                    let file = std::path::Path::new(location.file())
+                        .file_name()
+                        .and_then(|file| file.to_str())
+                        .unwrap_or("module");
                     format!(
                         "module panicked at {}:{}:{}",
-                        location.file(),
+                        file,
                         location.line(),
                         location.column()
                     )
