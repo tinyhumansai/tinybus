@@ -894,9 +894,15 @@ mod tests {
                 .expect("module did not send Hello"),
         )
         .unwrap();
-        let reply = Message::method_return(&hello.header, serde_json::Value::String(":module.1".to_string()));
+        let reply = Message::method_return(
+            &hello.header,
+            serde_json::Value::String(":module.1".to_string()),
+        );
         let reply = serde_json::to_vec(&reply).unwrap();
-        assert_eq!(unsafe { (out.deliver)(out.module_ctx, reply.as_ptr(), reply.len()) }, TB_OK);
+        assert_eq!(
+            unsafe { (out.deliver)(out.module_ctx, reply.as_ptr(), reply.len()) },
+            TB_OK
+        );
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
         while !HOST_READY.load(Ordering::Acquire) {
             assert!(
