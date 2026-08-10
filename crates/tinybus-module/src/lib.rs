@@ -749,6 +749,30 @@ mod tests {
     }
 
     #[test]
+    fn a_manifest_declaration_exports_the_declared_surface_and_dependencies() {
+        let slice = manifest_slice(ManifestDeclaration {
+            name: "clock",
+            version: "1.2.3",
+            provides: &["ai.tinyhumans.module.Clock", "ai.tinyhumans.module.Time"],
+            methods: &["Now"],
+            signals: &["Changed"],
+            requires: &["ai.tinyhumans.module.System"],
+            optional: &["ai.tinyhumans.module.Optional"],
+            lazy: true,
+            worker_threads: 2,
+        });
+        let bytes = unsafe { std::slice::from_raw_parts(slice.ptr, slice.len) };
+        let manifest: tinybus::module::ModuleManifest = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(manifest.module.name, "clock");
+        assert_eq!(manifest.provides.len(), 2);
+        assert_eq!(manifest.provides[0].methods[0].as_str(), "Now");
+        assert_eq!(manifest.provides[0].signals[0].as_str(), "Changed");
+        assert_eq!(manifest.requires.len(), 2);
+        assert!(manifest.requires[1].optional);
+        assert!(manifest.lazy_init);
+    }
+
+    #[test]
     fn a_panicking_shutdown_callback_reports_panicked_not_timed_out() {
         let state = RuntimeState {
             inbound: StdMutex::new(None),
