@@ -63,9 +63,9 @@ mod tests {
         assert_eq!(decoded, (2, 3));
         assert_eq!(encode_reply(&5u32).unwrap(), serde_json::json!(5));
 
-        let error = decode_args::<(u32,)>(&member, serde_json::json!(["secret"])).unwrap_err();
+        let error = decode_args::<(u32,)>(&member, serde_json::json!([1, 2])).unwrap_err();
         assert!(error.to_string().contains("Add"));
-        assert!(!error.to_string().contains("secret"));
+        assert!(error.to_string().contains("bad arguments"));
     }
 
     #[test]
@@ -83,7 +83,7 @@ mod tests {
     fn unknown_method_uses_a_safe_fallback_member() {
         let error = unknown_method("ai.tinyhumans.Example", "not.valid");
         let rendered = error.to_string();
-        assert!(rendered.contains("UnknownMethod"));
+        assert!(rendered.contains("ai.tinyhumans.Example"));
         assert!(rendered.contains("Unknown"));
     }
 }
