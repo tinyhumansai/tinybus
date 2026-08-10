@@ -831,7 +831,11 @@ fn module_host_helpers_preserve_safe_names_states_and_allowlist_decisions() {
     assert!(!has_library_extension(Path::new("clock.txt")));
 
     let search_paths = ModuleHost::search_paths();
-    assert!(search_paths.iter().any(|path| path.ends_with("openhuman/modules")));
+    assert!(
+        search_paths
+            .iter()
+            .any(|path| path.ends_with("openhuman/modules"))
+    );
     let _ = ModuleHost::new(Broker::new()).load_search_paths();
 
     let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
@@ -846,10 +850,12 @@ fn module_host_helpers_preserve_safe_names_states_and_allowlist_decisions() {
     assert!(check_file(&module).is_ok());
     let text = directory.path().join("clock.txt");
     std::fs::write(&text, b"module bytes").unwrap();
-    assert!(check_file(&text)
-        .unwrap_err()
-        .to_string()
-        .contains("extension is not loadable"));
+    assert!(
+        check_file(&text)
+            .unwrap_err()
+            .to_string()
+            .contains("extension is not loadable")
+    );
     std::fs::write(directory.path().join("modules.toml"), "other = \"00\"\n").unwrap();
     assert!(
         check_file(&module)
