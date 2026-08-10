@@ -135,20 +135,26 @@ impl Transport for ModuleTransport {
 }
 
 unsafe extern "C" fn host_send(ctx: *mut c_void, ptr: *const u8, len: usize) -> i32 {
-    if ctx.is_null() || ptr.is_null() || len > MAX_FRAME_LEN {
-        return TB_BAD_ARGUMENT;
-    }
-    let context = unsafe { &*(ctx.cast::<HostContext>()) };
-    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();
-    let sender = context.inbound.lock().expect("host inbound lock").clone();
-    match sender {
-        Some(sender) => match sender.try_send(bytes) {
-            Ok(()) => TB_OK,
-            Err(mpsc::error::TrySendError::Full(_)) => TB_BACKPRESSURE,
-            Err(mpsc::error::TrySendError::Closed(_)) => TB_CLOSED,
-        },
-        None => TB_CLOSED,
-    }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if ctx.is_null() || ptr.is_null() || len > MAX_FRAME_LEN {
+            return TB_BAD_ARGUMENT;
+        }
+        let context = unsafe { &*(ctx.cast::<HostContext>()) };
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();
+        let sender = context.inbound.lock().expect("host inbound lock").clone();
+        match sender {
+            // This callback runs on a module-owned runtime thread. Blocking it
+            // applies bounded backpressure only to that module and gives the
+            // async SDK a reliable completion without adding a fifth callback
+            // to the frozen v1 ABI.
+            Some(sender) => match sender.blocking_send(bytes) {
+                Ok(()) => TB_OK,
+                Err(_) => TB_CLOSED,
+            },
+            None => TB_CLOSED,
+        }
+    }))
+    .unwrap_or(TB_BACKPRESSURE)
 }
 
 unsafe extern "C" fn host_wake(ctx: *mut c_void) {
