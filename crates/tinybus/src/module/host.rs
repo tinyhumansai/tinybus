@@ -1172,7 +1172,9 @@ mod tests {
             )
         }
         .unwrap();
-        let connection = Connection::connect(bus.connect().await.unwrap()).await.unwrap();
+        let connection = Connection::connect(bus.connect().await.unwrap())
+            .await
+            .unwrap();
         let proxy = connection
             .proxy(
                 "ai.tinyhumans.module.Clock",
@@ -1181,7 +1183,10 @@ mod tests {
             )
             .unwrap();
         let first = proxy.call::<()>("Call", ()).await.unwrap_err();
-        assert_eq!(first.wire_name(), "ai.tinyhumans.tinybus.Error.ModuleUnavailable");
+        assert_eq!(
+            first.wire_name(),
+            "ai.tinyhumans.tinybus.Error.ModuleUnavailable"
+        );
         tokio::time::timeout(Duration::from_secs(1), async {
             while !matches!(host.list()[0].state, ModuleState::Failed { .. }) {
                 tokio::task::yield_now().await;
@@ -1190,7 +1195,10 @@ mod tests {
         .await
         .unwrap();
         let second = proxy.call::<()>("Call", ()).await.unwrap_err();
-        assert_eq!(second.wire_name(), "ai.tinyhumans.tinybus.Error.ModuleUnavailable");
+        assert_eq!(
+            second.wire_name(),
+            "ai.tinyhumans.tinybus.Error.ModuleUnavailable"
+        );
         assert_eq!(FAILED_INIT_COUNT.load(Ordering::Acquire), 1);
         broker_task.abort();
     }
