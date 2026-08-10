@@ -662,7 +662,10 @@ mod tests {
 
     unsafe extern "C" fn host_log(_: *mut c_void, _: u32, ptr: *const u8, len: usize) {
         if !ptr.is_null() {
-            println!("host log: {}", String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(ptr, len) }));
+            println!(
+                "host log: {}",
+                String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(ptr, len) })
+            );
         }
     }
 
