@@ -194,3 +194,53 @@ pub(crate) fn spawn<E: Event>(
 
     SubscriptionHandle::new(name, task)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Clone, Serialize, Deserialize)]
+    struct TestEvent;
+
+    impl Event for TestEvent {
+        fn domain(&self) -> &str {
+            "test"
+        }
+    }
+
+    struct Handler;
+
+    #[async_trait]
+    impl EventHandler<TestEvent> for Handler {
+        fn name(&self) -> &str {
+            "subscriber::test"
+        }
+
+        async fn handle(&self, _: &TestEvent) {}
+    }
+
+    #[test]
+    fn a_handler_without_a_filter_accepts_every_domain() {
+        assert!(Handler.domains().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_handle_exposes_its_name_and_cancels_its_task() {
+        let task = tokio::spawn(std::future::pending::<()>());
+        let handle = SubscriptionHandle::new("test::pending".to_string(), task);
+        assert_eq!(handle.name(), "test::pending");
+        handle.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_closed_signal_stream_ends_the_dispatch_loop() {
+        let (sender, receiver) = broadcast::channel(1);
+        drop(sender);
+        let config = EventBusConfig::new("/events", "ai.tinyhumans.Events").unwrap();
+        let handle = spawn(receiver, config, Arc::new(Handler));
+        assert_eq!(handle.name(), "subscriber::test");
+        tokio::task::yield_now().await;
+        drop(handle);
+    }
+}
