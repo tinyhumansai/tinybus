@@ -290,8 +290,6 @@ impl StreamRegistry {
             "Write" => self.write(header, body).await,
             "Close" => self.close(header, body),
             "Abort" => self.abort(header, body),
-            #[cfg(test)]
-            "Ping" => Ok(Value::Null),
             _ => Err(Error::UnknownMethod {
                 interface: header
                     .interface
