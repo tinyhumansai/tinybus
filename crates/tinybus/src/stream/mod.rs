@@ -706,7 +706,7 @@ impl Drop for StreamWriter {
 ///
 /// Reading incrementally is the point — a receiver writing a payload to disk
 /// should never hold more than one chunk of it — but
-/// [`StreamReader::read_to_end`] is there for the common case where the payload
+/// [`StreamReader::read_to_end_capped`] is there for the common case where the payload
 /// is merely too big for a frame, not too big for memory.
 pub struct StreamReader {
     stream: Arc<Inbound>,
