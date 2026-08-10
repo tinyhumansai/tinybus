@@ -136,6 +136,15 @@ enum ModulesCommand {
         #[arg(long, default_value = "{}")]
         config: String,
     },
+    /// Generate a checksum.toml for release assets.
+    Checksum {
+        /// Release assets to hash. Repeat this option for multiple assets.
+        #[arg(long = "path", required = true)]
+        paths: Vec<PathBuf>,
+        /// Write the manifest to a file instead of stdout.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
     /// Stop a loaded module without unloading its library.
     Stop {
         /// Stable module name.
@@ -296,6 +305,13 @@ async fn run(cli: Cli) -> Result<()> {
 }
 
 async fn run_modules(address: &Path, timeout: Duration, command: ModulesCommand) -> Result<()> {
+    if let ModulesCommand::Checksum {
+        ref paths,
+        ref output,
+    } = command
+    {
+        return write_checksum_manifest(paths, output.as_deref());
+    }
     let connection = connect(address).await?;
     let bus = connection
         .proxy(tinybus::BUS_NAME, tinybus::BUS_PATH, tinybus::BUS_INTERFACE)?
@@ -370,6 +386,9 @@ async fn run_modules(address: &Path, timeout: Duration, command: ModulesCommand)
             println!("{}", serde_json::to_string_pretty(&module)?);
             Ok(())
         }
+        ModulesCommand::Checksum { paths, output } => {
+            write_checksum_manifest(&paths, output.as_deref())
+        }
         ModulesCommand::Stop { name, deadline_ms } => {
             if Duration::from_millis(deadline_ms) >= timeout {
                 return Err(Error::failed(
@@ -410,6 +429,24 @@ async fn run_modules(address: &Path, timeout: Duration, command: ModulesCommand)
             Ok(())
         }
     }
+}
+
+fn write_checksum_manifest(paths: &[PathBuf], output: Option<&Path>) -> Result<()> {
+    let mut manifest = String::from("[sha256]\n");
+    for path in paths {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| Error::failed("checksum path has no safe filename"))?;
+        let digest = tinybus::module::sha256_file(path)?;
+        manifest.push_str(&format!("{name:?} = \"{digest}\"\n"));
+    }
+    if let Some(output) = output {
+        std::fs::write(output, manifest)?;
+    } else {
+        print!("{manifest}");
+    }
+    Ok(())
 }
 
 async fn connect(address: &Path) -> Result<Connection> {

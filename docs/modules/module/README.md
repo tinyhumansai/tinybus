@@ -56,7 +56,7 @@ the platform system directory. `tinybus modules scan --path <dir> --dry-run`
 performs admission and dependency checks without initializing or attaching.
 
 GitHub releases are loaded with `ModuleHost::load_github_release`. The release
-URL must identify a tag, the selected asset must be a `.tar.gz` archive, and
+URL must identify a tag, the selected asset must be a `.tar.gz` or `.zip` archive, and
 the release must publish `checksum.toml` or `checksum.json`. The manifest uses
 this shape:
 
@@ -67,8 +67,20 @@ this shape:
 
 The host-provided digest is checked against the release manifest, then the
 downloaded archive is checked before extraction. The extracted archive must
-contain exactly one platform library. `examples/create-release-assets.sh`
-shows the packaging convention used by the example module.
+contain exactly one platform library matching the host (`.so`, `.dylib`, or
+`.dll`). `examples/create-release-assets.sh` and
+`examples/create-release-assets.ps1` show the Linux/macOS and Windows
+packaging conventions used by the example module.
+
+The CLI can generate the manifest consumed by the loader without external
+hashing tools:
+
+```sh
+tinybus modules checksum \
+  --path module-linux-x86_64.tar.gz \
+  --path module-macos-arm64.tar.gz \
+  --output checksum.toml
+```
 
 Refusing one artifact does not prevent the host from admitting other artifacts
 in the same directory. The refused artifact's error contains only a sanitized

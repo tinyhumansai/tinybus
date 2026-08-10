@@ -119,8 +119,9 @@ tinybus modules load-github \
 ```
 
 The URL must identify a tag, not an arbitrary host or GitHub page. The asset
-must be a release archive; `.tar.gz` is the normal format. The archive must
-contain exactly one platform library (`.so`, `.dylib`, or `.dll`).
+must be a release archive; `.tar.gz` is normal on Linux/macOS and `.zip` is
+normal on Windows. The archive must contain exactly one platform library
+(`.so`, `.dylib`, or `.dll`) matching the host target.
 
 ## Release checksums
 
@@ -147,11 +148,21 @@ the archive, hashes the bytes, compares them with the manifest, extracts only
 after verification, and loads the one discovered platform library. A missing,
 malformed, or mismatched checksum refuses the module.
 
-For the repository's Linux example modules, use
-`crates/tinybus/examples/create-release-assets.sh` after a release build. The
-`github_module_host` example demonstrates the minimal host call. Release
-assets should be reproducible and named with the target/platform so a host
-never has to guess which binary to load.
+For Linux/macOS example modules, use
+`crates/tinybus/examples/create-release-assets.sh`; on Windows use
+`create-release-assets.ps1`. The `github_module_host` example demonstrates the
+minimal host call. Release assets should be reproducible and named with the
+target/platform so a host never has to guess which binary to load.
+
+Prefer the portable CLI checksum generator when preparing or testing a
+release:
+
+```sh
+tinybus modules checksum --path module-linux-x86_64.tar.gz --output checksum.toml
+```
+
+It emits the same quoted-filename TOML consumed by the GitHub loader; omit
+`--output` to print it for a test assertion or another packaging step.
 
 ## Module safety rules
 
