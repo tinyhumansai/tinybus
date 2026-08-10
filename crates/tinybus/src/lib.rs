@@ -110,11 +110,10 @@ pub use tinybus_macros::interface;
 /// `GetId` method so a peer can tell which broker it is attached to.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// The wire-protocol version.
+/// The wire-format revision, reserved for a change an older peer cannot parse.
 ///
-/// Bumped only for a change that an older peer cannot parse. The broker
-/// refuses a peer whose `Hello` carries a different major, because half-parsed
-/// routing is worse than a clear rejection at connect time.
+/// Interface additions do not bump this value. It is published for manifests
+/// and diagnostics; v1 does not put it in the `Hello` handshake.
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// The well-known name of the broker's own service.

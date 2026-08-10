@@ -98,16 +98,31 @@ interface `ai.tinyhumans.tinybus.Bus`.
 | `RequestName` | `[name]` | `true`, or an error if taken |
 | `ReleaseName` | `[name]` | `true` |
 | `ListNames` | `[]` | every owned name, unique names included |
+| `Announce` | `[manifest]` | `true`; records this peer's interface versions |
+| `GetManifest` | `[name]` | that peer's manifest, or `null` |
+| `ListPeers` | `[]` | unique names, owned names, and peer manifests |
 | `GetNameOwner` | `[name]` | the owner's unique name, or `null` |
 | `AddMatch` | `[rule]` | `null` |
 | `RemoveMatch` | `[rule]` | `null` |
+| `ListModules` | `[]` | every module known to the embedded host |
+| `GetModule` | `[name]` | module identity, ABI facts and state, or `null` |
+| `GetModuleManifest` | `[name]` | the declared module manifest, or `null` |
+| `LoadModule` | `[path]` | the newly loaded module record |
+| `StopModule` | `[name, deadline_ms]` | the stopped module record |
+| `EnableModule` | `[name, on]` | the updated module record |
+| `RescanModules` | `[]` | modules loaded from configured search paths |
 
 `ai.tinyhumans.tinybus.Bus` is reserved; `RequestName` for it always fails. So
 does `RequestName` for a unique name.
 
-The bus emits one signal, `NameOwnerChanged`, with body
+The bus always emits `NameOwnerChanged`, with body
 `[name, old_owner, new_owner]`, either owner being `null`. This is how a peer
 learns a service died without polling it.
+
+An embedded module host also exposes the additive module members above. A
+broker without one returns `UnknownMethod`; the wire protocol version remains
+1 because old peers can still parse every message. Module state changes are
+observable through name ownership changes when a module attaches or stops.
 
 ## Match rules
 
