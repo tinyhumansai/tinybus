@@ -478,6 +478,22 @@ mod tests {
         let client = Connection::connect(bus.connect().await.unwrap())
             .await
             .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if client
+                    .list_names()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|name| name.as_str() == "ai.tinyhumans.openhuman.Clock")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         let clock = client
             .proxy(
                 "ai.tinyhumans.openhuman.Clock",
