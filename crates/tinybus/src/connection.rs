@@ -1063,6 +1063,7 @@ mod tests {
         assert_eq!(connection.peers().await.unwrap().len(), 1);
     }
 
+    #[cfg(feature = "modules")]
     #[tokio::test]
     async fn module_management_helpers_forward_their_requests_to_the_broker() {
         let transport = MemoryBus::new();
