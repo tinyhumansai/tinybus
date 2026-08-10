@@ -324,13 +324,16 @@ impl Transport for ModuleTransport {
             return Ok(None);
         };
         let message: Message = serde_json::from_slice(&bytes)?;
-        if matches!(message.header.kind, MessageKind::MethodReturn | MessageKind::Error) {
-            let _ = self
-                .context
-                .inflight
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                    count.checked_sub(1)
-                });
+        if matches!(
+            message.header.kind,
+            MessageKind::MethodReturn | MessageKind::Error
+        ) {
+            let _ =
+                self.context
+                    .inflight
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                        count.checked_sub(1)
+                    });
         }
         Ok(Some(message))
     }

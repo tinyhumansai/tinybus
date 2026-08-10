@@ -1205,7 +1205,8 @@ mod tests {
                     continue;
                 };
                 if message.header.kind == crate::message::MessageKind::MethodCall {
-                    if message.header.member.as_ref().map(|member| member.as_str()) == Some("Hang") {
+                    if message.header.member.as_ref().map(|member| member.as_str()) == Some("Hang")
+                    {
                         continue;
                     }
                     let body = if message.header.member.as_ref().map(|member| member.as_str())
@@ -1524,7 +1525,9 @@ mod tests {
             )
         }
         .unwrap();
-        let connection = Connection::connect(bus.connect().await.unwrap()).await.unwrap();
+        let connection = Connection::connect(bus.connect().await.unwrap())
+            .await
+            .unwrap();
         let proxy = connection
             .proxy(
                 "ai.tinyhumans.module.Clock",
@@ -1561,7 +1564,9 @@ mod tests {
             )
         }
         .unwrap();
-        let connection = Connection::connect(bus.connect().await.unwrap()).await.unwrap();
+        let connection = Connection::connect(bus.connect().await.unwrap())
+            .await
+            .unwrap();
         let proxy = connection
             .proxy(
                 "ai.tinyhumans.module.Clock",
@@ -1594,7 +1599,9 @@ mod tests {
             }
             .unwrap();
         }
-        let connection = Connection::connect(bus.connect().await.unwrap()).await.unwrap();
+        let connection = Connection::connect(bus.connect().await.unwrap())
+            .await
+            .unwrap();
         let proxy = |surface_name: &str| {
             connection
                 .proxy(
