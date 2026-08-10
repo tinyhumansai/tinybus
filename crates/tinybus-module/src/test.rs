@@ -344,4 +344,3 @@
         assert_eq!(unsafe { (out.shutdown)(out.module_ctx, 10) }, TB_OK);
         assert_eq!(unsafe { (out.shutdown)(out.module_ctx, 10) }, TB_CLOSED);
     }
-}
