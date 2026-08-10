@@ -231,9 +231,12 @@ impl Broker {
                 self.announce_name_change(change).await;
             }
         }
+        #[cfg(feature = "modules")]
         for module_state in module_states {
             self.announce_module_state(module_state).await;
         }
+        #[cfg(not(feature = "modules"))]
+        let _ = module_states;
         Ok(())
     }
 
