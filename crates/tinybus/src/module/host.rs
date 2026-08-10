@@ -1823,6 +1823,28 @@ mod tests {
         let error = host.load_file(path).unwrap_err();
         assert!(error.to_string().contains("target triple"), "{error}");
     }
+
+    #[tokio::test]
+    #[ignore = "requires TINYBUS_TEST_MODULE and TINYBUS_TEST_WRONG_TARGET"]
+    async fn one_refused_module_does_not_stop_the_others_in_the_directory_from_loading() {
+        let valid = PathBuf::from(
+            std::env::var_os("TINYBUS_TEST_MODULE").expect("TINYBUS_TEST_MODULE"),
+        );
+        let invalid = PathBuf::from(
+            std::env::var_os("TINYBUS_TEST_WRONG_TARGET").expect("TINYBUS_TEST_WRONG_TARGET"),
+        );
+        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let valid_copy = directory.path().join(valid.file_name().unwrap());
+        let invalid_copy = directory.path().join(invalid.file_name().unwrap());
+        std::fs::copy(valid, valid_copy).unwrap();
+        std::fs::copy(invalid, invalid_copy).unwrap();
+
+        let host = ModuleHost::new(Broker::new());
+        let outcomes = host.load_dir(directory.path()).unwrap();
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+        assert_eq!(outcomes.iter().filter(|outcome| outcome.is_err()).count(), 1);
+    }
 }
 
 #[cfg(windows)]
