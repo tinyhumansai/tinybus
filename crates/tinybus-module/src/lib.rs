@@ -65,7 +65,7 @@ pub fn manifest_slice(
             schema: MANIFEST_SCHEMA,
             module: ModuleIdentity {
                 name: name.to_string(),
-                version: package_version,
+                version: package_version.clone(),
                 description: String::new(),
                 homepage: None,
                 license: String::new(),

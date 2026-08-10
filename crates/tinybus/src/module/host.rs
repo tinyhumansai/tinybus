@@ -16,7 +16,7 @@ use crate::module::loader::{self, LoadedArtifact};
 use crate::module::manifest::{
     MANIFEST_SCHEMA, ModuleIdentity, ModuleManifest, PanicPolicy,
 };
-use crate::name::{BusName, InterfaceName, ObjectPath};
+use crate::name::{BusName, ObjectPath};
 use crate::module::transport::ModuleTransport;
 use crate::ports::Transport;
 use crate::version::Version;
