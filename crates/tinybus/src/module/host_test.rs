@@ -330,6 +330,12 @@ async fn stopping_one_module_leaves_the_other_serving() {
         .stop_module("one", Duration::from_secs(1))
         .await
         .unwrap();
+    let enable_error = connection.enable_module("one", true).await.unwrap_err();
+    assert_eq!(
+        enable_error.wire_name(),
+        "ai.tinyhumans.tinybus.Error.ModuleUnavailable"
+    );
+    assert_eq!(host.list()[0].state, ModuleState::Stopped);
     assert_eq!(
         proxy("Two")
             .call::<String>("Echo", ("still serving",))
