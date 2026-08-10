@@ -14,6 +14,8 @@ pub(crate) mod host;
 #[cfg(feature = "modules")]
 mod loader;
 #[cfg(feature = "modules")]
+mod resolve;
+#[cfg(feature = "modules")]
 mod transport;
 
 #[cfg(feature = "modules")]
