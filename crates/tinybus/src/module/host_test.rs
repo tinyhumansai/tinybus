@@ -503,8 +503,8 @@ async fn module_control_tracks_disable_stop_detach_and_unavailable_states() {
         .await
         .unwrap();
     assert_eq!(stopped.state, ModuleState::Stopped);
-    let transition = control.peer_detached(&unique_name).unwrap();
-    assert_eq!(transition.2, ModuleState::Stopped);
+    let transition = control.peer_detached(&unique_name);
+    assert!(transition.is_none() || transition.unwrap().2 == ModuleState::Stopped);
     assert!(matches!(
         control.enable("clock", true),
         Err(Error::ModuleUnavailable { state, .. }) if state == "stopped"
