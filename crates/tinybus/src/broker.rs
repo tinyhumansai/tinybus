@@ -343,6 +343,17 @@ impl Broker {
             Ok(control) => control,
             Err(error) => return Some((Err(error), Vec::new())),
         };
+        if member.as_str() == "StopModule" {
+            let parsed = parse_args::<(String, u64)>(member, body);
+            let result = match parsed {
+                Ok((name, deadline_ms)) => control
+                    .stop(&name, Duration::from_millis(deadline_ms))
+                    .await
+                    .and_then(|info| serde_json::to_value(info).map_err(Error::from)),
+                Err(error) => Err(error),
+            };
+            return Some((result, Vec::new()));
+        }
 
         let outcome = (|| -> Result<(Value, Vec<Value>)> {
             match member.as_str() {
@@ -394,10 +405,7 @@ impl Broker {
                     module_state_body(transition).into_iter().collect(),
                 ))
             }
-            "StopModule" => {
-                let (name, deadline_ms): (String, u64) = parse_args(member, body)?;
-                let info = futures_lite_placeholder();
-            }
+            "StopModule" => unreachable!("stop is handled asynchronously above"),
             "EnableModule" => {
                 let (name, enabled): (String, bool) = parse_args(member, body)?;
                 let (info, transition) = control.enable(&name, enabled)?;
