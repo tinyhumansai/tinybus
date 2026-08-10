@@ -34,14 +34,17 @@ jobs:
       - name: Slim build
         run: cargo check --locked --no-default-features
 
+      - name: Module loader without sockets
+        run: cargo check --locked --no-default-features --features modules
+
       - name: Docs
         run: cargo doc --locked --all-features --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
 
   # The bus is meant to be embeddable on every platform OpenHuman ships on. The
-  # Unix transport is Unix-only by construction, so Windows builds the slim
-  # configuration until the named-pipe backend lands (ROADMAP.md, M6).
+  # The socket adapter remains Unix-only, while the in-process module transport
+  # and dynamic loader are portable and run on both non-Linux targets.
   portability:
     strategy:
       fail-fast: false
@@ -56,3 +59,31 @@ jobs:
         run: cargo check --locked --no-default-features --features macros
       - name: Test
         run: cargo test --locked --no-default-features --features macros
+      - name: Test modules without sockets
+        run: cargo test --locked --no-default-features --features modules,macros
+
+  modules:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build example module
+        run: cargo build --locked --example module_clock --features modules,macros
+      - name: Exercise the real loader (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          module=$(find target/debug/examples -maxdepth 1 -type f \( -name 'libmodule_clock.so' -o -name 'libmodule_clock.dylib' \) -print -quit)
+          TINYBUS_TEST_MODULE="$PWD/$module" cargo test --locked --features modules,macros a_real_cdylib_loads_and_serves_a_call -- --ignored
+      - name: Exercise the real loader (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $module = (Get-ChildItem target/debug/examples/module_clock.dll | Select-Object -First 1).FullName
+          $env:TINYBUS_TEST_MODULE = $module
+          cargo test --locked --features modules,macros a_real_cdylib_loads_and_serves_a_call -- --ignored
