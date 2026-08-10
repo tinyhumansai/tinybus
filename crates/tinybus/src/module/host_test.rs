@@ -97,6 +97,13 @@ unsafe extern "C" fn failing_init(
     crate::module::abi::TB_BAD_ARGUMENT
 }
 
+unsafe extern "C" fn invalid_vtable_init(
+    _: *const crate::module::abi::TbHostVtable,
+    _: *mut TbModuleVtable,
+) -> i32 {
+    TB_OK
+}
+
 unsafe extern "C" fn init_that_must_not_run(
     _: *const crate::module::abi::TbHostVtable,
     _: *mut TbModuleVtable,
@@ -518,6 +525,74 @@ async fn module_control_tracks_disable_stop_detach_and_unavailable_states() {
         Err(Error::MethodFailed { .. })
     ));
     broker_task.abort();
+}
+
+#[test]
+fn admission_rejects_duplicate_names_bad_initializers_collisions_and_missing_dependencies() {
+    let host = ModuleHost::new(Broker::new());
+    let descriptor = TbAbiDescriptor::current("clock", "0.1.0");
+    unsafe {
+        host.attach_raw("clock.so", descriptor, manifest(), lazy_echo_init)
+    }
+    .unwrap();
+    assert!(unsafe {
+        host.attach_raw(
+            "again.so",
+            TbAbiDescriptor::current("clock", "0.1.0"),
+            manifest(),
+            lazy_echo_init,
+        )
+    }
+    .unwrap_err()
+    .to_string()
+    .contains("already loaded"));
+
+    let failed = unsafe {
+        host.attach_raw(
+            "failed.so",
+            TbAbiDescriptor::current("failed", "0.1.0"),
+            named_manifest("failed", "Failed"),
+            failing_init,
+        )
+    }
+    .unwrap_err();
+    assert!(failed.to_string().contains("initialization failed"));
+    let invalid = unsafe {
+        host.attach_raw(
+            "invalid.so",
+            TbAbiDescriptor::current("invalid", "0.1.0"),
+            named_manifest("invalid", "Invalid"),
+            invalid_vtable_init,
+        )
+    }
+    .unwrap_err();
+    assert!(invalid.to_string().contains("invalid vtable"));
+
+    let collision = unsafe {
+        host.attach_raw(
+            "other.so",
+            TbAbiDescriptor::current("other", "0.1.0"),
+            manifest(),
+            lazy_echo_init,
+        )
+    }
+    .unwrap_err();
+    assert!(collision.to_string().contains("already owned"));
+
+    let mut dependency = named_manifest("dependent", "Dependent");
+    dependency.requires.push(crate::module::manifest::Dependency {
+        interface: crate::version::InterfaceVersion::consumed(
+            "ai.tinyhumans.module.Missing".parse().unwrap(),
+            Version::new(1, 0, 0),
+        ),
+        optional: false,
+        reason: String::new(),
+    });
+    assert!(host
+        .ensure_dependencies(&dependency, Path::new("dependent.so"))
+        .unwrap_err()
+        .to_string()
+        .contains("no provider"));
 }
 
 #[test]
