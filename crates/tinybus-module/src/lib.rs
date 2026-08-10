@@ -641,13 +641,13 @@ mod tests {
     static START_OUTGOING: OnceLock<StdMutex<Option<SyncSender<Vec<u8>>>>> = OnceLock::new();
     // These tests share host callbacks and the module's process-global runtime
     // capture, so overlapping tests would make their assertions order-dependent.
-    static HOST_STATE_LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+    static HOST_STATE_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
-    fn host_state_guard() -> std::sync::MutexGuard<'static, ()> {
+    async fn host_state_guard() -> tokio::sync::MutexGuard<'static, ()> {
         HOST_STATE_LOCK
-            .get_or_init(|| StdMutex::new(()))
+            .get_or_init(|| tokio::sync::Mutex::new(()))
             .lock()
-            .expect("host state lock")
+            .await
     }
 
     unsafe extern "C" fn host_send(_: *mut c_void, _: *const u8, _: usize) -> i32 {
@@ -834,7 +834,7 @@ mod tests {
 
     #[tokio::test]
     async fn module_transport_maps_host_results_and_wakes_after_receiving() {
-        let _host_state = host_state_guard();
+        let _host_state = host_state_guard().await;
         let (sender, receiver) = mpsc::channel(2);
         let transport = ModuleTransport {
             host: HostCalls(host(&[])),
@@ -874,9 +874,9 @@ mod tests {
         assert_eq!(transport.describe(), "module");
     }
 
-    #[test]
-    fn host_calls_and_subscriber_forward_logs_at_their_original_level() {
-        let _host_state = host_state_guard();
+    #[tokio::test]
+    async fn host_calls_and_subscriber_forward_logs_at_their_original_level() {
+        let _host_state = host_state_guard().await;
         let calls = HostCalls(host(&[]));
         HOST_SEND_CODE.store(TB_OK, Ordering::Release);
         HOST_WAKES.store(0, Ordering::Release);
@@ -917,9 +917,9 @@ mod tests {
         assert_eq!(HOST_LOGS.load(Ordering::Acquire), 5);
     }
 
-    #[test]
-    fn start_functions_reject_invalid_host_and_config_before_spawning_a_runtime() {
-        let _host_state = host_state_guard();
+    #[tokio::test]
+    async fn start_functions_reject_invalid_host_and_config_before_spawning_a_runtime() {
+        let _host_state = host_state_guard().await;
         let mut out = TbModuleVtable::default();
         assert_eq!(
             unsafe { start_module(std::ptr::null(), &mut out, 1, true, |_| async { Ok(()) }) },
@@ -949,7 +949,7 @@ mod tests {
 
     #[test]
     fn configured_startup_builds_a_runtime_announces_ready_and_shuts_down() {
-        let _host_state = host_state_guard();
+        let _host_state = host_state_guard().await;
         HOST_READY.store(false, Ordering::Release);
         HOST_SEND_CODE.store(TB_OK, Ordering::Release);
         HOST_FAULTED.store(false, Ordering::Release);
