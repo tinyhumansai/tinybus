@@ -105,18 +105,13 @@ impl LoadedModule {
             info.state = ModuleState::Faulted {
                 reason: "module reported an unrecoverable fault".to_string(),
             };
-        } else if self.transport.is_ready()
+        } else if (self.transport.is_ready()
             && matches!(
                 info.state,
                 ModuleState::Resolved | ModuleState::Initializing
-            )
+            ))
+            || matches!(info.state, ModuleState::Ready | ModuleState::Serving)
         {
-            info.state = if self.transport.inflight() == 0 {
-                ModuleState::Ready
-            } else {
-                ModuleState::Serving
-            };
-        } else if matches!(info.state, ModuleState::Ready | ModuleState::Serving) {
             info.state = if self.transport.inflight() == 0 {
                 ModuleState::Ready
             } else {
