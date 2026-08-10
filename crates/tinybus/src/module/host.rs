@@ -1150,9 +1150,9 @@ mod tests {
     async fn a_lazy_module_initializes_on_the_first_call_and_two_racing_callers_initialize_it_once()
     {
         LAZY_INIT_COUNT.store(0, Ordering::Release);
-        let (listener, client) = MemoryBus::new(8);
+        let bus = MemoryBus::new();
         let broker = Broker::new();
-        let broker_task = broker.spawn(listener);
+        let broker_task = broker.spawn(bus.clone());
         let host = ModuleHost::new(broker);
         let mut lazy_manifest = manifest();
         lazy_manifest.lazy_init = true;
@@ -1168,7 +1168,7 @@ mod tests {
         assert_eq!(info.state, ModuleState::Resolved);
         assert_eq!(LAZY_INIT_COUNT.load(Ordering::Acquire), 0);
 
-        let connection = Connection::connect(Box::new(client)).await.unwrap();
+        let connection = Connection::connect(bus.connect().await.unwrap()).await.unwrap();
         let proxy = connection
             .proxy(
                 "ai.tinyhumans.module.Clock",
@@ -1176,8 +1176,8 @@ mod tests {
                 "ai.tinyhumans.module.Clock",
             )
             .unwrap();
-        let first = proxy.call::<_, String>("Echo", ("first",));
-        let second = proxy.call::<_, String>("Echo", ("second",));
+        let first = proxy.call::<String>("Echo", ("first",));
+        let second = proxy.call::<String>("Echo", ("second",));
         let (first, second) = tokio::join!(first, second);
         assert_eq!(first.unwrap(), "first");
         assert_eq!(second.unwrap(), "second");
