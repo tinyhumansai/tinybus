@@ -1611,10 +1611,10 @@ mod tests {
                 )
                 .unwrap()
         };
-        let wedged = proxy("One")
-            .with_timeout(Duration::from_millis(30))
-            .call::<()>("Hang", ());
-        let healthy = proxy("Two").call::<String>("Echo", ("healthy",));
+        let wedged_proxy = proxy("One").with_timeout(Duration::from_millis(30));
+        let healthy_proxy = proxy("Two");
+        let wedged = wedged_proxy.call::<()>("Hang", ());
+        let healthy = healthy_proxy.call::<String>("Echo", ("healthy",));
         let (wedged, healthy) = tokio::join!(wedged, healthy);
         assert!(matches!(wedged.unwrap_err(), Error::Timeout { .. }));
         assert_eq!(healthy.unwrap(), "healthy");
