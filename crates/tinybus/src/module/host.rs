@@ -810,7 +810,10 @@ impl ModuleControl for ModuleHostInner {
             .find(|module| module.info.name == name)
             .ok_or_else(|| Error::failed("module is not loaded"))?;
         let old = module.snapshot().state;
-        if matches!(old, ModuleState::Faulted { .. } | ModuleState::Failed { .. }) {
+        if matches!(
+            old,
+            ModuleState::Faulted { .. } | ModuleState::Failed { .. }
+        ) {
             return Err(Error::ModuleUnavailable {
                 module: module.info.name.clone(),
                 state: state_name(&old).to_string(),
