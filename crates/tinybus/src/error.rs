@@ -337,6 +337,15 @@ pub fn redact_values(message: &str) -> String {
     out
 }
 
+/// Keep only log-safe descriptor characters and cap their length.
+pub(crate) fn sanitize_untrusted(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-'))
+        .take(32)
+        .collect()
+}
+
 /// The crate-wide result alias.
 pub type Result<T> = std::result::Result<T, Error>;
 
