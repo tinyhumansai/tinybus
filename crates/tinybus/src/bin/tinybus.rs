@@ -80,6 +80,57 @@ enum Command {
 
     /// Check that the bus is reachable and report what is on it.
     Doctor,
+
+    /// Inspect and control trusted in-process modules.
+    Modules {
+        #[command(subcommand)]
+        command: ModulesCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum ModulesCommand {
+    /// List discovered modules.
+    List {
+        /// Keep only modules in this state.
+        #[arg(long)]
+        state: Option<String>,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one module and its manifest.
+    Show {
+        /// Stable module name.
+        name: String,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Ask the running host to rescan its configured module directories.
+    Scan,
+    /// Load one newly installed dynamic library.
+    Load {
+        /// Path to the `.so`, `.dylib`, or `.dll`.
+        path: PathBuf,
+    },
+    /// Stop a loaded module without unloading its library.
+    Stop {
+        /// Stable module name.
+        name: String,
+    },
+    /// Enable a known module for future scans.
+    Enable {
+        /// Stable module name.
+        name: String,
+    },
+    /// Disable a known module for future scans.
+    Disable {
+        /// Stable module name.
+        name: String,
+    },
+    /// Report stopped modules and toolchain mismatches.
+    Doctor,
 }
 
 fn main() -> std::process::ExitCode {
@@ -211,6 +262,103 @@ async fn run(cli: Cli) -> Result<()> {
             println!("services  {}", well_known.len());
             for name in well_known {
                 println!("          {name}");
+            }
+            Ok(())
+        }
+
+        Command::Modules { command } => run_modules(&address, timeout, command).await,
+    }
+}
+
+async fn run_modules(
+    address: &PathBuf,
+    timeout: Duration,
+    command: ModulesCommand,
+) -> Result<()> {
+    let connection = connect(address).await?;
+    let bus = connection
+        .proxy(tinybus::BUS_NAME, tinybus::BUS_PATH, tinybus::BUS_INTERFACE)?
+        .with_timeout(timeout);
+
+    match command {
+        ModulesCommand::List { state, json } => {
+            let mut modules: Vec<serde_json::Value> = bus.call("ListModules", ()).await?;
+            if let Some(state) = state {
+                modules.retain(|module| module["state"].as_str() == Some(&state));
+            }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&modules)?);
+            } else {
+                for module in modules {
+                    println!(
+                        "{:<24} {:<10} {}",
+                        module["name"].as_str().unwrap_or("?"),
+                        module["state"].as_str().unwrap_or("?"),
+                        module["version"].as_str().unwrap_or("?")
+                    );
+                }
+            }
+            Ok(())
+        }
+        ModulesCommand::Show { name, json } => {
+            let module: Option<serde_json::Value> = bus.call("GetModule", (name,)).await?;
+            let module = module.ok_or_else(|| Error::failed("module is not known"))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&module)?);
+            } else {
+                println!("name      {}", module["name"].as_str().unwrap_or("?"));
+                println!("version   {}", module["version"].as_str().unwrap_or("?"));
+                println!("state     {}", module["state"].as_str().unwrap_or("?"));
+                println!("artifact  {}", module["file"].as_str().unwrap_or("?"));
+                println!("rustc     {}", module["rustc_version"].as_str().unwrap_or("?"));
+                println!(
+                    "manifest  {}",
+                    serde_json::to_string(&module["manifest"])?
+                );
+            }
+            Ok(())
+        }
+        ModulesCommand::Scan => {
+            let modules: Vec<serde_json::Value> = bus.call("RescanModules", ()).await?;
+            println!("{}", serde_json::to_string_pretty(&modules)?);
+            Ok(())
+        }
+        ModulesCommand::Load { path } => {
+            let module: serde_json::Value = bus
+                .call("LoadModule", (path.to_string_lossy().to_string(),))
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&module)?);
+            Ok(())
+        }
+        ModulesCommand::Stop { name } => {
+            let module: serde_json::Value = bus
+                .call("StopModule", (name, timeout.as_millis() as u64))
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&module)?);
+            Ok(())
+        }
+        ModulesCommand::Enable { name } | ModulesCommand::Disable { name } => {
+            let enabled = matches!(command, ModulesCommand::Enable { .. });
+            let module: serde_json::Value = bus.call("EnableModule", (name, enabled)).await?;
+            println!("{}", serde_json::to_string_pretty(&module)?);
+            Ok(())
+        }
+        ModulesCommand::Doctor => {
+            let modules: Vec<serde_json::Value> = bus.call("ListModules", ()).await?;
+            let mut problems = 0;
+            for module in modules {
+                let state = module["state"].as_str().unwrap_or("unknown");
+                let mismatch = module["rustc_mismatch"].as_bool().unwrap_or(false);
+                if state != "loaded" || mismatch {
+                    problems += 1;
+                    println!(
+                        "{}: state={state}, rustc_mismatch={mismatch}",
+                        module["name"].as_str().unwrap_or("?")
+                    );
+                }
+            }
+            if problems == 0 {
+                println!("modules are healthy");
             }
             Ok(())
         }
