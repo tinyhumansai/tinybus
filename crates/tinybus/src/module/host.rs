@@ -98,6 +98,10 @@ impl LoadedModule {
             info.state = ModuleState::Faulted {
                 reason: "module reported an unrecoverable fault".to_string(),
             };
+        } else if self.transport.is_ready()
+            && matches!(info.state, ModuleState::Resolved | ModuleState::Initializing)
+        {
+            info.state = ModuleState::Ready;
         }
         info
     }
@@ -423,7 +427,7 @@ impl ModuleHost {
         artifact: LoadedArtifact,
         config: serde_json::Value,
     ) -> Result<ModuleInfo> {
-        let admitted = self.validate(path, &artifact.descriptor, &artifact.manifest)?;
+        let mut admitted = self.validate(path, &artifact.descriptor, &artifact.manifest)?;
         if self
             .inner
             .loaded
@@ -438,18 +442,38 @@ impl ModuleHost {
         let config = serde_json::to_vec(&config)
             .map_err(|_| Error::module_refused(path, "module configuration is invalid"))?;
         let (transport, host_vtable) = ModuleTransport::new(admitted.name.clone(), config);
-        let mut module_vtable = TbModuleVtable::default();
-        let code = unsafe { (artifact.init)(&host_vtable, &mut module_vtable) };
-        transport.clear_config();
-        if code != TB_OK {
-            return Err(Error::module_refused(path, "module initialization failed"));
+        if artifact.manifest.lazy_init {
+            admitted.state = ModuleState::Resolved;
+            transport.defer_initialize(artifact.init, host_vtable);
+        } else {
+            admitted.state = ModuleState::Initializing;
+            let mut module_vtable = TbModuleVtable::default();
+            let code = unsafe { (artifact.init)(&host_vtable, &mut module_vtable) };
+            transport.clear_config();
+            if code != TB_OK {
+                return Err(Error::module_refused(path, "module initialization failed"));
+            }
+            transport
+                .initialize(module_vtable)
+                .map_err(|_| Error::module_refused(path, "module returned an invalid vtable"))?;
         }
-        transport
-            .initialize(module_vtable)
-            .map_err(|_| Error::module_refused(path, "module returned an invalid vtable"))?;
 
         let transport_for_broker: Arc<dyn Transport> = transport.clone();
-        self.inner.broker.attach(transport_for_broker);
+        let unique = self.inner.broker.attach(transport_for_broker);
+        if artifact.manifest.lazy_init {
+            let change = self
+                .inner
+                .broker
+                .reserve_module_name(&unique, admitted.manifest.bus_name.clone())?;
+            let broker = self.inner.broker.clone();
+            let ready_transport = transport.clone();
+            tokio::spawn(async move {
+                ready_transport.wait_ready().await;
+                if ready_transport.is_ready() {
+                    broker.announce_name_change(change).await;
+                }
+            });
+        }
         if !self.inner.warned.swap(true, Ordering::AcqRel) {
             tracing::warn!(
                 modules = 1,
@@ -555,7 +579,7 @@ impl ModuleHost {
             name,
             version,
             file: safe_file_name(path),
-            state: ModuleState::Ready,
+            state: ModuleState::Resolved,
             manifest: manifest.clone(),
             rustc_version: rustc,
             rustc_mismatch,
