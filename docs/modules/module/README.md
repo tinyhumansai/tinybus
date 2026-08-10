@@ -57,5 +57,13 @@ performs admission and dependency checks without initializing or attaching.
 One refusal is returned independently and does not stop other artifacts in a
 directory. Errors contain only a sanitized basename and a fixed reason.
 
+Lifecycle states are `discovered`, `rejected`, `unresolved`, `resolved`,
+`initializing`, `ready`, `serving`, `faulted`, `failed`, `stopped`, and
+`disabled`. Rejected, faulted, failed, stopped, and disabled modules answer a
+call immediately with `ModuleUnavailable`; they are never retried in the same
+process. `ready` and `serving` reflect whether calls are in flight and do not
+emit per-call state signals. Every other edge emits `ModuleStateChanged` after
+any corresponding `NameOwnerChanged` announcement.
+
 See [abi.md](abi.md) for the binary contract and
 [the protocol](../../protocol.md) for the bus control members.
