@@ -638,6 +638,152 @@ impl Connection {
             .expect("panic handler lock") = Some(handler);
     }
 
+    /// What this connection will accept from peers sending it bulk streams.
+    pub fn stream_limits(&self) -> StreamLimits {
+        self.inner.streams.limits()
+    }
+
+    /// Change what this connection accepts from peers sending it bulk streams.
+    ///
+    /// Takes effect on the next `Open`; streams already running keep the window
+    /// they were opened with, because shrinking a window under a sender that is
+    /// mid-transfer would abort a transfer that was within the rules when it
+    /// started.
+    pub fn set_stream_limits(&self, limits: StreamLimits) {
+        self.inner.streams.set_limits(limits);
+    }
+
+    /// Open a bulk stream to `destination` and get the writer for it.
+    ///
+    /// The usual shape is: open, put [`StreamWriter::stream_ref`] in a method
+    /// call, issue the call, and write the payload *while the call is
+    /// outstanding*. The receiver's window is a few megabytes, so writing a
+    /// large payload before the receiving method has been dispatched stalls
+    /// against a reader that does not exist yet.
+    /// [`Connection::call_with_stream`] does the interleaving for the common
+    /// case.
+    pub async fn open_stream(
+        &self,
+        destination: &BusName,
+        descriptor: StreamDescriptor,
+    ) -> Result<StreamWriter> {
+        self.open_stream_with_timeout(destination, descriptor, DEFAULT_TIMEOUT)
+            .await
+    }
+
+    /// [`Connection::open_stream`] with an explicit deadline for every chunk.
+    ///
+    /// The deadline applies per chunk, not to the transfer: it is how long this
+    /// peer will wait for the receiver to take *one* chunk. A slow consumer of
+    /// a large payload is normal; a consumer that has stopped consuming is not.
+    pub async fn open_stream_with_timeout(
+        &self,
+        destination: &BusName,
+        descriptor: StreamDescriptor,
+        timeout: Duration,
+    ) -> Result<StreamWriter> {
+        let id: String = serde_json::from_value(
+            self.call_stream_member(
+                destination,
+                "Open",
+                serde_json::json!([descriptor]),
+                timeout,
+            )
+            .await?,
+        )?;
+        Ok(StreamWriter::new(
+            self.clone(),
+            destination.clone(),
+            id,
+            descriptor,
+            timeout,
+        ))
+    }
+
+    /// Call a method whose payload is too big for a frame, streaming `bytes`
+    /// alongside it.
+    ///
+    /// `args` is built from the [`StreamRef`] the receiver should read, so the
+    /// caller decides where in its own argument list the handle goes. The call
+    /// and the payload are in flight together, which is what keeps a sender
+    /// from stalling against its own receiver.
+    pub async fn call_with_stream<R: DeserializeOwned>(
+        &self,
+        destination: BusName,
+        path: ObjectPath,
+        interface: InterfaceName,
+        member: MemberName,
+        args: impl FnOnce(&StreamRef) -> Value,
+        bytes: &[u8],
+    ) -> Result<R> {
+        let mut writer = self
+            .open_stream(
+                &destination,
+                StreamDescriptor::with_len(bytes.len() as u64),
+            )
+            .await?;
+        let message = Message::method_call(
+            destination,
+            path,
+            interface,
+            member,
+            to_body(&args(&writer.stream_ref()))?,
+        );
+
+        // Both halves at once, and the first failure wins: if the callee
+        // rejects the call there is no point finishing the upload, and if the
+        // upload dies the callee's reply is not worth waiting the full deadline
+        // for.
+        let reply = tokio::select! {
+            written = async {
+                writer.write(bytes).await?;
+                writer.finish().await.map(|_| ())
+            } => {
+                written?;
+                self.call_raw(message, DEFAULT_TIMEOUT).await?
+            }
+            reply = self.call_raw(message.clone(), DEFAULT_TIMEOUT) => reply?,
+        };
+        Ok(serde_json::from_value(reply)?)
+    }
+
+    /// Take the reader for a stream a peer opened on this connection.
+    ///
+    /// Once only: a stream has one consumer, because two consumers would each
+    /// get an arbitrary half of the payload.
+    pub fn accept_stream(&self, stream: &StreamRef) -> Result<StreamReader> {
+        self.inner.streams.take_reader(&stream.id)
+    }
+
+    /// Read a whole stream into memory, refusing to exceed
+    /// [`StreamLimits::max_stream_len`].
+    ///
+    /// For a payload that is too big for a frame but not too big for memory.
+    /// Anything else wants [`Connection::accept_stream`] and a loop over
+    /// [`StreamReader::next_chunk`], which never holds more than one chunk.
+    pub async fn read_stream(&self, stream: &StreamRef) -> Result<Vec<u8>> {
+        let limit = self.stream_limits().max_stream_len;
+        self.accept_stream(stream)?.read_to_end_capped(limit).await
+    }
+
+    /// Call one member of a peer's built-in stream interface.
+    pub(crate) async fn call_stream_member(
+        &self,
+        destination: &BusName,
+        member: &str,
+        args: Value,
+        timeout: Duration,
+    ) -> Result<Value> {
+        let message = Message::method_call(
+            destination.clone(),
+            ObjectPath::new(STREAM_PATH)?,
+            InterfaceName::new(STREAM_INTERFACE)?,
+            MemberName::new(member)?,
+            args,
+        );
+        self.call_raw(message, timeout).await
+    }
+
     /// Call a method on the broker's own interface.
     async fn call_bus(&self, member: &str, args: Value) -> Result<Value> {
         let message = Message::method_call(
