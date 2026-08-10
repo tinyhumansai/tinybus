@@ -19,6 +19,12 @@ use crate::ports::Transport;
 
 const HOST_QUEUE_CAPACITY: usize = 256;
 
+/// How long the host waits for a module to drain its queue before declaring it
+/// faulted. Bounded so a module that stops calling `wake` cannot park the
+/// delivery task for the process lifetime; the security boundary applies to
+/// in-process modules too ("every call has a deadline").
+const BACKPRESSURE_DEADLINE: Duration = Duration::from_secs(5);
+
 struct HostContext {
     inbound: StdMutex<Option<mpsc::Sender<Vec<u8>>>>,
     wake: Arc<Notify>,
