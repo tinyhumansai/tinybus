@@ -507,7 +507,7 @@ fn module_state_bodies(member: &str, value: &Value) -> Vec<Value> {
 
     let modules = if member == "RescanModules" {
         serde_json::from_value::<Vec<ModuleInfo>>(value.clone()).unwrap_or_default()
-    } else if matches!(member, "LoadModule" | "StopModule" | "EnableModule") {
+    } else if matches!(member, "LoadModule" | "EnableModule") {
         serde_json::from_value::<ModuleInfo>(value.clone())
             .into_iter()
             .collect()

@@ -88,6 +88,7 @@ struct LoadedModule {
     info: ModuleInfo,
     transport: Arc<ModuleTransport>,
     unique_name: BusName,
+    transition_from: Option<ModuleState>,
 }
 
 impl LoadedModule {
@@ -482,6 +483,7 @@ impl ModuleHost {
             .expect("module list lock")
             .iter_mut()
         {
+            module.transition_from = Some(module.snapshot().state);
             module.info.state = ModuleState::Stopped;
         }
     }
@@ -584,6 +586,7 @@ impl ModuleHost {
                 info: admitted.clone(),
                 transport,
                 unique_name: unique,
+                transition_from: None,
             });
         Ok(admitted)
     }
@@ -806,6 +809,7 @@ impl ModuleControl for ModuleHostInner {
             .iter_mut()
             .find(|module| module.info.name == name)
             .ok_or_else(|| Error::failed("module is not loaded"))?;
+        module.transition_from = Some(module.snapshot().state);
         let _ = module.transport.stop_sync(deadline);
         module.info.state = ModuleState::Stopped;
         Ok(module.info.clone())
@@ -870,6 +874,9 @@ impl ModuleControl for ModuleHostInner {
         let module = loaded
             .iter_mut()
             .find(|module| &module.unique_name == unique_name)?;
+        if let Some(old) = module.transition_from.take() {
+            return Some((module.info.name.clone(), old, module.info.state.clone()));
+        }
         if !module.transport.is_faulted()
             || matches!(
                 module.info.state,
