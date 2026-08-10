@@ -39,6 +39,9 @@ host memory. `module_export!` accepts `config = MyConfig` for an async setup
 function shaped `setup(Connection, MyConfig)`, while the original
 `setup(Connection)` form ignores configuration. Operators can pass the value
 with `tinybus modules load <path> --config '{...}'`.
+For directory discovery, embedding hosts call `ModuleHost::set_config(name,
+value)` (or the builder-form `with_config`) before `load_dir`; the value is
+selected by the admitted manifest name.
 
 One refusal is returned independently and does not stop other artifacts in a
 directory. Errors contain only a sanitized basename and a fixed reason.

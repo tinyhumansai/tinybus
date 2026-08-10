@@ -72,6 +72,7 @@ struct ModuleHostInner {
     loaded: Mutex<Vec<LoadedModule>>,
     rejected: Mutex<Vec<ModuleInfo>>,
     directories: Mutex<Vec<PathBuf>>,
+    configs: Mutex<HashMap<String, serde_json::Value>>,
     warned: AtomicBool,
 }
 
@@ -94,6 +95,7 @@ impl ModuleHost {
             loaded: Mutex::new(Vec::new()),
             rejected: Mutex::new(Vec::new()),
             directories: Mutex::new(Vec::new()),
+            configs: Mutex::new(HashMap::new()),
             warned: AtomicBool::new(false),
         });
         let control: Arc<dyn ModuleControl> = inner.clone();
@@ -105,6 +107,22 @@ impl ModuleHost {
     #[must_use]
     pub fn strict(self, strict: bool) -> Self {
         self.inner.strict.store(strict, Ordering::Release);
+        self
+    }
+
+    /// Set JSON configuration used when `load_dir` initializes this module.
+    pub fn set_config(&self, module: impl Into<String>, config: serde_json::Value) {
+        self.inner
+            .configs
+            .lock()
+            .expect("module config lock")
+            .insert(module.into(), config);
+    }
+
+    /// Builder form of [`ModuleHost::set_config`].
+    #[must_use]
+    pub fn with_config(self, module: impl Into<String>, config: serde_json::Value) -> Self {
+        self.set_config(module, config);
         self
     }
 
@@ -232,7 +250,15 @@ impl ModuleHost {
             if let Some(index) = ready {
                 let (path, artifact) = pending.remove(index);
                 let provides = artifact.manifest.provides.clone();
-                let result = self.activate(&path, artifact, serde_json::json!({}));
+                let config = self
+                    .inner
+                    .configs
+                    .lock()
+                    .expect("module config lock")
+                    .get(&artifact.manifest.name)
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                let result = self.activate(&path, artifact, config);
                 if result.is_ok() {
                     available.extend(provides);
                 }
