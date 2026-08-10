@@ -412,6 +412,86 @@ fn check_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::module::abi::TbAbiDescriptor;
+    use crate::transport::memory::MemoryBus;
+    use crate::Connection;
+
+    fn manifest() -> ModuleManifest {
+        ModuleManifest {
+            name: "clock".to_string(),
+            version: "0.1.0".to_string(),
+            provides: vec![],
+            requires: vec![],
+            optional: vec![],
+            lazy: false,
+        }
+    }
+
+    #[test]
+    fn a_module_compiled_with_panic_abort_is_refused_because_a_panic_would_kill_the_host() {
+        let broker = Broker::new();
+        let host = ModuleHost::new(broker);
+        let mut descriptor = TbAbiDescriptor::current("clock", "0.1.0");
+        descriptor.flags &= !1;
+        let error = host
+            .validate(Path::new("clock.so"), &descriptor, &manifest())
+            .unwrap_err();
+        assert!(error.to_string().contains("panic abort"), "{error}");
+    }
+
+    #[test]
+    fn a_module_built_by_a_different_rustc_is_refused_in_strict_mode_and_only_warned_about_otherwise()
+     {
+        let broker = Broker::new();
+        let permissive = ModuleHost::new(broker.clone());
+        let strict = ModuleHost::new(broker).strict(true);
+        let mut descriptor = TbAbiDescriptor::current("clock", "0.1.0");
+        descriptor.rustc_version = [0; 48];
+        descriptor.rustc_version[..5].copy_from_slice(b"0.0.0");
+        assert!(
+            permissive
+                .validate(Path::new("clock.so"), &descriptor, &manifest())
+                .is_ok()
+        );
+        assert!(
+            strict
+                .validate(Path::new("clock.so"), &descriptor, &manifest())
+                .unwrap_err()
+                .to_string()
+                .contains("strict mode")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires TINYBUS_TEST_MODULE to point at the built cdylib"]
+    async fn a_real_cdylib_loads_and_serves_a_call() {
+        let path = std::env::var_os("TINYBUS_TEST_MODULE").expect("TINYBUS_TEST_MODULE");
+        let bus = MemoryBus::new();
+        let broker = Broker::new();
+        let task = broker.spawn(bus.clone());
+        let modules = ModuleHost::new(broker);
+        modules.load_file(path).unwrap();
+
+        let client = Connection::connect(bus.connect().await.unwrap())
+            .await
+            .unwrap();
+        let clock = client
+            .proxy(
+                "ai.tinyhumans.openhuman.Clock",
+                "/ai/tinyhumans/openhuman/Clock",
+                "ai.tinyhumans.openhuman.Clock",
+            )
+            .unwrap();
+        let value: String = clock.call("Now", ()).await.unwrap();
+        assert!(!value.is_empty());
+        modules.shutdown(Duration::from_secs(1)).await;
+        task.abort();
+    }
+}
+
 #[cfg(windows)]
 fn check_directory(path: &Path) -> Result<()> {
     let metadata = std::fs::symlink_metadata(path)
