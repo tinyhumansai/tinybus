@@ -227,7 +227,22 @@ impl ModuleTransport {
                 break;
             };
             if self.deliver_now(message).await.is_err() {
-                self.context.inflight.fetch_sub(1, Ordering::AcqRel);
+                let remaining = {
+                    let mut pending = self.pending.lock().await;
+                    let remaining = pending.len();
+                    pending.clear();
+                    remaining
+                };
+                self.context
+                    .inflight
+                    .fetch_sub(remaining + 1, Ordering::AcqRel);
+                self.context.faulted.store(true, Ordering::Release);
+                self.context.ready_notify.notify_waiters();
+                self.context
+                    .inbound
+                    .lock()
+                    .expect("host inbound lock")
+                    .take();
                 break;
             }
         }
