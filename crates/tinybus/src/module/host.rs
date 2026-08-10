@@ -1413,6 +1413,7 @@ mod tests {
                 let message = state_changes.recv().await.unwrap();
                 if message.header.member.as_ref().map(|member| member.as_str())
                     == Some("ModuleStateChanged")
+                    && message.body.get(2).and_then(serde_json::Value::as_str) == Some("stopped")
                 {
                     break message;
                 }
@@ -1420,11 +1421,8 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(
-            state_change.body["state"], "stopped",
-            "{}",
-            state_change.body
-        );
+        assert_eq!(state_change.body[0], "tinybus");
+        assert_eq!(state_change.body[2], "stopped");
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 if !client
