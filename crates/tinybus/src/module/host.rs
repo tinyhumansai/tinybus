@@ -1133,17 +1133,21 @@ mod tests {
     }
 
     fn manifest() -> ModuleManifest {
+        named_manifest("clock", "Clock")
+    }
+
+    fn named_manifest(module_name: &str, surface_name: &str) -> ModuleManifest {
         ModuleManifest {
             schema: MANIFEST_SCHEMA,
             module: ModuleIdentity {
-                name: "clock".to_string(),
+                name: module_name.to_string(),
                 version: Version::new(0, 1, 0),
                 description: String::new(),
                 homepage: None,
                 license: String::new(),
             },
-            bus_name: BusName::new("ai.tinyhumans.module.Clock").unwrap(),
-            object_path: ObjectPath::new("/ai/tinyhumans/module/Clock").unwrap(),
+            bus_name: BusName::new(format!("ai.tinyhumans.module.{surface_name}")).unwrap(),
+            object_path: ObjectPath::new(format!("/ai/tinyhumans/module/{surface_name}")).unwrap(),
             provides: vec![],
             requires: vec![],
             environment: vec![],
@@ -1272,6 +1276,86 @@ mod tests {
             "ai.tinyhumans.tinybus.Error.ModuleUnavailable"
         );
         assert!(error.to_string().contains("rejected"), "{error}");
+        broker_task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_match_rule_on_a_lazy_modules_signal_does_not_initialize_it() {
+        LAZY_INIT_COUNT.store(0, Ordering::Release);
+        let bus = MemoryBus::new();
+        let broker = Broker::new();
+        let broker_task = broker.spawn(bus.clone());
+        let host = ModuleHost::new(broker);
+        let mut lazy_manifest = manifest();
+        lazy_manifest.lazy_init = true;
+        unsafe {
+            host.attach_raw(
+                "clock.so",
+                TbAbiDescriptor::current("clock", "0.1.0"),
+                lazy_manifest,
+                lazy_echo_init,
+            )
+        }
+        .unwrap();
+        let connection = Connection::connect(bus.connect().await.unwrap()).await.unwrap();
+        let _signals = connection
+            .add_match(
+                crate::router::MatchRule::parse(
+                    "type=signal,sender=ai.tinyhumans.module.Clock",
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(LAZY_INIT_COUNT.load(Ordering::Acquire), 0);
+        broker_task.abort();
+    }
+
+    #[tokio::test]
+    async fn stopping_one_module_leaves_the_other_serving() {
+        LAZY_INIT_COUNT.store(0, Ordering::Release);
+        let bus = MemoryBus::new();
+        let broker = Broker::new();
+        let broker_task = broker.spawn(bus.clone());
+        let host = ModuleHost::new(broker);
+        for (module_name, surface_name) in [("one", "One"), ("two", "Two")] {
+            let mut module_manifest = named_manifest(module_name, surface_name);
+            module_manifest.lazy_init = true;
+            unsafe {
+                host.attach_raw(
+                    format!("{module_name}.so"),
+                    TbAbiDescriptor::current(module_name, "0.1.0"),
+                    module_manifest,
+                    lazy_echo_init,
+                )
+            }
+            .unwrap();
+        }
+        let connection = Connection::connect(bus.connect().await.unwrap()).await.unwrap();
+        let proxy = |surface_name: &str| {
+            connection
+                .proxy(
+                    format!("ai.tinyhumans.module.{surface_name}"),
+                    format!("/ai/tinyhumans/module/{surface_name}"),
+                    format!("ai.tinyhumans.module.{surface_name}"),
+                )
+                .unwrap()
+        };
+        assert_eq!(proxy("One").call::<String>("Echo", ("one",)).await.unwrap(), "one");
+        assert_eq!(proxy("Two").call::<String>("Echo", ("two",)).await.unwrap(), "two");
+        connection
+            .stop_module("one", Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(
+            proxy("Two")
+                .call::<String>("Echo", ("still serving",))
+                .await
+                .unwrap(),
+            "still serving"
+        );
+        let stopped = proxy("One").call::<()>("Echo", ("stopped",)).await.unwrap_err();
+        assert_eq!(stopped.wire_name(), "ai.tinyhumans.tinybus.Error.ModuleUnavailable");
         broker_task.abort();
     }
 
