@@ -789,6 +789,17 @@ mod tests {
     use crate::Connection;
     use crate::module::abi::TbAbiDescriptor;
     use crate::transport::memory::MemoryBus;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static INIT_RAN: AtomicBool = AtomicBool::new(false);
+
+    unsafe extern "C" fn init_that_must_not_run(
+        _: *const crate::module::abi::TbHostVtable,
+        _: *mut TbModuleVtable,
+    ) -> i32 {
+        INIT_RAN.store(true, Ordering::Release);
+        TB_OK
+    }
 
     fn manifest() -> ModuleManifest {
         ModuleManifest {
