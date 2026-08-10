@@ -208,14 +208,9 @@ impl Broker {
             .clone()
             .ok_or_else(|| Error::protocol("bus call has no member"))?;
 
-        let (result, changes) = self.bus_method(from, from_name, &member, message.body);
-
-        #[cfg(feature = "modules")]
-        let module_states = result
-            .as_ref()
-            .ok()
-            .map(|value| module_state_bodies(member.as_str(), value))
-            .unwrap_or_default();
+        let (result, changes, module_states) = self
+            .bus_method(from, from_name, &member, message.body)
+            .await;
 
         let reply = match result {
             Ok(value) => Message::method_return(&header, value),
@@ -236,7 +231,6 @@ impl Broker {
                 self.announce_name_change(change).await;
             }
         }
-        #[cfg(feature = "modules")]
         for module_state in module_states {
             self.announce_module_state(module_state).await;
         }
@@ -245,25 +239,16 @@ impl Broker {
 
     /// The bus's own interface. Synchronous: it only touches the routing table,
     /// and holding the lock across an await is exactly what this design avoids.
-    fn bus_method(
+    async fn bus_method(
         &self,
         from: u64,
         from_name: &BusName,
         member: &MemberName,
         body: Value,
-    ) -> (Result<Value>, Vec<NameChange>) {
+    ) -> (Result<Value>, Vec<NameChange>, Vec<Value>) {
         #[cfg(feature = "modules")]
-        if matches!(
-            member.as_str(),
-            "ListModules"
-                | "GetModule"
-                | "GetModuleManifest"
-                | "LoadModule"
-                | "StopModule"
-                | "EnableModule"
-                | "RescanModules"
-        ) {
-            return (self.module_method(member, body), Vec::new());
+        if let Some((result, module_states)) = self.module_method(member, body.clone()).await {
+            return (result, Vec::new(), module_states);
         }
 
         let mut changes = Vec::new();
@@ -323,42 +308,63 @@ impl Broker {
             }
         })();
 
-        (result, changes)
+        (result, changes, Vec::new())
     }
 
     #[cfg(feature = "modules")]
-    fn module_method(&self, member: &MemberName, body: Value) -> Result<Value> {
+    async fn module_method(
+        &self,
+        member: &MemberName,
+        body: Value,
+    ) -> Option<(Result<Value>, Vec<Value>)> {
         use std::path::PathBuf;
         use std::time::Duration;
 
+        if !matches!(
+            member.as_str(),
+            "ListModules"
+                | "GetModule"
+                | "GetModuleManifest"
+                | "LoadModule"
+                | "StopModule"
+                | "EnableModule"
+                | "RescanModules"
+        ) {
+            return None;
+        }
         let control = self
             .modules
             .lock()
             .expect("module control lock")
             .as_ref()
             .and_then(Weak::upgrade)
-            .ok_or_else(|| Error::failed("module host is not installed"))?;
+            .ok_or_else(|| Error::failed("module host is not installed"));
+        let control = match control {
+            Ok(control) => control,
+            Err(error) => return Some((Err(error), Vec::new())),
+        };
 
-        match member.as_str() {
-            "ListModules" => Ok(serde_json::to_value(control.list())?),
+        let outcome = (|| -> Result<(Value, Vec<Value>)> {
+            match member.as_str() {
+            "ListModules" => Ok((serde_json::to_value(control.list())?, Vec::new())),
             "GetModule" => {
                 let (name,): (String,) = parse_args(member, body)?;
-                Ok(serde_json::to_value(
+                Ok((serde_json::to_value(
                     control
                         .list()
                         .into_iter()
                         .find(|module| module.name == name),
-                )?)
+                )?, Vec::new()))
             }
             "GetModuleManifest" => {
                 let (name,): (String,) = parse_args(member, body)?;
-                Ok(serde_json::to_value(
+                Ok((serde_json::to_value(
                     control
                         .list()
                         .into_iter()
                         .find(|module| module.name == name)
                         .map(|module| module.manifest),
-                )?)
+                )?, Vec::new()))
             }
             "LoadModule" => {
                 let arguments = body.as_array().ok_or_else(|| {
@@ -382,19 +388,23 @@ impl Broker {
                         "expected path and optional configuration",
                     ));
                 }
-                Ok(serde_json::to_value(
-                    control.load(PathBuf::from(path), config)?,
-                )?)
+                let (info, transition) = control.load(PathBuf::from(path), config)?;
+                Ok((
+                    serde_json::to_value(info)?,
+                    module_state_body(transition).into_iter().collect(),
+                ))
             }
             "StopModule" => {
                 let (name, deadline_ms): (String, u64) = parse_args(member, body)?;
-                Ok(serde_json::to_value(
-                    control.stop(&name, Duration::from_millis(deadline_ms))?,
-                )?)
+                let info = futures_lite_placeholder();
             }
             "EnableModule" => {
                 let (name, enabled): (String, bool) = parse_args(member, body)?;
-                Ok(serde_json::to_value(control.enable(&name, enabled)?)?)
+                let (info, transition) = control.enable(&name, enabled)?;
+                Ok((
+                    serde_json::to_value(info)?,
+                    module_state_body(transition).into_iter().collect(),
+                ))
             }
             "RescanModules" => {
                 let arguments = body.as_array().ok_or_else(|| {
@@ -414,10 +424,22 @@ impl Broker {
                         "expected optional paths and dry-run flag",
                     ));
                 }
-                Ok(serde_json::to_value(control.rescan(paths, dry_run)?)?)
+                let (infos, transitions) = control.rescan(paths, dry_run)?;
+                Ok((
+                    serde_json::to_value(infos)?,
+                    transitions
+                        .into_iter()
+                        .filter_map(|transition| module_state_body(Some(transition)))
+                        .collect(),
+                ))
             }
-            _ => unreachable!("caller filters module members"),
+            _ => unreachable!("known module member was checked above"),
         }
+        })();
+        Some(match outcome {
+            Ok((value, states)) => (Ok(value), states),
+            Err(error) => (Err(error), Vec::new()),
+        })
     }
 
     /// Broadcast `NameOwnerChanged`.
@@ -473,40 +495,17 @@ impl Broker {
 }
 
 #[cfg(feature = "modules")]
-fn module_state_bodies(member: &str, value: &Value) -> Vec<Value> {
-    use crate::module::host::{ModuleInfo, state_detail, state_name};
+fn module_state_body(transition: Option<crate::module::host::ModuleTransition>) -> Option<Value> {
+    use crate::module::host::{state_detail, state_name};
 
-    let modules = if member == "RescanModules" {
-        serde_json::from_value::<Vec<ModuleInfo>>(value.clone()).unwrap_or_default()
-    } else if matches!(member, "LoadModule" | "EnableModule") {
-        serde_json::from_value::<ModuleInfo>(value.clone())
-            .into_iter()
-            .collect()
-    } else {
-        Vec::new()
-    };
-    modules
-        .into_iter()
-        .map(|module| {
-            let old = match member {
-                "LoadModule" | "RescanModules" => "discovered",
-                "EnableModule"
-                    if matches!(module.state, crate::module::host::ModuleState::Disabled) =>
-                {
-                    "ready"
-                }
-                "EnableModule" => "disabled",
-                "StopModule" => "ready",
-                _ => "discovered",
-            };
-            serde_json::json!([
-                module.name,
-                old,
-                state_name(&module.state),
-                state_detail(&module.state)
-            ])
-        })
-        .collect()
+    transition.map(|(module, old, new)| {
+        serde_json::json!([
+            module,
+            state_name(&old),
+            state_name(&new),
+            state_detail(&new)
+        ])
+    })
 }
 
 impl Default for Broker {
