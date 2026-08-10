@@ -1168,7 +1168,9 @@ mod tests {
         assert_eq!(info.state, ModuleState::Resolved);
         assert_eq!(LAZY_INIT_COUNT.load(Ordering::Acquire), 0);
 
-        let connection = Connection::connect(bus.connect().await.unwrap()).await.unwrap();
+        let connection = Connection::connect(bus.connect().await.unwrap())
+            .await
+            .unwrap();
         let proxy = connection
             .proxy(
                 "ai.tinyhumans.module.Clock",
