@@ -883,12 +883,16 @@ mod tests {
         let subscriber = HostSubscriber {
             host: calls,
             next_span: AtomicU64::new(1),
-            max_level: tracing::level_filters::LevelFilter::INFO,
+            max_level: tracing::level_filters::LevelFilter::TRACE,
         };
         tracing::subscriber::with_default(subscriber, || {
+            tracing::error!("module error");
+            tracing::warn!("module warning");
             tracing::info!(answer = 42, "module log");
+            tracing::debug!("module debug");
+            tracing::trace!("module trace");
         });
-        assert_eq!(HOST_LOGS.load(Ordering::Acquire), 3);
+        assert_eq!(HOST_LOGS.load(Ordering::Acquire), 5);
     }
 
     #[test]
