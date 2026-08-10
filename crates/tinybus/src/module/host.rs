@@ -1831,17 +1831,14 @@ fn windows_directory_grants_untrusted_write(path: &Path) -> Result<bool> {
     const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
     const WIN_LOCAL_SYSTEM_SID: u32 = 22;
     const WIN_BUILTIN_ADMINISTRATORS_SID: u32 = 26;
-    const WRITE_MASK: u32 = 0x2
-        | 0x4
-        | 0x10
-        | 0x100
-        | 0x1_0000
-        | 0x4_0000
-        | 0x8_0000
-        | 0x1000_0000
-        | 0x4000_0000;
+    const WRITE_MASK: u32 =
+        0x2 | 0x4 | 0x10 | 0x100 | 0x1_0000 | 0x4_0000 | 0x8_0000 | 0x1000_0000 | 0x4000_0000;
 
-    let mut wide = path.as_os_str().encode_wide().chain([0]).collect::<Vec<_>>();
+    let mut wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain([0])
+        .collect::<Vec<_>>();
     let mut owner = std::ptr::null_mut();
     let mut dacl = std::ptr::null_mut();
     let mut descriptor = std::ptr::null_mut();
