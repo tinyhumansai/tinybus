@@ -836,6 +836,94 @@ mod tests {
     }
 
     #[test]
+    fn a_descriptor_with_a_bad_magic_is_refused_without_reading_past_the_prefix() {
+        let host = ModuleHost::new(Broker::new());
+        let mut descriptor = TbAbiDescriptor::current("clock", "0.1.0");
+        descriptor.magic = 0;
+        let error = host
+            .validate(Path::new("clock.so"), &descriptor, &manifest())
+            .unwrap_err();
+        assert!(error.to_string().contains("magic"), "{error}");
+    }
+
+    #[test]
+    fn a_module_built_for_an_older_abi_revision_is_refused_before_its_init_runs() {
+        INIT_RAN.store(false, Ordering::Release);
+        let host = ModuleHost::new(Broker::new());
+        let mut descriptor = TbAbiDescriptor::current("clock", "0.1.0");
+        descriptor.abi_revision = 0;
+        let error = unsafe {
+            host.attach_raw(
+                "clock.so",
+                descriptor,
+                manifest(),
+                init_that_must_not_run,
+            )
+        }
+        .unwrap_err();
+        assert!(error.to_string().contains("revision"), "{error}");
+        assert!(!INIT_RAN.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn a_descriptor_smaller_than_the_host_expects_is_refused_and_a_larger_one_is_accepted() {
+        let host = ModuleHost::new(Broker::new());
+        let mut descriptor = TbAbiDescriptor::current("clock", "0.1.0");
+        descriptor.descriptor_size = size_of::<TbAbiDescriptor>() as u32 - 1;
+        assert!(
+            host.validate(Path::new("clock.so"), &descriptor, &manifest())
+                .is_err()
+        );
+        descriptor.descriptor_size = size_of::<TbAbiDescriptor>() as u32 + 64;
+        assert!(
+            host.validate(Path::new("clock.so"), &descriptor, &manifest())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_module_built_for_a_different_target_triple_is_refused() {
+        let host = ModuleHost::new(Broker::new());
+        let mut descriptor = TbAbiDescriptor::current("clock", "0.1.0");
+        descriptor.target_triple = [0; 64];
+        descriptor.target_triple[..13].copy_from_slice(b"other-unknown");
+        let error = host
+            .validate(Path::new("clock.so"), &descriptor, &manifest())
+            .unwrap_err();
+        assert!(error.to_string().contains("target triple"), "{error}");
+    }
+
+    #[test]
+    fn a_module_built_against_an_incompatible_tinybus_is_refused_and_names_both_versions() {
+        let host = ModuleHost::new(Broker::new());
+        let mut descriptor = TbAbiDescriptor::current("clock", "0.1.0");
+        descriptor.tinybus_major = 99;
+        let error = host
+            .validate(Path::new("clock.so"), &descriptor, &manifest())
+            .unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains(crate::VERSION), "{text}");
+        assert!(text.contains("99.0.0"), "{text}");
+    }
+
+    #[test]
+    fn a_module_that_never_had_its_init_called_is_the_refusal_path() {
+        INIT_RAN.store(false, Ordering::Release);
+        let host = ModuleHost::new(Broker::new());
+        let mut descriptor = TbAbiDescriptor::current("clock", "0.1.0");
+        descriptor.pointer_width = if usize::BITS == 64 { 32 } else { 64 };
+        let _ = unsafe {
+            host.attach_raw(
+                "clock.so",
+                descriptor,
+                manifest(),
+                init_that_must_not_run,
+            )
+        };
+        assert!(!INIT_RAN.load(Ordering::Acquire));
+    }
+
+    #[test]
     fn a_module_built_by_a_different_rustc_is_refused_in_strict_mode_and_only_warned_about_otherwise()
      {
         let broker = Broker::new();
