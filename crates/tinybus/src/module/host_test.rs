@@ -648,8 +648,7 @@ fn a_module_directory_owned_by_another_user_is_refused() {
 
 #[test]
 fn a_file_that_is_not_a_regular_file_is_skipped() {
-    let directory = tempfile::tempdir_in(valid.parent().expect("module artifact has a parent"))
-        .unwrap();
+    let directory = tempfile::tempdir().unwrap();
     let error = check_file(directory.path()).unwrap_err();
     assert!(error.to_string().contains("not a regular file"));
 }
@@ -820,7 +819,8 @@ async fn one_refused_module_does_not_stop_the_others_in_the_directory_from_loadi
     let invalid = PathBuf::from(
         std::env::var_os("TINYBUS_TEST_WRONG_TARGET").expect("TINYBUS_TEST_WRONG_TARGET"),
     );
-    let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let directory = tempfile::tempdir_in(valid.parent().expect("module artifact has a parent"))
+        .unwrap();
     let valid_copy = directory.path().join(valid.file_name().unwrap());
     let invalid_copy = directory.path().join(invalid.file_name().unwrap());
     std::fs::copy(valid, valid_copy).unwrap();
