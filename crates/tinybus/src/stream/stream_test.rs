@@ -849,7 +849,10 @@ async fn a_reader_whose_connection_went_away_reports_it_rather_than_a_clean_eof(
     let receiver = Connection::connect(bus.connect().await.unwrap())
         .await
         .unwrap();
-    receiver.request_name("ai.tinyhumans.Vanishing").await.unwrap();
+    receiver
+        .request_name("ai.tinyhumans.Vanishing")
+        .await
+        .unwrap();
     let client = Connection::connect(bus.connect().await.unwrap())
         .await
         .unwrap();
