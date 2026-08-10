@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::{Mutex, Notify, mpsc};
+use tokio::sync::{Mutex, Notify, OnceCell, mpsc};
 
 use crate::error::{Error, Result};
 use crate::message::Message;
@@ -23,6 +23,8 @@ struct HostContext {
     wake: Arc<Notify>,
     config: StdMutex<Vec<u8>>,
     faulted: AtomicBool,
+    ready: AtomicBool,
+    ready_notify: Notify,
 }
 
 /// The broker-facing side of one loaded module.
@@ -31,6 +33,8 @@ pub(crate) struct ModuleTransport {
     inbound: Mutex<mpsc::Receiver<Vec<u8>>>,
     context: &'static HostContext,
     label: String,
+    initializer: StdMutex<Option<(crate::module::abi::TbModuleInit, TbHostVtable)>>,
+    init_result: OnceCell<std::result::Result<(), String>>,
 }
 
 // `module_ctx` is opaque and all access to it goes through callbacks whose ABI
@@ -46,12 +50,16 @@ impl ModuleTransport {
             wake: Arc::new(Notify::new()),
             config: StdMutex::new(config),
             faulted: AtomicBool::new(false),
+            ready: AtomicBool::new(false),
+            ready_notify: Notify::new(),
         }));
         let transport = Arc::new(Self {
             module: StdMutex::new(None),
             inbound: Mutex::new(inbound_rx),
             context,
             label,
+            initializer: StdMutex::new(None),
+            init_result: OnceCell::new(),
         });
         let config = context.config.lock().expect("module config lock");
         let config_slice = crate::module::abi::TbSlice {
@@ -68,6 +76,7 @@ impl ModuleTransport {
             log: host_log,
             fault: host_fault,
             config: config_slice,
+            ready: host_ready,
         };
         (transport, vtable)
     }
@@ -78,6 +87,57 @@ impl ModuleTransport {
         }
         *self.module.lock().expect("module vtable lock") = Some(module);
         Ok(())
+    }
+
+    pub(crate) fn defer_initialize(
+        &self,
+        init: crate::module::abi::TbModuleInit,
+        host: TbHostVtable,
+    ) {
+        *self.initializer.lock().expect("module initializer lock") = Some((init, host));
+    }
+
+    async fn ensure_initialized(&self) -> Result<()> {
+        let result = self
+            .init_result
+            .get_or_init(|| async {
+                let Some((init, host)) = self
+                    .initializer
+                    .lock()
+                    .expect("module initializer lock")
+                    .take()
+                else {
+                    return if self.module.lock().expect("module vtable lock").is_some() {
+                        Ok(())
+                    } else {
+                        Err("module has no initializer".to_string())
+                    };
+                };
+                let mut module = TbModuleVtable::default();
+                let code = unsafe { init(&host, &mut module) };
+                self.clear_config();
+                if code != TB_OK {
+                    return Err("module initialization failed".to_string());
+                }
+                self.initialize(module).map_err(|_| {
+                    "module returned an invalid vtable".to_string()
+                })?;
+                Ok(())
+            })
+            .await;
+        result.clone().map_err(Error::transport)
+    }
+
+    pub(crate) async fn wait_ready(&self) {
+        while !self.context.ready.load(Ordering::Acquire)
+            && !self.context.faulted.load(Ordering::Acquire)
+        {
+            self.context.ready_notify.notified().await;
+        }
+    }
+
+    pub(crate) fn is_ready(&self) -> bool {
+        self.context.ready.load(Ordering::Acquire)
     }
 
     pub(crate) fn clear_config(&self) {
@@ -115,6 +175,11 @@ impl ModuleTransport {
 #[async_trait]
 impl Transport for ModuleTransport {
     async fn send(&self, message: Message) -> Result<()> {
+        self.ensure_initialized().await?;
+        self.wait_ready().await;
+        if self.context.faulted.load(Ordering::Acquire) {
+            return Err(Error::ConnectionClosed);
+        }
         let bytes = serde_json::to_vec(&message)?;
         if bytes.len() > MAX_FRAME_LEN {
             return Err(Error::protocol("module frame exceeds the size cap"));
@@ -204,6 +269,14 @@ unsafe extern "C" fn host_log(ctx: *mut c_void, level: u32, ptr: *const u8, len:
 unsafe extern "C" fn host_fault(ctx: *mut c_void, _: *const u8, _: usize) {
     if let Some(context) = unsafe { ctx.cast::<HostContext>().as_ref() } {
         context.faulted.store(true, Ordering::Release);
+        context.ready_notify.notify_waiters();
         context.inbound.lock().expect("host inbound lock").take();
+    }
+}
+
+unsafe extern "C" fn host_ready(ctx: *mut c_void) {
+    if let Some(context) = unsafe { ctx.cast::<HostContext>().as_ref() } {
+        context.ready.store(true, Ordering::Release);
+        context.ready_notify.notify_waiters();
     }
 }

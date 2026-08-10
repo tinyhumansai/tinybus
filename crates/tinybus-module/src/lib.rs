@@ -134,6 +134,10 @@ impl HostCalls {
     fn log(&self, level: u32, message: &[u8]) {
         unsafe { (self.0.log)(self.0.host_ctx, level, message.as_ptr(), message.len()) }
     }
+
+    fn ready(&self) {
+        unsafe { (self.0.ready)(self.0.host_ctx) }
+    }
 }
 
 struct HostSubscriber {
@@ -370,6 +374,7 @@ where
                     }));
                     match setup(connection.clone()).await {
                         Ok(()) => {
+                            host.ready();
                             // Keep the connection (and therefore the served
                             // object tree and transport) alive until shutdown
                             // stops this runtime. Setup returning means ready,

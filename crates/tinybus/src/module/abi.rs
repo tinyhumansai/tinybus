@@ -119,6 +119,8 @@ pub struct TbHostVtable {
     /// Borrowed JSON configuration. The module must copy it during init and
     /// must not retain this pointer.
     pub config: TbSlice,
+    /// Module setup completed and its declared bus surface is ready.
+    pub ready: unsafe extern "C" fn(*mut c_void),
 }
 
 /// Calls from a host into one initialized module.
