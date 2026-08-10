@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -544,7 +544,8 @@ mod tests {
     static DELIVERY_CODE: AtomicI32 = AtomicI32::new(TB_OK);
     static DELIVERIES: AtomicUsize = AtomicUsize::new(0);
     static SHUTDOWN_CODE: AtomicI32 = AtomicI32::new(TB_OK);
-    static VTABLE_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    static VTABLE_TEST_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> =
+        std::sync::OnceLock::new();
 
     unsafe extern "C" fn deliver(_: *mut c_void, _: *const u8, _: usize) -> i32 {
         DELIVERIES.fetch_add(1, Ordering::AcqRel);
