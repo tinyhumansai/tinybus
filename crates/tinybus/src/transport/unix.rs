@@ -270,7 +270,8 @@ mod tests {
     async fn socket_labels_and_failed_dials_are_operator_useful() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("missing");
-        assert!(UnixTransport::connect(&path).await.unwrap_err().to_string().contains("could not connect"));
+        let error = UnixTransport::connect(&path).await.err().expect("dial fails");
+        assert!(error.to_string().contains("could not connect"));
 
         let listener = UnixListenerAdapter::bind(&path).await.unwrap();
         let client = UnixTransport::connect(&path).await.unwrap();
