@@ -39,19 +39,24 @@ Use `module_export!` once. The exported descriptor, manifest, and initializer
 are the stable admission surface:
 
 ```rust
+use tinybus::{Connection, Result};
 use tinybus_module::module_export;
 
-module_export! {
-    name: "ai.example.Clock",
-    version: "0.1.0",
-    bus_name: "ai.example.Clock",
-    setup: setup,
-}
-
-async fn setup(connection: tinybus::Connection) -> tinybus::Result<()> {
-    // Register the service tree and return only after setup is complete.
+async fn setup(connection: Connection) -> Result<()> {
+    // Serve objects and request the well-known name here.
     let _ = connection;
     Ok(())
+}
+
+module_export! {
+    setup = setup,
+    worker_threads = 1,
+    provides = ["ai.example.Clock"],
+    methods = [],
+    signals = [],
+    requires = [],
+    optional = [],
+    lazy = false,
 }
 ```
 
