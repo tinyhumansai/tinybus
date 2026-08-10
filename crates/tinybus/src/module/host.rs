@@ -597,7 +597,9 @@ mod tests {
         let broker = Broker::new();
         let task = broker.spawn(bus.clone());
         let modules = ModuleHost::new(broker);
-        modules.load_file(path).unwrap();
+        modules
+            .load_file_with_config(path, serde_json::json!({ "prefix": "configured:" }))
+            .unwrap();
 
         let client = Connection::connect(bus.connect().await.unwrap())
             .await
@@ -626,7 +628,7 @@ mod tests {
             )
             .unwrap();
         let value: String = clock.call("Now", ()).await.unwrap();
-        assert!(!value.is_empty());
+        assert!(value.starts_with("configured:"), "{value}");
         modules.shutdown(Duration::from_secs(1)).await;
         task.abort();
     }
