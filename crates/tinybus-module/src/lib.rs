@@ -33,21 +33,60 @@ pub fn manifest_slice(
     requires: &[&str],
     optional: &[&str],
     lazy: bool,
+    worker_threads: u32,
 ) -> tinybus::module::abi::TbSlice {
-    use tinybus::module::manifest::{ModuleDependency, ModuleManifest};
+    use tinybus::module::manifest::{
+        Dependency, ModuleIdentity, ModuleManifest, PanicPolicy, ProvidedInterface,
+        MANIFEST_SCHEMA,
+    };
+    use tinybus::{BusName, InterfaceName, InterfaceVersion, ObjectPath, Version};
 
     let bytes = MANIFEST_BYTES.get_or_init(|| {
-        let dependency = |interface: &&str| ModuleDependency {
-            interface: (*interface).to_string(),
-            version: None,
+        let package_version = Version::parse(version).expect("package version is semver");
+        let provided = |interface: &&str| ProvidedInterface {
+            version: InterfaceVersion::provided(
+                InterfaceName::new(*interface).expect("provided interface is valid"),
+                package_version.clone(),
+            ),
+            methods: Vec::new(),
+            signals: Vec::new(),
         };
+        let dependency = |interface: &&str, optional| Dependency {
+            interface: InterfaceVersion::consumed(
+                InterfaceName::new(*interface).expect("dependency interface is valid"),
+                package_version.clone(),
+            ),
+            optional,
+            reason: String::new(),
+        };
+        let bus_name = provides.first().copied().unwrap_or("ai.tinyhumans.module.Empty");
+        let object_path = format!("/{}", bus_name.replace('.', "/"));
         serde_json::to_vec(&ModuleManifest {
-            name: name.to_string(),
-            version: version.to_string(),
-            provides: provides.iter().map(|value| (*value).to_string()).collect(),
-            requires: requires.iter().map(dependency).collect(),
-            optional: optional.iter().map(dependency).collect(),
-            lazy,
+            schema: MANIFEST_SCHEMA,
+            module: ModuleIdentity {
+                name: name.to_string(),
+                version: package_version,
+                description: String::new(),
+                homepage: None,
+                license: String::new(),
+            },
+            bus_name: BusName::new(bus_name).expect("provided interface is a bus name"),
+            object_path: ObjectPath::new(object_path).expect("derived object path is valid"),
+            provides: provides.iter().map(provided).collect(),
+            requires: requires
+                .iter()
+                .map(|interface| dependency(interface, false))
+                .chain(
+                    optional
+                        .iter()
+                        .map(|interface| dependency(interface, true)),
+                )
+                .collect(),
+            environment: Vec::new(),
+            capabilities: Vec::new(),
+            lazy_init: lazy,
+            worker_threads,
+            on_panic: PanicPolicy::Detach,
         })
         .expect("module manifest is serializable")
     });
@@ -396,6 +435,7 @@ macro_rules! module_export {
                 &[$($requires),*],
                 &[$($optional),*],
                 $lazy,
+                $threads as u32,
             )
         }
 
@@ -448,6 +488,7 @@ macro_rules! module_export {
                 &[$($requires),*],
                 &[$($optional),*],
                 $lazy,
+                $threads as u32,
             )
         }
 
