@@ -1,6 +1,7 @@
 //! Host-side transport bridge over the module C vtables.
 
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -21,6 +22,7 @@ struct HostContext {
     inbound: StdMutex<Option<mpsc::Sender<Vec<u8>>>>,
     wake: Arc<Notify>,
     config: StdMutex<Vec<u8>>,
+    faulted: AtomicBool,
 }
 
 /// The broker-facing side of one loaded module.
@@ -43,6 +45,7 @@ impl ModuleTransport {
             inbound: StdMutex::new(Some(inbound_tx)),
             wake: Arc::new(Notify::new()),
             config: StdMutex::new(config),
+            faulted: AtomicBool::new(false),
         }));
         let transport = Arc::new(Self {
             module: StdMutex::new(None),
@@ -82,6 +85,10 @@ impl ModuleTransport {
         config.fill(0);
         config.clear();
         config.shrink_to_fit();
+    }
+
+    pub(crate) fn is_faulted(&self) -> bool {
+        self.context.faulted.load(Ordering::Acquire)
     }
 
     pub(crate) fn shutdown_sync(&self, deadline: Duration) -> i32 {
@@ -196,6 +203,7 @@ unsafe extern "C" fn host_log(ctx: *mut c_void, level: u32, ptr: *const u8, len:
 
 unsafe extern "C" fn host_fault(ctx: *mut c_void, _: *const u8, _: usize) {
     if let Some(context) = unsafe { ctx.cast::<HostContext>().as_ref() } {
+        context.faulted.store(true, Ordering::Release);
         context.inbound.lock().expect("host inbound lock").take();
     }
 }
