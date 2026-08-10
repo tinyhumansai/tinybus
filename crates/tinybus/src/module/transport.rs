@@ -77,6 +77,16 @@ impl ModuleTransport {
             None => TB_CLOSED,
         }
     }
+
+    pub(crate) fn stop_sync(&self, deadline: Duration) -> i32 {
+        let code = self.shutdown_sync(deadline);
+        self.context
+            .inbound
+            .lock()
+            .expect("host inbound lock")
+            .take();
+        code
+    }
 }
 
 #[async_trait]
@@ -115,12 +125,7 @@ impl Transport for ModuleTransport {
     }
 
     async fn close(&self) -> Result<()> {
-        let _ = self.shutdown_sync(Duration::from_secs(5));
-        self.context
-            .inbound
-            .lock()
-            .expect("host inbound lock")
-            .take();
+        let _ = self.stop_sync(Duration::from_secs(5));
         Ok(())
     }
 

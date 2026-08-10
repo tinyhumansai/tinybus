@@ -65,7 +65,7 @@ pub struct ModuleHost {
 
 struct ModuleHostInner {
     broker: Broker,
-    strict: bool,
+    strict: AtomicBool,
     loaded: Mutex<Vec<LoadedModule>>,
     directories: Mutex<Vec<PathBuf>>,
     warned: AtomicBool,
@@ -86,7 +86,7 @@ impl ModuleHost {
     pub fn new(broker: Broker) -> Self {
         let inner = Arc::new(ModuleHostInner {
             broker: broker.clone(),
-            strict: false,
+            strict: AtomicBool::new(false),
             loaded: Mutex::new(Vec::new()),
             directories: Mutex::new(Vec::new()),
             warned: AtomicBool::new(false),
@@ -98,10 +98,8 @@ impl ModuleHost {
 
     /// Refuse modules built by a different rustc release.
     #[must_use]
-    pub fn strict(mut self, strict: bool) -> Self {
-        Arc::get_mut(&mut self.inner)
-            .expect("strict mode is set before sharing the host")
-            .strict = strict;
+    pub fn strict(self, strict: bool) -> Self {
+        self.inner.strict.store(strict, Ordering::Release);
         self
     }
 
@@ -302,7 +300,7 @@ impl ModuleHost {
             .ok_or_else(|| refuse("descriptor identity is invalid"))?;
         let rustc_mismatch =
             field_bytes(&descriptor.rustc_version) != build_info::RUSTC_VERSION.as_bytes();
-        if self.inner.strict && rustc_mismatch {
+        if self.inner.strict.load(Ordering::Acquire) && rustc_mismatch {
             return Err(refuse("rustc version does not match in strict mode"));
         }
         if rustc_mismatch {
