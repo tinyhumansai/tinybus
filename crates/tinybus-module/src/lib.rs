@@ -36,8 +36,7 @@ pub fn manifest_slice(
     worker_threads: u32,
 ) -> tinybus::module::abi::TbSlice {
     use tinybus::module::manifest::{
-        Dependency, ModuleIdentity, ModuleManifest, PanicPolicy, ProvidedInterface,
-        MANIFEST_SCHEMA,
+        Dependency, MANIFEST_SCHEMA, ModuleIdentity, ModuleManifest, PanicPolicy, ProvidedInterface,
     };
     use tinybus::{BusName, InterfaceName, InterfaceVersion, ObjectPath, Version};
 
@@ -59,7 +58,10 @@ pub fn manifest_slice(
             optional,
             reason: String::new(),
         };
-        let bus_name = provides.first().copied().unwrap_or("ai.tinyhumans.module.Empty");
+        let bus_name = provides
+            .first()
+            .copied()
+            .unwrap_or("ai.tinyhumans.module.Empty");
         let object_path = format!("/{}", bus_name.replace('.', "/"));
         serde_json::to_vec(&ModuleManifest {
             schema: MANIFEST_SCHEMA,
@@ -76,11 +78,7 @@ pub fn manifest_slice(
             requires: requires
                 .iter()
                 .map(|interface| dependency(interface, false))
-                .chain(
-                    optional
-                        .iter()
-                        .map(|interface| dependency(interface, true)),
-                )
+                .chain(optional.iter().map(|interface| dependency(interface, true)))
                 .collect(),
             environment: Vec::new(),
             capabilities: Vec::new(),

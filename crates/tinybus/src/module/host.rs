@@ -16,11 +16,9 @@ use crate::module::abi::{
     TbModuleInit, TbModuleVtable, field_bytes,
 };
 use crate::module::loader::{self, LoadedArtifact};
-use crate::module::manifest::{
-    MANIFEST_SCHEMA, ModuleIdentity, ModuleManifest, PanicPolicy,
-};
-use crate::name::{BusName, ObjectPath};
+use crate::module::manifest::{MANIFEST_SCHEMA, ModuleIdentity, ModuleManifest, PanicPolicy};
 use crate::module::transport::ModuleTransport;
+use crate::name::{BusName, ObjectPath};
 use crate::ports::Transport;
 use crate::version::Version;
 
@@ -172,13 +170,7 @@ impl ModuleHost {
         init: TbModuleInit,
     ) -> Result<ModuleInfo> {
         unsafe {
-            self.attach_raw_with_config(
-                file,
-                descriptor,
-                manifest,
-                init,
-                serde_json::json!({}),
-            )
+            self.attach_raw_with_config(file, descriptor, manifest, init, serde_json::json!({}))
         }
     }
 
@@ -312,9 +304,7 @@ impl ModuleHost {
                     .requires
                     .iter()
                     .filter(|dependency| !dependency.optional)
-                    .all(|dependency| {
-                        available.contains(dependency.interface.interface.as_str())
-                    })
+                    .all(|dependency| available.contains(dependency.interface.interface.as_str()))
             });
             if let Some(index) = ready {
                 let (path, artifact) = pending.remove(index);
@@ -347,8 +337,7 @@ impl ModuleHost {
                     .filter(|dependency| !dependency.optional)
                     .any(|dependency| {
                         !available.contains(dependency.interface.interface.as_str())
-                            && !declared_providers
-                                .contains(dependency.interface.interface.as_str())
+                            && !declared_providers.contains(dependency.interface.interface.as_str())
                     });
                 outcomes.push(Err(Error::module_refused(
                     &path,
@@ -589,8 +578,7 @@ impl ModuleHost {
                     homepage: None,
                     license: String::new(),
                 },
-                bus_name: BusName::new("ai.tinyhumans.module.Rejected")
-                    .expect("literal bus name"),
+                bus_name: BusName::new("ai.tinyhumans.module.Rejected").expect("literal bus name"),
                 object_path: ObjectPath::new("/ai/tinyhumans/module/Rejected")
                     .expect("literal object path"),
                 provides: Vec::new(),
@@ -852,15 +840,9 @@ mod tests {
         let host = ModuleHost::new(Broker::new());
         let mut descriptor = TbAbiDescriptor::current("clock", "0.1.0");
         descriptor.abi_revision = 0;
-        let error = unsafe {
-            host.attach_raw(
-                "clock.so",
-                descriptor,
-                manifest(),
-                init_that_must_not_run,
-            )
-        }
-        .unwrap_err();
+        let error =
+            unsafe { host.attach_raw("clock.so", descriptor, manifest(), init_that_must_not_run) }
+                .unwrap_err();
         assert!(error.to_string().contains("revision"), "{error}");
         assert!(!INIT_RAN.load(Ordering::Acquire));
     }
@@ -912,14 +894,8 @@ mod tests {
         let host = ModuleHost::new(Broker::new());
         let mut descriptor = TbAbiDescriptor::current("clock", "0.1.0");
         descriptor.pointer_width = if usize::BITS == 64 { 32 } else { 64 };
-        let _ = unsafe {
-            host.attach_raw(
-                "clock.so",
-                descriptor,
-                manifest(),
-                init_that_must_not_run,
-            )
-        };
+        let _ =
+            unsafe { host.attach_raw("clock.so", descriptor, manifest(), init_that_must_not_run) };
         assert!(!INIT_RAN.load(Ordering::Acquire));
     }
 
