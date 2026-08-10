@@ -809,32 +809,6 @@ pub(crate) fn state_detail(state: &ModuleState) -> Option<&str> {
     }
 }
 
-fn duplicate_module_names(pending: &[(PathBuf, LoadedArtifact)]) -> HashSet<String> {
-    let mut counts = HashMap::new();
-    for (_, artifact) in pending {
-        *counts
-            .entry(artifact.manifest.module.name.clone())
-            .or_insert(0usize) += 1;
-    }
-    counts
-        .into_iter()
-        .filter_map(|(name, count)| (count > 1).then_some(name))
-        .collect()
-}
-
-fn duplicate_bus_names(pending: &[(PathBuf, LoadedArtifact)]) -> HashSet<BusName> {
-    let mut counts = HashMap::new();
-    for (_, artifact) in pending {
-        *counts
-            .entry(artifact.manifest.bus_name.clone())
-            .or_insert(0usize) += 1;
-    }
-    counts
-        .into_iter()
-        .filter_map(|(name, count)| (count > 1).then_some(name))
-        .collect()
-}
-
 fn sanitized_field<const N: usize>(field: &[u8; N]) -> Option<String> {
     let raw = std::str::from_utf8(field_bytes(field)).ok()?;
     let sanitized = sanitize_untrusted(raw);
