@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, Weak};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -544,7 +544,7 @@ mod tests {
     static DELIVERY_CODE: AtomicI32 = AtomicI32::new(TB_OK);
     static DELIVERIES: AtomicUsize = AtomicUsize::new(0);
     static SHUTDOWN_CODE: AtomicI32 = AtomicI32::new(TB_OK);
-    static VTABLE_TEST_LOCK: StdMutex<()> = StdMutex::new(());
+    static VTABLE_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
     unsafe extern "C" fn deliver(_: *mut c_void, _: *const u8, _: usize) -> i32 {
         DELIVERIES.fetch_add(1, Ordering::AcqRel);
@@ -651,7 +651,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn deferred_initialization_waits_for_ready_then_delivers_pending_calls() {
-        let _lock = VTABLE_TEST_LOCK.lock().unwrap();
+        let _lock = VTABLE_TEST_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
         DELIVERY_CODE.store(TB_OK, Ordering::Release);
         DELIVERIES.store(0, Ordering::Release);
         let (transport, host) =
@@ -687,7 +690,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn a_pending_call_is_failed_when_the_module_closes_its_delivery_queue() {
-        let _lock = VTABLE_TEST_LOCK.lock().unwrap();
+        let _lock = VTABLE_TEST_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
         DELIVERY_CODE.store(TB_CLOSED, Ordering::Release);
         let (transport, host) = ModuleTransport::new("closed".to_string(), Vec::new());
         transport.defer_initialize(initialize_ok, host);
