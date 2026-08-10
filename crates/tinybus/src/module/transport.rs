@@ -24,6 +24,7 @@ struct HostContext {
     wake: Arc<Notify>,
     config: StdMutex<Vec<u8>>,
     faulted: AtomicBool,
+    init_failed: AtomicBool,
     ready: AtomicBool,
     ready_notify: Notify,
 }
@@ -54,6 +55,7 @@ impl ModuleTransport {
             wake: Arc::new(Notify::new()),
             config: StdMutex::new(config),
             faulted: AtomicBool::new(false),
+            init_failed: AtomicBool::new(false),
             ready: AtomicBool::new(false),
             ready_notify: Notify::new(),
         }));
@@ -157,6 +159,10 @@ impl ModuleTransport {
         self.context.faulted.load(Ordering::Acquire)
     }
 
+    pub(crate) fn init_failed(&self) -> bool {
+        self.context.init_failed.load(Ordering::Acquire)
+    }
+
     async fn deliver_now(&self, message: Message) -> Result<()> {
         if self.context.faulted.load(Ordering::Acquire) {
             return Err(Error::ConnectionClosed);
@@ -222,6 +228,7 @@ impl ModuleTransport {
 impl Transport for ModuleTransport {
     async fn send(&self, message: Message) -> Result<()> {
         if self.ensure_initialized().await.is_err() {
+            self.context.init_failed.store(true, Ordering::Release);
             self.context.faulted.store(true, Ordering::Release);
             self.context.ready_notify.notify_waiters();
             if message.header.kind == MessageKind::MethodCall {

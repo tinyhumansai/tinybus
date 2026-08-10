@@ -93,7 +93,13 @@ struct LoadedModule {
 impl LoadedModule {
     fn snapshot(&self) -> ModuleInfo {
         let mut info = self.info.clone();
-        if self.transport.is_faulted()
+        if self.transport.init_failed()
+            && !matches!(info.state, ModuleState::Stopped | ModuleState::Disabled)
+        {
+            info.state = ModuleState::Failed {
+                reason: "module initialization failed".to_string(),
+            };
+        } else if self.transport.is_faulted()
             && !matches!(info.state, ModuleState::Stopped | ModuleState::Disabled)
         {
             info.state = ModuleState::Faulted {
@@ -740,8 +746,14 @@ impl ModuleControl for ModuleHostInner {
             return None;
         }
         let old = module.info.state.clone();
-        let new = ModuleState::Faulted {
-            reason: "module reported an unrecoverable fault".to_string(),
+        let new = if module.transport.init_failed() {
+            ModuleState::Failed {
+                reason: "module initialization failed".to_string(),
+            }
+        } else {
+            ModuleState::Faulted {
+                reason: "module reported an unrecoverable fault".to_string(),
+            }
         };
         module.info.state = new.clone();
         Some((module.info.name.clone(), old, new))
