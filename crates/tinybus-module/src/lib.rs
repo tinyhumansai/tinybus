@@ -7,7 +7,7 @@
 use std::ffi::c_void;
 use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Mutex as StdMutex;
+use std::sync::{Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -21,6 +21,40 @@ use tinybus::{Connection, Error, Result, Transport};
 use tokio::sync::{Mutex, mpsc};
 
 const MODULE_QUEUE_CAPACITY: usize = 256;
+static MANIFEST_BYTES: OnceLock<Vec<u8>> = OnceLock::new();
+
+/// Build and retain the exported manifest bytes for the process lifetime.
+#[doc(hidden)]
+pub fn manifest_slice(
+    name: &str,
+    version: &str,
+    provides: &[&str],
+    requires: &[&str],
+    optional: &[&str],
+    lazy: bool,
+) -> tinybus::module::abi::TbSlice {
+    use tinybus::module::manifest::{ModuleDependency, ModuleManifest};
+
+    let bytes = MANIFEST_BYTES.get_or_init(|| {
+        let dependency = |interface: &&str| ModuleDependency {
+            interface: (*interface).to_string(),
+            version: None,
+        };
+        serde_json::to_vec(&ModuleManifest {
+            name: name.to_string(),
+            version: version.to_string(),
+            provides: provides.iter().map(|value| (*value).to_string()).collect(),
+            requires: requires.iter().map(dependency).collect(),
+            optional: optional.iter().map(dependency).collect(),
+            lazy,
+        })
+        .expect("module manifest is serializable")
+    });
+    tinybus::module::abi::TbSlice {
+        ptr: bytes.as_ptr(),
+        len: bytes.len(),
+    }
+}
 
 #[derive(Clone, Copy)]
 struct HostCalls(TbHostVtable);
@@ -238,6 +272,23 @@ where
 #[macro_export]
 macro_rules! module_export {
     (setup = $setup:path, worker_threads = $threads:expr $(,)?) => {
+        $crate::module_export! {
+            setup = $setup,
+            worker_threads = $threads,
+            provides = [],
+            requires = [],
+            optional = [],
+            lazy = false,
+        }
+    };
+    (
+        setup = $setup:path,
+        worker_threads = $threads:expr,
+        provides = [$($provides:literal),* $(,)?],
+        requires = [$($requires:literal),* $(,)?],
+        optional = [$($optional:literal),* $(,)?],
+        lazy = $lazy:expr $(,)?
+    ) => {
         #[unsafe(no_mangle)]
         pub static TINYBUS_MODULE_ABI_V1: ::tinybus::module::abi::TbAbiDescriptor =
             ::tinybus::module::abi::TbAbiDescriptor::current(
@@ -247,17 +298,14 @@ macro_rules! module_export {
 
         #[unsafe(no_mangle)]
         pub extern "C" fn tinybus_module_manifest_v1() -> ::tinybus::module::abi::TbSlice {
-            static MANIFEST: &str = concat!(
-                "{\"name\":\"",
+            $crate::manifest_slice(
                 env!("CARGO_PKG_NAME"),
-                "\",\"version\":\"",
                 env!("CARGO_PKG_VERSION"),
-                "\",\"provides\":[],\"requires\":[],\"optional\":[],\"lazy\":false}"
-            );
-            ::tinybus::module::abi::TbSlice {
-                ptr: MANIFEST.as_ptr(),
-                len: MANIFEST.len(),
-            }
+                &[$($provides),*],
+                &[$($requires),*],
+                &[$($optional),*],
+                $lazy,
+            )
         }
 
         #[unsafe(no_mangle)]

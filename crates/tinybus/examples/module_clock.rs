@@ -24,4 +24,8 @@ async fn setup(connection: Connection) -> Result<()> {
 tinybus_module::module_export! {
     setup = setup,
     worker_threads = 1,
+    provides = ["ai.tinyhumans.openhuman.Clock"],
+    requires = [],
+    optional = [],
+    lazy = false,
 }
