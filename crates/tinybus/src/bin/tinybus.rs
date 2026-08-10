@@ -627,7 +627,7 @@ mod tests {
 
     #[tokio::test]
     async fn module_commands_and_invalid_json_fail_with_a_running_broker() {
-        let (_dir, address, _service) = broker_and_service().await;
+        let (_dir, address, _host) = broker_with_module_host().await;
         let commands = [
             ModulesCommand::List {
                 state: Some("ready".into()),
@@ -665,6 +665,31 @@ mod tests {
             );
         }
 
+        run_modules(
+            &address,
+            Duration::from_secs(2),
+            ModulesCommand::List {
+                state: None,
+                json: false,
+            },
+        )
+        .await
+        .unwrap();
+        run_modules(&address, Duration::from_secs(2), ModulesCommand::Doctor)
+            .await
+            .unwrap();
+        run_modules(
+            &address,
+            Duration::from_secs(2),
+            ModulesCommand::Scan {
+                paths: Vec::new(),
+                dry_run: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        let (_dir, address, _service) = broker_and_service().await;
         for command in [
             Command::Call {
                 destination: DESTINATION.into(),
