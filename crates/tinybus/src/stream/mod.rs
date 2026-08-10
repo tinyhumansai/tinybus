@@ -765,8 +765,18 @@ impl StreamReader {
     }
 
     /// Drain the whole stream into memory, refusing to exceed `limit` bytes.
+    ///
+    /// The initial reservation is **not** taken from the sender's declared
+    /// length. `declared_len` arrives from the peer before any payload does, so
+    /// sizing a buffer from it is a remote-triggered allocation — the same
+    /// mistake the frame-length cap in
+    /// [`codec`](crate::message::codec) exists to prevent, one layer up. A peer
+    /// could declare the maximum on each of its permitted streams and make a
+    /// receiver reserve gigabytes for bytes it never intends to send. Reserving
+    /// one chunk and letting the vector grow costs an amortised handful of
+    /// reallocations on a real transfer and nothing at all on a lie.
     pub async fn read_to_end_capped(&mut self, limit: u64) -> Result<Vec<u8>> {
-        let mut out = Vec::with_capacity(self.declared_len.unwrap_or(0).min(limit) as usize);
+        let mut out = Vec::with_capacity(limit.min(MAX_CHUNK_LEN as u64) as usize);
         while let Some(chunk) = self.next_chunk().await? {
             if out.len() as u64 + chunk.len() as u64 > limit {
                 return Err(Error::StreamTooLarge { limit });
