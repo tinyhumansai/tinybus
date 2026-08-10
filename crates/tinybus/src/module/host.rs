@@ -155,13 +155,27 @@ struct ModuleHostInner {
 #[async_trait::async_trait]
 pub(crate) trait ModuleControl: Send + Sync {
     fn list(&self) -> Vec<ModuleInfo>;
-    fn load(self: Arc<Self>, path: PathBuf, config: serde_json::Value) -> Result<ModuleInfo>;
+    fn load(
+        self: Arc<Self>,
+        path: PathBuf,
+        config: serde_json::Value,
+    ) -> Result<(ModuleInfo, Option<ModuleTransition>)>;
     async fn stop(&self, name: &str, deadline: Duration) -> Result<ModuleInfo>;
-    fn enable(&self, name: &str, enabled: bool) -> Result<ModuleInfo>;
-    fn rescan(self: Arc<Self>, paths: Vec<PathBuf>, dry_run: bool) -> Result<Vec<ModuleInfo>>;
-    fn peer_detached(&self, unique_name: &BusName) -> Option<(String, ModuleState, ModuleState)>;
+    fn enable(
+        &self,
+        name: &str,
+        enabled: bool,
+    ) -> Result<(ModuleInfo, Option<ModuleTransition>)>;
+    fn rescan(
+        self: Arc<Self>,
+        paths: Vec<PathBuf>,
+        dry_run: bool,
+    ) -> Result<(Vec<ModuleInfo>, Vec<ModuleTransition>)>;
+    fn peer_detached(&self, unique_name: &BusName) -> Option<ModuleTransition>;
     fn unavailable_for(&self, bus_name: &BusName) -> Option<Error>;
 }
+
+pub(crate) type ModuleTransition = (String, ModuleState, ModuleState);
 
 impl ModuleHost {
     /// Create a host. Loading is permissive about rustc drift by default.
@@ -782,8 +796,18 @@ impl ModuleControl for ModuleHostInner {
         modules
     }
 
-    fn load(self: Arc<Self>, path: PathBuf, config: serde_json::Value) -> Result<ModuleInfo> {
-        ModuleHost { inner: self }.load_file_with_config(path, config)
+    fn load(
+        self: Arc<Self>,
+        path: PathBuf,
+        config: serde_json::Value,
+    ) -> Result<(ModuleInfo, Option<ModuleTransition>)> {
+        let info = ModuleHost { inner: self }.load_file_with_config(path, config)?;
+        let transition = Some((
+            info.name.clone(),
+            ModuleState::Discovered,
+            info.state.clone(),
+        ));
+        Ok((info, transition))
     }
 
     async fn stop(&self, name: &str, deadline: Duration) -> Result<ModuleInfo> {
@@ -821,7 +845,11 @@ impl ModuleControl for ModuleHostInner {
         Ok(module.info.clone())
     }
 
-    fn enable(&self, name: &str, enabled: bool) -> Result<ModuleInfo> {
+    fn enable(
+        &self,
+        name: &str,
+        enabled: bool,
+    ) -> Result<(ModuleInfo, Option<ModuleTransition>)> {
         let mut loaded = self.loaded.lock().expect("module list lock");
         let module = loaded
             .iter_mut()
@@ -850,10 +878,16 @@ impl ModuleControl for ModuleHostInner {
         } else {
             ModuleState::Disabled
         };
-        Ok(module.snapshot())
+        let info = module.snapshot();
+        let transition = (old != info.state).then(|| (info.name.clone(), old, info.state.clone()));
+        Ok((info, transition))
     }
 
-    fn rescan(self: Arc<Self>, paths: Vec<PathBuf>, dry_run: bool) -> Result<Vec<ModuleInfo>> {
+    fn rescan(
+        self: Arc<Self>,
+        paths: Vec<PathBuf>,
+        dry_run: bool,
+    ) -> Result<(Vec<ModuleInfo>, Vec<ModuleTransition>)> {
         let directories = if paths.is_empty() {
             let configured = self
                 .directories
@@ -885,7 +919,21 @@ impl ModuleControl for ModuleHostInner {
                 }
             }
         }
-        Ok(loaded)
+        let transitions = if dry_run {
+            Vec::new()
+        } else {
+            loaded
+                .iter()
+                .map(|info| {
+                    (
+                        info.name.clone(),
+                        ModuleState::Discovered,
+                        info.state.clone(),
+                    )
+                })
+                .collect()
+        };
+        Ok((loaded, transitions))
     }
 
     fn peer_detached(&self, unique_name: &BusName) -> Option<(String, ModuleState, ModuleState)> {
