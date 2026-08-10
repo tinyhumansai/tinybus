@@ -291,10 +291,10 @@ impl StreamRegistry {
             .as_ref()
             .ok_or_else(|| Error::protocol("stream call is missing a member"))?;
         match member.as_str() {
-            "Open" => self.open(header, body),
-            "Write" => self.write(header, body).await,
-            "Close" => self.close(header, body),
-            "Abort" => self.abort(header, body),
+            "Open" => self.open(header, member, body),
+            "Write" => self.write(header, member, body).await,
+            "Close" => self.close(header, member, body),
+            "Abort" => self.abort(header, member, body),
             _ => Err(Error::UnknownMethod {
                 interface: header
                     .interface
@@ -305,8 +305,7 @@ impl StreamRegistry {
         }
     }
 
-    fn open(&self, header: &Header, body: Value) -> Result<Value> {
-        let member = member_of(header, "Open")?;
+    fn open(&self, header: &Header, member: &MemberName, body: Value) -> Result<Value> {
         let (descriptor,): (StreamDescriptor,) =
             serde_json::from_value(body).map_err(|e| Error::bad_arguments(member.clone(), e))?;
         let limits = self.limits();
@@ -392,8 +391,7 @@ impl StreamRegistry {
         Ok(Value::String(id))
     }
 
-    async fn write(&self, header: &Header, body: Value) -> Result<Value> {
-        let member = member_of(header, "Write")?;
+    async fn write(&self, header: &Header, member: &MemberName, body: Value) -> Result<Value> {
         let (id, seq, data): (String, u64, String) =
             serde_json::from_value(body).map_err(|e| Error::bad_arguments(member.clone(), e))?;
         let stream = self.lookup(&id, header)?;
@@ -448,8 +446,7 @@ impl StreamRegistry {
         Ok(Value::Null)
     }
 
-    fn close(&self, header: &Header, body: Value) -> Result<Value> {
-        let member = member_of(header, "Close")?;
+    fn close(&self, header: &Header, member: &MemberName, body: Value) -> Result<Value> {
         let (id, total_len): (String, u64) =
             serde_json::from_value(body).map_err(|e| Error::bad_arguments(member.clone(), e))?;
         let stream = self.lookup(&id, header)?;
@@ -472,8 +469,7 @@ impl StreamRegistry {
         Ok(Value::Null)
     }
 
-    fn abort(&self, header: &Header, body: Value) -> Result<Value> {
-        let member = member_of(header, "Abort")?;
+    fn abort(&self, header: &Header, member: &MemberName, body: Value) -> Result<Value> {
         let (id,): (String,) =
             serde_json::from_value(body).map_err(|e| Error::bad_arguments(member.clone(), e))?;
         let stream = self.lookup(&id, header)?;
@@ -785,13 +781,6 @@ impl StreamReader {
         }
         Ok(out)
     }
-}
-
-fn member_of(header: &Header, expected: &'static str) -> Result<MemberName> {
-    header
-        .member
-        .clone()
-        .ok_or_else(|| Error::protocol(format!("stream {expected} call is missing a member")))
 }
 
 #[cfg(test)]
