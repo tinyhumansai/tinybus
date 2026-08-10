@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+build = "build.rs"
 description = "A zbus-style message bus that keeps external integrations out of the OpenHuman kernel's dependency graph."
 readme = "README.md"
 keywords = ["bus", "ipc", "rpc", "integrations", "openhuman"]
@@ -59,6 +60,10 @@ cli = [
     "uds",
 ]
 
+# Load trusted, in-process cdylib modules. Off by default because a loaded
+# module shares the host's address space and full privileges.
+modules = []
+
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "io-util"] }
 tempfile = "3"
@@ -75,3 +80,11 @@ required-features = ["uds", "macros", "cli"]
 [[example]]
 name = "kernel_client"
 required-features = ["uds", "macros"]
+
+[[example]]
+name = "module_clock"
+crate-type = ["cdylib"]
+required-features = ["modules", "macros"]
+
+[dev-dependencies.tinybus-module]
+workspace = true

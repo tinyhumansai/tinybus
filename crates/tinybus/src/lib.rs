@@ -66,11 +66,13 @@
 extern crate self as tinybus;
 
 pub mod broker;
+pub mod build_info;
 pub mod connection;
 pub mod error;
 pub mod events;
 pub mod global;
 pub mod message;
+pub mod module;
 pub mod name;
 pub mod native;
 pub mod ports;
