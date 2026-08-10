@@ -369,28 +369,37 @@ impl Error {
     }
 }
 
-/// Replace every backtick-quoted span with `…`.
+/// Replace every quoted span — backtick or double-quote — with `…`.
 ///
 /// serde puts the values it rejected in backticks, and so do most of the
 /// libraries a service will wrap. Redacting the span rather than dropping the
 /// whole message keeps the diagnostic — "invalid type: integer, expected a
 /// string" still tells you what went wrong — while making the error safe to log
 /// and safe to send to a peer that must not see the argument.
+///
+/// Double quotes are redacted too because serde uses *those* for the one case
+/// that matters most: a rejected string arrives as `invalid type: string
+/// "hunter2", expected …`, and a rejected string is the shape an access token,
+/// a passphrase or a recovery phrase has. Redacting only backticks would leave
+/// exactly the values this function exists to keep out of the message.
 pub fn redact_values(message: &str) -> String {
     let mut out = String::with_capacity(message.len());
-    let mut inside = false;
+    let mut inside: Option<char> = None;
     for c in message.chars() {
-        match (c, inside) {
-            ('`', false) => {
-                out.push_str("`…");
-                inside = true;
+        match inside {
+            None if c == '`' || c == '"' => {
+                out.push(c);
+                out.push('…');
+                inside = Some(c);
             }
-            ('`', true) => {
-                out.push('`');
-                inside = false;
+            // Only the same quote character closes the span, so a backtick
+            // inside a quoted value cannot end the redaction early.
+            Some(open) if c == open => {
+                out.push(c);
+                inside = None;
             }
-            (_, false) => out.push(c),
-            (_, true) => {}
+            None => out.push(c),
+            Some(_) => {}
         }
     }
     out
