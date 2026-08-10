@@ -17,6 +17,10 @@ impl Clock {
     async fn now(&self) -> Result<String> {
         Ok(format!("{}{:?}", self.prefix, std::time::SystemTime::now()))
     }
+
+    async fn panic(&self) -> Result<()> {
+        panic!("panic payload must never cross the module boundary: secret-token")
+    }
 }
 
 async fn setup(connection: Connection, config: ClockConfig) -> Result<()> {

@@ -1042,6 +1042,27 @@ mod tests {
             )
             .await
             .unwrap();
+        let mut name_changes = client
+            .add_match(
+                crate::router::MatchRule::parse(
+                    "type=signal,interface=ai.tinyhumans.tinybus.Bus,member=NameOwnerChanged",
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let panic_error = clock.call::<_, ()>("Panic", ()).await.unwrap_err();
+        let panic_text = panic_error.to_string();
+        assert!(panic_text.contains("ModulePanicked"), "{panic_text}");
+        assert!(panic_text.contains("module_clock.rs"), "{panic_text}");
+        assert!(!panic_text.contains("secret-token"), "{panic_text}");
+        let name_change = tokio::time::timeout(Duration::from_secs(2), name_changes.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(name_change.body[0], "ai.tinyhumans.openhuman.Clock");
+        assert!(name_change.body[2].is_null());
 
         let stopped: ModuleInfo = control
             .call("StopModule", ("tinybus", 1_000u64))
