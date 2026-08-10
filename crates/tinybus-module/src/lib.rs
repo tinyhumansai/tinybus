@@ -891,7 +891,8 @@ mod tests {
         assert_eq!(code, TB_OK);
         let captured = outgoing_rx.recv_timeout(Duration::from_secs(1));
         println!("captured hello: {}", captured.is_ok());
-        let hello: Message = serde_json::from_slice(&captured.expect("module did not send Hello")).unwrap();
+        let hello: Message =
+            serde_json::from_slice(&captured.expect("module did not send Hello")).unwrap();
         let reply = Message::method_return(
             &hello.header,
             serde_json::Value::String(":module.1".to_string()),
