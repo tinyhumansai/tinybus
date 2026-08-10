@@ -810,13 +810,16 @@ fn module_host_helpers_preserve_safe_names_states_and_allowlist_decisions() {
     ];
     assert_eq!(states.iter().map(state_name).collect::<Vec<_>>().len(), 11);
     assert_eq!(state_detail(&states[1]), Some("no"));
+    assert_eq!(state_detail(&states[2]), Some("no"));
     assert_eq!(state_detail(&states[0]), None);
     assert_eq!(
         sanitized_field(b"clock\0ignored"),
         Some("clock".to_string())
     );
     assert_eq!(sanitized_field(b"bad\nname"), None);
+    assert_eq!(sanitized_field(&[0xff]), None);
     assert_eq!(safe_file_name(Path::new("/private/clock.so")), "clock.so");
+    assert_eq!(safe_file_name(Path::new("/private/bad\nname")), "module");
     assert_eq!(safe_file_name(Path::new("/")), "module");
     assert!(has_library_extension(Path::new(if cfg!(windows) {
         "clock.dll"
@@ -858,6 +861,7 @@ fn module_host_helpers_preserve_safe_names_states_and_allowlist_decisions() {
     let refused = Error::module_refused(&module, "nope");
     let info = rejection_info(&refused);
     assert!(matches!(info.state, ModuleState::Rejected { .. }));
+    assert_eq!(rejection_info(&Error::ConnectionClosed).name, "module");
 }
 
 #[test]
