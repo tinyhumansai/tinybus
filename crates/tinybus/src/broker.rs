@@ -195,12 +195,11 @@ impl Broker {
         let (result, changes) = self.bus_method(from, from_name, &member, message.body);
 
         #[cfg(feature = "modules")]
-        let module_state = matches!(
-            member.as_str(),
-            "LoadModule" | "StopModule" | "EnableModule" | "RescanModules"
-        )
-        .then(|| result.as_ref().ok().cloned())
-        .flatten();
+        let module_states = result
+            .as_ref()
+            .ok()
+            .map(|value| module_state_bodies(member.as_str(), value))
+            .unwrap_or_default();
 
         let reply = match result {
             Ok(value) => Message::method_return(&header, value),
@@ -222,7 +221,7 @@ impl Broker {
             }
         }
         #[cfg(feature = "modules")]
-        if let Some(module_state) = module_state {
+        for module_state in module_states {
             self.announce_module_state(module_state).await;
         }
         Ok(())
@@ -456,6 +455,39 @@ impl Broker {
             let _ = target.try_send(signal.clone());
         }
     }
+}
+
+#[cfg(feature = "modules")]
+fn module_state_bodies(member: &str, value: &Value) -> Vec<Value> {
+    use crate::module::host::{ModuleInfo, state_detail, state_name};
+
+    let modules = if member == "RescanModules" {
+        serde_json::from_value::<Vec<ModuleInfo>>(value.clone()).unwrap_or_default()
+    } else if matches!(member, "LoadModule" | "StopModule" | "EnableModule") {
+        serde_json::from_value::<ModuleInfo>(value.clone())
+            .into_iter()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    modules
+        .into_iter()
+        .map(|module| {
+            let old = match member {
+                "LoadModule" | "RescanModules" => "discovered",
+                "EnableModule" if matches!(module.state, crate::module::host::ModuleState::Disabled) => "ready",
+                "EnableModule" => "disabled",
+                "StopModule" => "ready",
+                _ => "discovered",
+            };
+            serde_json::json!([
+                module.name,
+                old,
+                state_name(&module.state),
+                state_detail(&module.state)
+            ])
+        })
+        .collect()
 }
 
 impl Default for Broker {
