@@ -717,7 +717,10 @@ mod tests {
             .call_raw(invalid, Duration::from_secs(1))
             .await
             .unwrap_err();
-        assert_eq!(error.wire_name(), "ai.tinyhumans.tinybus.Error.BadArguments");
+        assert_eq!(
+            error.wire_name(),
+            "ai.tinyhumans.tinybus.Error.BadArguments"
+        );
     }
 
     #[tokio::test]
