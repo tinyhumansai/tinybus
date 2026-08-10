@@ -786,11 +786,20 @@ mod tests {
             detach_on_panic: true,
         };
         HOST_SEND_CODE.store(TB_BACKPRESSURE, Ordering::Release);
-        assert!(matches!(transport.send(message()).await, Err(Error::Backpressure)));
+        assert!(matches!(
+            transport.send(message()).await,
+            Err(Error::Backpressure)
+        ));
         HOST_SEND_CODE.store(TB_CLOSED, Ordering::Release);
-        assert!(matches!(transport.send(message()).await, Err(Error::ConnectionClosed)));
+        assert!(matches!(
+            transport.send(message()).await,
+            Err(Error::ConnectionClosed)
+        ));
         HOST_SEND_CODE.store(TB_BAD_ARGUMENT, Ordering::Release);
-        assert!(matches!(transport.send(message()).await, Err(Error::Transport { .. })));
+        assert!(matches!(
+            transport.send(message()).await,
+            Err(Error::Transport { .. })
+        ));
         HOST_SEND_CODE.store(TB_OK, Ordering::Release);
         HOST_FAULTED.store(false, Ordering::Release);
         let mut panic_message = message();
