@@ -16,7 +16,9 @@ use crate::connection::Connection;
 use crate::error::{Error, Result};
 use crate::message::Message;
 use crate::name::{BusName, InterfaceName, MemberName, ObjectPath};
-use crate::stream::{MAX_CHUNK_LEN, STREAM_INTERFACE, STREAM_PATH, StreamDescriptor, StreamLimits, StreamRef};
+use crate::stream::{
+    MAX_CHUNK_LEN, STREAM_INTERFACE, STREAM_PATH, StreamDescriptor, StreamLimits, StreamRef,
+};
 use crate::transport::memory::MemoryBus;
 
 const SINK: &str = "ai.tinyhumans.Sink";
@@ -84,11 +86,9 @@ impl crate::service::Interface for Arc<Sink> {
 }
 
 fn checksum(bytes: &[u8]) -> u64 {
-    bytes
-        .iter()
-        .fold(1469598103934665603u64, |hash, byte| {
-            (hash ^ *byte as u64).wrapping_mul(1099511628211)
-        })
+    bytes.iter().fold(1469598103934665603u64, |hash, byte| {
+        (hash ^ *byte as u64).wrapping_mul(1099511628211)
+    })
 }
 
 fn payload(len: usize) -> Vec<u8> {
@@ -167,10 +167,7 @@ async fn a_payload_that_fits_the_window_can_finish_before_the_reader_attaches() 
     // Written and closed with no reader in sight: the receiving method is only
     // dispatched afterwards, and must still find the stream.
     let mut writer = client
-        .open_stream(
-            &BusName::new(SINK).unwrap(),
-            StreamDescriptor::with_len(64),
-        )
+        .open_stream(&BusName::new(SINK).unwrap(), StreamDescriptor::with_len(64))
         .await
         .unwrap();
     let stream = writer.stream_ref();
@@ -350,7 +347,10 @@ async fn a_peer_holding_open_more_streams_than_its_share_is_refused_a_new_one() 
 async fn closing_short_of_the_declared_length_is_an_error_not_a_short_read() {
     let (client, _service) = bus().await;
     let mut writer = client
-        .open_stream(&BusName::new(SINK).unwrap(), StreamDescriptor::with_len(100))
+        .open_stream(
+            &BusName::new(SINK).unwrap(),
+            StreamDescriptor::with_len(100),
+        )
         .await
         .unwrap();
     writer.write(&payload(10)).await.unwrap();
@@ -638,10 +638,7 @@ async fn a_malformed_open_is_a_bad_arguments_error_that_does_not_quote_the_body(
         error.wire_name(),
         "ai.tinyhumans.tinybus.Error.BadArguments"
     );
-    assert!(
-        !error.to_string().contains("ceremonial-secret"),
-        "{error}"
-    );
+    assert!(!error.to_string().contains("ceremonial-secret"), "{error}");
 }
 
 #[tokio::test]

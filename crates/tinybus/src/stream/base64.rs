@@ -90,7 +90,9 @@ fn decode_symbol(byte: u8) -> Result<u8> {
         b'0'..=b'9' => Ok(byte - b'0' + 52),
         b'+' => Ok(62),
         b'/' => Ok(63),
-        _ => Err(Error::protocol("base64 chunk has a symbol outside the alphabet")),
+        _ => Err(Error::protocol(
+            "base64 chunk has a symbol outside the alphabet",
+        )),
     }
 }
 
