@@ -261,7 +261,14 @@ mod tests {
         raw.write_all(&10u32.to_be_bytes()).await.unwrap();
         raw.write_all(b"short").await.unwrap();
         drop(raw);
-        assert!(server.recv().await.unwrap_err().to_string().contains("mid-frame"));
+        assert!(
+            server
+                .recv()
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("mid-frame")
+        );
         server.close().await.unwrap();
         server.close().await.unwrap();
     }
@@ -270,7 +277,10 @@ mod tests {
     async fn socket_labels_and_failed_dials_are_operator_useful() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("missing");
-        let error = UnixTransport::connect(&path).await.err().expect("dial fails");
+        let error = UnixTransport::connect(&path)
+            .await
+            .err()
+            .expect("dial fails");
         assert!(error.to_string().contains("could not connect"));
 
         let listener = UnixListenerAdapter::bind(&path).await.unwrap();
@@ -282,8 +292,14 @@ mod tests {
 
     #[test]
     fn transient_accept_errors_are_classified_without_hiding_fatal_errors() {
-        assert!(is_per_connection(&std::io::Error::from(std::io::ErrorKind::ConnectionReset)));
-        assert!(is_per_connection(&std::io::Error::from(std::io::ErrorKind::Interrupted)));
-        assert!(!is_per_connection(&std::io::Error::from(std::io::ErrorKind::PermissionDenied)));
+        assert!(is_per_connection(&std::io::Error::from(
+            std::io::ErrorKind::ConnectionReset
+        )));
+        assert!(is_per_connection(&std::io::Error::from(
+            std::io::ErrorKind::Interrupted
+        )));
+        assert!(!is_per_connection(&std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied
+        )));
     }
 }
