@@ -368,7 +368,17 @@ where
                             message: format!("a module method panicked at {location}"),
                         }
                     }));
-                    setup(connection).await
+                    match setup(connection.clone()).await {
+                        Ok(()) => {
+                            // Keep the connection (and therefore the served
+                            // object tree and transport) alive until shutdown
+                            // stops this runtime. Setup returning means ready,
+                            // not that the module has finished serving.
+                            std::future::pending::<()>().await;
+                            Ok(())
+                        }
+                        Err(error) => Err(error),
+                    }
                 }
                 Err(error) => Err(error),
             };
