@@ -11,9 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::broker::Broker;
 use crate::build_info;
 use crate::error::{Error, Result, sanitize_untrusted};
-use crate::module::abi::{
-    TB_OK, TbAbiDescriptor, TbModuleInit, TbModuleVtable, field_bytes,
-};
+use crate::module::abi::{TB_OK, TbAbiDescriptor, TbModuleInit, TbModuleVtable, field_bytes};
 use crate::module::loader::{self, LoadedArtifact};
 use crate::module::manifest::{MANIFEST_SCHEMA, ModuleIdentity, ModuleManifest, PanicPolicy};
 use crate::module::transport::ModuleTransport;
@@ -160,11 +158,7 @@ pub(crate) trait ModuleControl: Send + Sync {
         config: serde_json::Value,
     ) -> Result<(ModuleInfo, Option<ModuleTransition>)>;
     async fn stop(&self, name: &str, deadline: Duration) -> Result<ModuleInfo>;
-    fn enable(
-        &self,
-        name: &str,
-        enabled: bool,
-    ) -> Result<(ModuleInfo, Option<ModuleTransition>)>;
+    fn enable(&self, name: &str, enabled: bool) -> Result<(ModuleInfo, Option<ModuleTransition>)>;
     fn rescan(
         self: Arc<Self>,
         paths: Vec<PathBuf>,
@@ -310,11 +304,7 @@ impl ModuleHost {
             let artifact = loader::load(path, self.inner.strict.load(Ordering::Acquire))?;
             let rejected_manifest = artifact.manifest.clone();
             if let Err(error) = self.ensure_dependencies(&artifact.manifest, path) {
-                self.record_manifest_rejection(
-                    &error,
-                    rejected_manifest,
-                    RefusalClass::Unresolved,
-                );
+                self.record_manifest_rejection(&error, rejected_manifest, RefusalClass::Unresolved);
                 return Err(error);
             }
             self.activate(path, artifact, config)
@@ -376,11 +366,7 @@ impl ModuleHost {
         for (index, reason) in resolution.unresolved {
             let (path, artifact) = pending[index].take().expect("resolver index is valid");
             let error = Error::module_refused(&path, reason);
-            self.record_manifest_rejection(
-                &error,
-                artifact.manifest,
-                RefusalClass::Unresolved,
-            );
+            self.record_manifest_rejection(&error, artifact.manifest, RefusalClass::Unresolved);
             outcomes.push(Err(error));
         }
         for index in resolution.order {
@@ -527,11 +513,7 @@ impl ModuleHost {
         let mut admitted = self
             .validate(path, &artifact.descriptor, &artifact.manifest)
             .map_err(|error| {
-                self.record_manifest_rejection(
-                    &error,
-                    manifest.clone(),
-                    RefusalClass::Rejected,
-                );
+                self.record_manifest_rejection(&error, manifest.clone(), RefusalClass::Rejected);
                 error
             })?;
         if self
@@ -583,10 +565,7 @@ impl ModuleHost {
             Ok(change) => change,
             Err(_) => {
                 let _ = transport.stop_sync(Duration::from_millis(0));
-                let error = Error::module_refused(
-                    path,
-                    "module bus name is already owned",
-                );
+                let error = Error::module_refused(path, "module bus name is already owned");
                 self.record_manifest_rejection(&error, manifest, RefusalClass::Unresolved);
                 return Err(error);
             }
@@ -844,11 +823,7 @@ impl ModuleControl for ModuleHostInner {
         Ok(module.info.clone())
     }
 
-    fn enable(
-        &self,
-        name: &str,
-        enabled: bool,
-    ) -> Result<(ModuleInfo, Option<ModuleTransition>)> {
+    fn enable(&self, name: &str, enabled: bool) -> Result<(ModuleInfo, Option<ModuleTransition>)> {
         let mut loaded = self.loaded.lock().expect("module list lock");
         let module = loaded
             .iter_mut()

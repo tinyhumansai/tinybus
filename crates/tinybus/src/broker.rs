@@ -364,91 +364,97 @@ impl Broker {
 
         let outcome = (|| -> Result<(Value, Vec<Value>)> {
             match operation {
-            ModuleMember::List => Ok((serde_json::to_value(control.list())?, Vec::new())),
-            ModuleMember::Get => {
-                let (name,): (String,) = parse_args(member, body)?;
-                Ok((serde_json::to_value(
-                    control
-                        .list()
-                        .into_iter()
-                        .find(|module| module.name == name),
-                )?, Vec::new()))
-            }
-            ModuleMember::GetManifest => {
-                let (name,): (String,) = parse_args(member, body)?;
-                Ok((serde_json::to_value(
-                    control
-                        .list()
-                        .into_iter()
-                        .find(|module| module.name == name)
-                        .map(|module| module.manifest),
-                )?, Vec::new()))
-            }
-            ModuleMember::Load => {
-                let arguments = body.as_array().ok_or_else(|| {
-                    Error::bad_arguments(member.clone(), "expected a positional array")
-                })?;
-                let path: String = arguments
-                    .first()
-                    .cloned()
-                    .ok_or_else(|| Error::bad_arguments(member.clone(), "missing path"))
-                    .and_then(|value| {
-                        serde_json::from_value(value)
-                            .map_err(|error| Error::bad_arguments(member.clone(), error))
+                ModuleMember::List => Ok((serde_json::to_value(control.list())?, Vec::new())),
+                ModuleMember::Get => {
+                    let (name,): (String,) = parse_args(member, body)?;
+                    Ok((
+                        serde_json::to_value(
+                            control
+                                .list()
+                                .into_iter()
+                                .find(|module| module.name == name),
+                        )?,
+                        Vec::new(),
+                    ))
+                }
+                ModuleMember::GetManifest => {
+                    let (name,): (String,) = parse_args(member, body)?;
+                    Ok((
+                        serde_json::to_value(
+                            control
+                                .list()
+                                .into_iter()
+                                .find(|module| module.name == name)
+                                .map(|module| module.manifest),
+                        )?,
+                        Vec::new(),
+                    ))
+                }
+                ModuleMember::Load => {
+                    let arguments = body.as_array().ok_or_else(|| {
+                        Error::bad_arguments(member.clone(), "expected a positional array")
                     })?;
-                let config = arguments
-                    .get(1)
-                    .cloned()
-                    .unwrap_or_else(|| serde_json::json!({}));
-                if arguments.len() > 2 {
-                    return Err(Error::bad_arguments(
-                        member.clone(),
-                        "expected path and optional configuration",
-                    ));
+                    let path: String = arguments
+                        .first()
+                        .cloned()
+                        .ok_or_else(|| Error::bad_arguments(member.clone(), "missing path"))
+                        .and_then(|value| {
+                            serde_json::from_value(value)
+                                .map_err(|error| Error::bad_arguments(member.clone(), error))
+                        })?;
+                    let config = arguments
+                        .get(1)
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({}));
+                    if arguments.len() > 2 {
+                        return Err(Error::bad_arguments(
+                            member.clone(),
+                            "expected path and optional configuration",
+                        ));
+                    }
+                    let (info, transition) = control.load(PathBuf::from(path), config)?;
+                    Ok((
+                        serde_json::to_value(info)?,
+                        module_state_body(transition).into_iter().collect(),
+                    ))
                 }
-                let (info, transition) = control.load(PathBuf::from(path), config)?;
-                Ok((
-                    serde_json::to_value(info)?,
-                    module_state_body(transition).into_iter().collect(),
-                ))
-            }
-            ModuleMember::Stop => return Err(Error::failed("module stop dispatch failed")),
-            ModuleMember::Enable => {
-                let (name, enabled): (String, bool) = parse_args(member, body)?;
-                let (info, transition) = control.enable(&name, enabled)?;
-                Ok((
-                    serde_json::to_value(info)?,
-                    module_state_body(transition).into_iter().collect(),
-                ))
-            }
-            ModuleMember::Rescan => {
-                let arguments = body.as_array().ok_or_else(|| {
-                    Error::bad_arguments(member.clone(), "expected a positional array")
-                })?;
-                let paths = arguments
-                    .first()
-                    .cloned()
-                    .map(serde_json::from_value::<Vec<PathBuf>>)
-                    .transpose()
-                    .map_err(|error| Error::bad_arguments(member.clone(), error))?
-                    .unwrap_or_default();
-                let dry_run = arguments.get(1).and_then(Value::as_bool).unwrap_or(false);
-                if arguments.len() > 2 {
-                    return Err(Error::bad_arguments(
-                        member.clone(),
-                        "expected optional paths and dry-run flag",
-                    ));
+                ModuleMember::Stop => return Err(Error::failed("module stop dispatch failed")),
+                ModuleMember::Enable => {
+                    let (name, enabled): (String, bool) = parse_args(member, body)?;
+                    let (info, transition) = control.enable(&name, enabled)?;
+                    Ok((
+                        serde_json::to_value(info)?,
+                        module_state_body(transition).into_iter().collect(),
+                    ))
                 }
-                let (infos, transitions) = control.rescan(paths, dry_run)?;
-                Ok((
-                    serde_json::to_value(infos)?,
-                    transitions
-                        .into_iter()
-                        .filter_map(|transition| module_state_body(Some(transition)))
-                        .collect(),
-                ))
+                ModuleMember::Rescan => {
+                    let arguments = body.as_array().ok_or_else(|| {
+                        Error::bad_arguments(member.clone(), "expected a positional array")
+                    })?;
+                    let paths = arguments
+                        .first()
+                        .cloned()
+                        .map(serde_json::from_value::<Vec<PathBuf>>)
+                        .transpose()
+                        .map_err(|error| Error::bad_arguments(member.clone(), error))?
+                        .unwrap_or_default();
+                    let dry_run = arguments.get(1).and_then(Value::as_bool).unwrap_or(false);
+                    if arguments.len() > 2 {
+                        return Err(Error::bad_arguments(
+                            member.clone(),
+                            "expected optional paths and dry-run flag",
+                        ));
+                    }
+                    let (infos, transitions) = control.rescan(paths, dry_run)?;
+                    Ok((
+                        serde_json::to_value(infos)?,
+                        transitions
+                            .into_iter()
+                            .filter_map(|transition| module_state_body(Some(transition)))
+                            .collect(),
+                    ))
+                }
             }
-        }
         })();
         Some(match outcome {
             Ok((value, states)) => (Ok(value), states),

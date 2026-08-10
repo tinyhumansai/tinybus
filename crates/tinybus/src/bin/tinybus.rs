@@ -351,9 +351,7 @@ async fn run_modules(address: &Path, timeout: Duration, command: ModulesCommand)
                     "module stop deadline must be shorter than the RPC timeout",
                 ));
             }
-            let module: serde_json::Value = bus
-                .call("StopModule", (name, deadline_ms))
-                .await?;
+            let module: serde_json::Value = bus.call("StopModule", (name, deadline_ms)).await?;
             println!("{}", serde_json::to_string_pretty(&module)?);
             Ok(())
         }

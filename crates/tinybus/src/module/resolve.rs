@@ -216,11 +216,7 @@ mod tests {
     #[test]
     fn a_module_blocked_behind_an_unresolved_provider_is_not_reported_as_a_cycle() {
         let manifests = [
-            module(
-                "Consumer",
-                &[],
-                &[("ai.tinyhumans.module.Provider", false)],
-            ),
+            module("Consumer", &[], &[("ai.tinyhumans.module.Provider", false)]),
             module(
                 "Provider",
                 &["ai.tinyhumans.module.Provider"],

@@ -441,10 +441,7 @@ impl Transport for ModuleTransport {
         // The module's `shutdown` callback may block up to its deadline. Run it
         // on a blocking thread so a wedged shutdown cannot stall the broker
         // task that is closing this transport.
-        let transport = self
-            .self_ref
-            .upgrade()
-            .ok_or(Error::ConnectionClosed)?;
+        let transport = self.self_ref.upgrade().ok_or(Error::ConnectionClosed)?;
         tokio::task::spawn_blocking(move || transport.stop_sync(Duration::from_secs(5)))
             .await
             .map_err(|_| Error::transport("module shutdown task was cancelled"))?;
