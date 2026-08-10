@@ -474,9 +474,12 @@ impl StreamRegistry {
             .remove(id);
         stream.finish(Outcome::Aborted(reason));
         // Dropping the sending half is what wakes a reader parked on `recv`.
-        if let Ok(mut gate) = stream.gate.try_lock() {
-            gate.chunks = None;
-        }
+        stream.seal();
+        // And dropping the *reading* half, if nobody ever claimed it, is what
+        // wakes a chunk write parked against a full window: without this a
+        // stream killed while a sender is mid-`Write` leaves that write parked
+        // until the sender's own deadline expires.
+        drop(stream.reader.lock().expect("stream reader lock").take());
     }
 
     /// Hand the reading half of a stream to the caller. Once only.
