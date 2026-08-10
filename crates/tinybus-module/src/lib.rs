@@ -571,7 +571,7 @@ macro_rules! module_export {
             $crate::manifest_slice($crate::ManifestDeclaration {
                 name: env!("CARGO_PKG_NAME"),
                 version: env!("CARGO_PKG_VERSION"),
-                provides: &[$($providides),*],
+                provides: &[$($provides),*],
                 methods: &[$($methods),*],
                 signals: &[$($signals),*],
                 requires: &[$($requires),*],
