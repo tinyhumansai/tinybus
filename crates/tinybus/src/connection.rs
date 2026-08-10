@@ -177,6 +177,7 @@ impl Connection {
             unique_name: std::sync::RwLock::new(None),
             signals,
             panic_handler: std::sync::RwLock::new(None),
+            streams: StreamRegistry::new(),
         });
         tokio::spawn(writer_loop(inner.transport.clone(), outbound));
         tokio::spawn(dispatch_loop(inner.clone()));
