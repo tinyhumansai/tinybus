@@ -11,6 +11,7 @@ use crate::ports::Transport;
 
 /// A source of inbound peer connections.
 #[async_trait]
+#[cfg_attr(coverage, coverage(off))]
 pub trait Listener: Send + Sync + 'static {
     /// Wait for the next peer, or `Ok(None)` when the listener is shut down.
     ///
