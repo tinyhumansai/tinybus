@@ -42,6 +42,10 @@ use crate::ports::Transport;
 use crate::proxy::Proxy;
 use crate::router::MatchRule;
 use crate::service::{Interface, ObjectTree};
+use crate::stream::{
+    STREAM_INTERFACE, STREAM_PATH, StreamDescriptor, StreamLimits, StreamReader, StreamRef,
+    StreamRegistry, StreamWriter,
+};
 use crate::version::{Compatibility, PeerManifest, PeerRecord};
 
 /// How long a call waits before giving up.
