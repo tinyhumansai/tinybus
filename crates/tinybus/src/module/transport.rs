@@ -217,7 +217,21 @@ impl ModuleTransport {
             let code = unsafe { (module.deliver)(module.module_ctx, bytes.as_ptr(), bytes.len()) };
             match code {
                 TB_OK => return Ok(()),
-                TB_BACKPRESSURE => notified.await,
+                TB_BACKPRESSURE => {
+                    // A module that stops draining its queue and never calls
+                    // `wake` must not park this delivery task — or the caller
+                    // behind it — for the process lifetime. Expiry faults the
+                    // module downstream so later callers get `ModuleUnavailable`
+                    // instead of waiting out their own deadline.
+                    if tokio::time::timeout(BACKPRESSURE_DEADLINE, notified)
+                        .await
+                        .is_err()
+                    {
+                        return Err(Error::transport(
+                            "module stopped draining its queue within the deadline",
+                        ));
+                    }
+                }
                 TB_CLOSED => return Err(Error::ConnectionClosed),
                 TB_BAD_ARGUMENT => return Err(Error::protocol("module refused a valid frame")),
                 _ => return Err(Error::transport("module delivery callback failed")),
