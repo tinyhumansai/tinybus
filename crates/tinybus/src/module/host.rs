@@ -621,7 +621,34 @@ mod tests {
             .unwrap();
         let value: String = clock.call("Now", ()).await.unwrap();
         assert!(value.starts_with("configured:"), "{value}");
-        modules.shutdown(Duration::from_secs(1)).await;
+        let control = client
+            .proxy(crate::BUS_NAME, crate::BUS_PATH, crate::BUS_INTERFACE)
+            .unwrap();
+        let listed: Vec<ModuleInfo> = control.call("ListModules", ()).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "tinybus");
+
+        let stopped: ModuleInfo = control
+            .call("StopModule", ("tinybus", 1_000u64))
+            .await
+            .unwrap();
+        assert_eq!(stopped.state, ModuleState::Stopped);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if !client
+                    .list_names()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|name| name.as_str() == "ai.tinyhumans.openhuman.Clock")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         task.abort();
     }
 }
