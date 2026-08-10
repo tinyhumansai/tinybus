@@ -751,13 +751,7 @@ impl StreamReader {
         if let Some(chunk) = self.chunks.recv().await {
             return Ok(Some(chunk));
         }
-        match self
-            .stream
-            .outcome
-            .lock()
-            .expect("stream outcome lock")
-            .clone()
-        {
+        match self.outcome.lock().expect("stream outcome lock").clone() {
             Some(Outcome::Complete) => Ok(None),
             Some(Outcome::Aborted(reason)) => Err(Error::StreamAborted {
                 reason: reason.to_string(),
