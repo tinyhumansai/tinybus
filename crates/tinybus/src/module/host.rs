@@ -478,20 +478,35 @@ impl ModuleHost {
 
         let transport_for_broker: Arc<dyn Transport> = transport.clone();
         let unique = self.inner.broker.attach(transport_for_broker);
-        if artifact.manifest.lazy_init {
-            let change = self
-                .inner
-                .broker
-                .reserve_module_name(&unique, admitted.manifest.bus_name.clone())?;
-            let broker = self.inner.broker.clone();
-            let ready_transport = transport.clone();
-            tokio::spawn(async move {
-                ready_transport.wait_ready().await;
-                if ready_transport.is_ready() {
+        let reserved_change = if artifact.manifest.lazy_init {
+            Some(
+                self.inner
+                    .broker
+                    .reserve_module_name(&unique, admitted.manifest.bus_name.clone())?,
+            )
+        } else {
+            None
+        };
+        let broker = self.inner.broker.clone();
+        let ready_transport = transport.clone();
+        let module_name = admitted.name.clone();
+        let previous_state = state_name(&admitted.state);
+        tokio::spawn(async move {
+            ready_transport.wait_ready().await;
+            if ready_transport.is_ready() {
+                if let Some(change) = reserved_change {
                     broker.announce_name_change(change).await;
                 }
-            });
-        }
+                broker
+                    .announce_module_state(serde_json::json!([
+                        module_name,
+                        previous_state,
+                        "ready",
+                        null
+                    ]))
+                    .await;
+            }
+        });
         if !self.inner.warned.swap(true, Ordering::AcqRel) {
             tracing::warn!(
                 modules = 1,
