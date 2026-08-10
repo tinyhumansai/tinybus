@@ -320,8 +320,30 @@ impl Broker {
                 )?)
             }
             "LoadModule" => {
-                let (path,): (String,) = parse_args(member, body)?;
-                Ok(serde_json::to_value(control.load(PathBuf::from(path))?)?)
+                let arguments = body.as_array().ok_or_else(|| {
+                    Error::bad_arguments(member.clone(), "expected a positional array")
+                })?;
+                let path: String = arguments
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| Error::bad_arguments(member.clone(), "missing path"))
+                    .and_then(|value| {
+                        serde_json::from_value(value)
+                            .map_err(|error| Error::bad_arguments(member.clone(), error))
+                    })?;
+                let config = arguments
+                    .get(1)
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                if arguments.len() > 2 {
+                    return Err(Error::bad_arguments(
+                        member.clone(),
+                        "expected path and optional configuration",
+                    ));
+                }
+                Ok(serde_json::to_value(
+                    control.load(PathBuf::from(path), config)?,
+                )?)
             }
             "StopModule" => {
                 let (name, deadline_ms): (String, u64) = parse_args(member, body)?;

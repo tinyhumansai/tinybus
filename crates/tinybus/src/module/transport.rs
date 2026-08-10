@@ -20,6 +20,7 @@ const HOST_QUEUE_CAPACITY: usize = 256;
 struct HostContext {
     inbound: StdMutex<Option<mpsc::Sender<Vec<u8>>>>,
     wake: Arc<Notify>,
+    config: Vec<u8>,
 }
 
 /// The broker-facing side of one loaded module.
@@ -36,11 +37,12 @@ unsafe impl Send for ModuleTransport {}
 unsafe impl Sync for ModuleTransport {}
 
 impl ModuleTransport {
-    pub(crate) fn new(label: String) -> (Arc<Self>, TbHostVtable) {
+    pub(crate) fn new(label: String, config: Vec<u8>) -> (Arc<Self>, TbHostVtable) {
         let (inbound_tx, inbound_rx) = mpsc::channel(HOST_QUEUE_CAPACITY);
         let context = Box::leak(Box::new(HostContext {
             inbound: StdMutex::new(Some(inbound_tx)),
             wake: Arc::new(Notify::new()),
+            config,
         }));
         let transport = Arc::new(Self {
             module: StdMutex::new(None),
@@ -56,6 +58,10 @@ impl ModuleTransport {
             wake: host_wake,
             log: host_log,
             fault: host_fault,
+            config: crate::module::abi::TbSlice {
+                ptr: context.config.as_ptr(),
+                len: context.config.len(),
+            },
         };
         (transport, vtable)
     }

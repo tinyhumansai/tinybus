@@ -113,6 +113,9 @@ pub struct TbHostVtable {
     pub log: unsafe extern "C" fn(*mut c_void, u32, *const u8, usize),
     /// Mark the module failed and detach it.
     pub fault: unsafe extern "C" fn(*mut c_void, *const u8, usize),
+    /// Borrowed JSON configuration. The module must copy it during init and
+    /// must not retain this pointer.
+    pub config: TbSlice,
 }
 
 /// Calls from a host into one initialized module.

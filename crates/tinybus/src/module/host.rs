@@ -75,7 +75,11 @@ struct ModuleHostInner {
 /// broker does not keep a module host alive.
 pub(crate) trait ModuleControl: Send + Sync {
     fn list(&self) -> Vec<ModuleInfo>;
-    fn load(self: Arc<Self>, path: PathBuf) -> Result<ModuleInfo>;
+    fn load(
+        self: Arc<Self>,
+        path: PathBuf,
+        config: serde_json::Value,
+    ) -> Result<ModuleInfo>;
     fn stop(&self, name: &str, deadline: Duration) -> Result<ModuleInfo>;
     fn enable(&self, name: &str, enabled: bool) -> Result<ModuleInfo>;
     fn rescan(self: Arc<Self>) -> Result<Vec<ModuleInfo>>;
@@ -116,11 +120,23 @@ impl ModuleHost {
 
     /// Load one newly installed module.
     pub fn load_file(&self, path: impl AsRef<Path>) -> Result<ModuleInfo> {
+        self.load_file_with_config(path, serde_json::json!({}))
+    }
+
+    /// Load one module and pass JSON configuration to its setup function.
+    ///
+    /// The bytes are copied by the module during initialization and are never
+    /// retained as a host allocation across the ABI boundary.
+    pub fn load_file_with_config(
+        &self,
+        path: impl AsRef<Path>,
+        config: serde_json::Value,
+    ) -> Result<ModuleInfo> {
         let path = path.as_ref();
         check_file(path)?;
         let artifact = loader::load(path)?;
         self.ensure_dependencies(&artifact.manifest, path)?;
-        self.activate(path, artifact)
+        self.activate(path, artifact, config)
     }
 
     /// Discover and load every platform library in a private directory.
@@ -183,7 +199,7 @@ impl ModuleHost {
             if let Some(index) = ready {
                 let (path, artifact) = pending.remove(index);
                 let provides = artifact.manifest.provides.clone();
-                let result = self.activate(&path, artifact);
+                let result = self.activate(&path, artifact, serde_json::json!({}));
                 if result.is_ok() {
                     available.extend(provides);
                 }
@@ -233,7 +249,12 @@ impl ModuleHost {
         }
     }
 
-    fn activate(&self, path: &Path, artifact: LoadedArtifact) -> Result<ModuleInfo> {
+    fn activate(
+        &self,
+        path: &Path,
+        artifact: LoadedArtifact,
+        config: serde_json::Value,
+    ) -> Result<ModuleInfo> {
         let admitted = self.validate(path, &artifact.descriptor, &artifact.manifest)?;
         if self
             .inner
@@ -246,7 +267,9 @@ impl ModuleHost {
             return Err(Error::module_refused(path, "module name is already loaded"));
         }
 
-        let (transport, host_vtable) = ModuleTransport::new(admitted.name.clone());
+        let config = serde_json::to_vec(&config)
+            .map_err(|_| Error::module_refused(path, "module configuration is invalid"))?;
+        let (transport, host_vtable) = ModuleTransport::new(admitted.name.clone(), config);
         let mut module_vtable = TbModuleVtable::default();
         let code = unsafe { (artifact.init)(&host_vtable, &mut module_vtable) };
         if code != TB_OK {
@@ -377,8 +400,12 @@ impl ModuleControl for ModuleHostInner {
             .collect()
     }
 
-    fn load(self: Arc<Self>, path: PathBuf) -> Result<ModuleInfo> {
-        ModuleHost { inner: self }.load_file(path)
+    fn load(
+        self: Arc<Self>,
+        path: PathBuf,
+        config: serde_json::Value,
+    ) -> Result<ModuleInfo> {
+        ModuleHost { inner: self }.load_file_with_config(path, config)
     }
 
     fn stop(&self, name: &str, deadline: Duration) -> Result<ModuleInfo> {
