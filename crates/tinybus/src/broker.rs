@@ -424,8 +424,7 @@ impl Broker {
                 destination: None,
                 path: Some(ObjectPath::new(crate::BUS_PATH).expect("bus path is valid")),
                 interface: Some(
-                    InterfaceName::new(crate::BUS_INTERFACE)
-                        .expect("bus interface is valid"),
+                    InterfaceName::new(crate::BUS_INTERFACE).expect("bus interface is valid"),
                 ),
                 member: Some(
                     MemberName::new("ModuleStateChanged").expect("literal is a valid member"),
