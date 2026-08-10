@@ -258,6 +258,17 @@ fn pascal_case(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use syn::parse::Parser;
+
+    fn args(source: &str) -> Punctuated<Meta, Comma> {
+        Punctuated::<Meta, Comma>::parse_terminated
+            .parse_str(source)
+            .unwrap()
+    }
+
+    fn implementation(source: &str) -> ItemImpl {
+        syn::parse_str(source).unwrap()
+    }
 
     #[test]
     fn snake_case_becomes_pascal_case() {
@@ -272,5 +283,68 @@ mod tests {
     #[test]
     fn a_leading_underscore_does_not_produce_an_empty_member() {
         assert_eq!(pascal_case("_internal"), "Internal");
+    }
+
+    #[test]
+    fn expansion_generates_dispatch_members_and_strips_helper_attributes() {
+        let expanded = expand(
+            args("name = \"ai.tinyhumans.Example\""),
+            implementation(
+                r#"
+                impl Example {
+                    #[tinybus(name = "Ping")]
+                    async fn ping(&self, value: u32) -> tinybus::Result<u32> { Ok(value) }
+                    #[tinybus(skip)]
+                    async fn private(&self) -> tinybus::Result<()> { Ok(()) }
+                    async fn zero(&self) -> tinybus::Result<()> { Ok(()) }
+                    fn constructor() -> Self { Self }
+                }
+                "#,
+            ),
+        )
+        .unwrap()
+        .to_string();
+
+        assert!(expanded.contains("impl :: tinybus :: service :: Interface for Example"));
+        assert!(expanded.contains("Ping"));
+        assert!(expanded.contains("Zero"));
+        assert!(!expanded.contains("private"));
+        assert!(!expanded.contains("tinybus"));
+    }
+
+    #[test]
+    fn expansion_rejects_invalid_interface_method_signatures() {
+        let name = args("name = \"ai.tinyhumans.Example\"");
+        for source in [
+            "impl Example { fn blocking(&self) -> tinybus::Result<()> { Ok(()) } }",
+            "impl Example { async fn missing_result(&self) {} }",
+            "impl Example { async fn destructure(&self, (a, b): (u32, u32)) -> tinybus::Result<()> { Ok(()) } }",
+        ] {
+            assert!(expand(name.clone(), implementation(source)).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn attributes_and_interface_names_are_validated() {
+        assert_eq!(interface_name(&args("name = \"ai.tinyhumans.Example\"")), "ai.tinyhumans.Example");
+        assert!(interface_name(&args("other = \"value\"")).is_err());
+
+        let method = match &implementation(
+            "impl Example { #[tinybus(skip, name = \"WireName\")] async fn call(&self) -> tinybus::Result<()> { Ok(()) } }",
+        ).items[0] {
+            ImplItem::Fn(method) => method,
+            _ => unreachable!(),
+        };
+        let attributes = method_attrs(method).unwrap();
+        assert!(attributes.skip);
+        assert_eq!(attributes.name.as_deref(), Some("WireName"));
+
+        let invalid = match &implementation(
+            "impl Example { #[tinybus(unknown)] async fn call(&self) -> tinybus::Result<()> { Ok(()) } }",
+        ).items[0] {
+            ImplItem::Fn(method) => method,
+            _ => unreachable!(),
+        };
+        assert!(method_attrs(invalid).is_err());
     }
 }
