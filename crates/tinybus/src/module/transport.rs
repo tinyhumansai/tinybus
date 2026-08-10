@@ -58,10 +58,12 @@ unsafe impl Send for ModuleTransport {}
 unsafe impl Sync for ModuleTransport {}
 
 struct SendHostVtable(TbHostVtable);
+struct SendModuleVtable(TbModuleVtable);
 
 // The opaque host context is process-lifetime state and every callback is
 // required by the ABI to be thread-safe.
 unsafe impl Send for SendHostVtable {}
+unsafe impl Send for SendModuleVtable {}
 
 impl ModuleTransport {
     pub(crate) fn new(label: String, config: Vec<u8>) -> (Arc<Self>, TbHostVtable) {
@@ -153,7 +155,7 @@ impl ModuleTransport {
                         let host = SendHostVtable(host);
                         let mut module = TbModuleVtable::default();
                         let code = unsafe { init(&host.0, &mut module) };
-                        (code, module)
+                        (code, SendModuleVtable(module))
                     }),
                 )
                 .await;
@@ -166,7 +168,7 @@ impl ModuleTransport {
                 if code != TB_OK {
                     return Err("module initialization failed".to_string());
                 }
-                self.initialize(module)
+                self.initialize(module.0)
                     .map_err(|_| "module returned an invalid vtable".to_string())?;
                 Ok(())
             })
@@ -271,7 +273,7 @@ impl ModuleTransport {
                 let Some(message) = message else {
                     break;
                 };
-                if self.deliver_now(message).await.is_err() {
+                if self.deliver_now(message.clone()).await.is_err() {
                     self.fault_pending(message).await;
                     return;
                 }
@@ -287,7 +289,7 @@ impl ModuleTransport {
             // genuinely empty; the lock makes the check-and-clear atomic with a
             // concurrent push.
             let restart = {
-                let mut pending = self.pending.lock().await;
+                let pending = self.pending.lock().await;
                 let empty = pending.is_empty();
                 if empty {
                     self.drain_started.store(false, Ordering::Release);

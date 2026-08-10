@@ -12,8 +12,7 @@ use crate::broker::Broker;
 use crate::build_info;
 use crate::error::{Error, Result, sanitize_untrusted};
 use crate::module::abi::{
-    ABI_MAGIC, ABI_REVISION, DESCRIPTOR_PREFIX_SIZE, MAX_DESCRIPTOR_SIZE, TB_OK, TbAbiDescriptor,
-    TbModuleInit, TbModuleVtable, field_bytes,
+    TB_OK, TbAbiDescriptor, TbModuleInit, TbModuleVtable, field_bytes,
 };
 use crate::module::loader::{self, LoadedArtifact};
 use crate::module::manifest::{MANIFEST_SCHEMA, ModuleIdentity, ModuleManifest, PanicPolicy};
