@@ -281,7 +281,12 @@ impl ModuleHost {
             check_file(path)?;
             let artifact = loader::load(path)?;
             self.ensure_dependencies(&artifact.manifest, path)?;
-            self.activate(path, artifact, config)
+            let rejected_manifest = artifact.manifest.clone();
+            let result = self.activate(path, artifact, config);
+            if let Err(error) = &result {
+                self.record_manifest_rejection(error, rejected_manifest);
+            }
+            result
         })();
         if let Err(error) = &result {
             self.record_rejection(error);
@@ -336,8 +341,10 @@ impl ModuleHost {
         let resolution = crate::module::resolve::resolve(&manifests, &self.provided_interfaces());
         let mut pending = pending.into_iter().map(Some).collect::<Vec<_>>();
         for (index, reason) in resolution.unresolved {
-            let (path, _) = pending[index].take().expect("resolver index is valid");
-            outcomes.push(Err(Error::module_refused(&path, reason)));
+            let (path, artifact) = pending[index].take().expect("resolver index is valid");
+            let error = Error::module_refused(&path, reason);
+            self.record_manifest_rejection(&error, artifact.manifest);
+            outcomes.push(Err(error));
         }
         for index in resolution.order {
             let (path, artifact) = pending[index].take().expect("resolver index is valid");
@@ -665,9 +672,7 @@ impl ModuleHost {
             .rejected
             .lock()
             .expect("rejected module list lock");
-        if let Some(existing) = rejected.iter_mut().find(|known| known.file == info.file) {
-            *existing = info;
-        } else {
+        if !rejected.iter().any(|known| known.file == info.file) {
             rejected.push(info);
         }
     }
@@ -676,13 +681,28 @@ impl ModuleHost {
         let Error::ModuleRefused { file, reason } = error else {
             return;
         };
+        let state = if reason.contains("initialization") {
+            ModuleState::Failed {
+                reason: reason.clone(),
+            }
+        } else if reason.contains("dependency")
+            || reason.contains("required interface")
+            || reason.contains("same bus name")
+            || reason.contains("same module name")
+        {
+            ModuleState::Unresolved {
+                reason: reason.clone(),
+            }
+        } else {
+            ModuleState::Rejected {
+                reason: reason.clone(),
+            }
+        };
         let info = ModuleInfo {
             name: sanitize_untrusted(&manifest.module.name),
             version: sanitize_untrusted(&manifest.module.version.to_string()),
             file: file.clone(),
-            state: ModuleState::Rejected {
-                reason: reason.clone(),
-            },
+            state,
             manifest,
             rustc_version: String::new(),
             rustc_mismatch: false,
