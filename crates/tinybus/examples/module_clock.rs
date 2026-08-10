@@ -15,11 +15,7 @@ struct Clock {
 #[tinybus::interface(name = "ai.tinyhumans.openhuman.Clock")]
 impl Clock {
     async fn now(&self) -> Result<String> {
-        Ok(format!(
-            "{}{:?}",
-            self.prefix,
-            std::time::SystemTime::now()
-        ))
+        Ok(format!("{}{:?}", self.prefix, std::time::SystemTime::now()))
     }
 }
 

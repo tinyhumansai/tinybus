@@ -75,11 +75,7 @@ struct ModuleHostInner {
 /// broker does not keep a module host alive.
 pub(crate) trait ModuleControl: Send + Sync {
     fn list(&self) -> Vec<ModuleInfo>;
-    fn load(
-        self: Arc<Self>,
-        path: PathBuf,
-        config: serde_json::Value,
-    ) -> Result<ModuleInfo>;
+    fn load(self: Arc<Self>, path: PathBuf, config: serde_json::Value) -> Result<ModuleInfo>;
     fn stop(&self, name: &str, deadline: Duration) -> Result<ModuleInfo>;
     fn enable(&self, name: &str, enabled: bool) -> Result<ModuleInfo>;
     fn rescan(self: Arc<Self>) -> Result<Vec<ModuleInfo>>;
@@ -400,11 +396,7 @@ impl ModuleControl for ModuleHostInner {
             .collect()
     }
 
-    fn load(
-        self: Arc<Self>,
-        path: PathBuf,
-        config: serde_json::Value,
-    ) -> Result<ModuleInfo> {
+    fn load(self: Arc<Self>, path: PathBuf, config: serde_json::Value) -> Result<ModuleInfo> {
         ModuleHost { inner: self }.load_file_with_config(path, config)
     }
 

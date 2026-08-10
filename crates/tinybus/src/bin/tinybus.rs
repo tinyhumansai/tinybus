@@ -325,10 +325,7 @@ async fn run_modules(address: &PathBuf, timeout: Duration, command: ModulesComma
         ModulesCommand::Load { path, config } => {
             let config: serde_json::Value = serde_json::from_str(&config)?;
             let module: serde_json::Value = bus
-                .call(
-                    "LoadModule",
-                    (path.to_string_lossy().to_string(), config),
-                )
+                .call("LoadModule", (path.to_string_lossy().to_string(), config))
                 .await?;
             println!("{}", serde_json::to_string_pretty(&module)?);
             Ok(())
