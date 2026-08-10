@@ -8,9 +8,11 @@ const fn wrong_descriptor() -> tinybus::module::abi::TbAbiDescriptor {
 }
 
 #[unsafe(no_mangle)]
+/// Deliberately incompatible descriptor used to verify pre-init rejection.
 pub static TINYBUS_MODULE_ABI_V1: tinybus::module::abi::TbAbiDescriptor = wrong_descriptor();
 
 #[unsafe(no_mangle)]
+/// Return the fixture's v1 manifest as process-lifetime bytes.
 pub extern "C" fn tinybus_module_manifest_v1() -> tinybus::module::abi::TbSlice {
     tinybus_module::manifest_slice(tinybus_module::ManifestDeclaration {
         name: "wrong-target",

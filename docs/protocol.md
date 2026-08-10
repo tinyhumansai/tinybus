@@ -110,18 +110,20 @@ interface `ai.tinyhumans.tinybus.Bus`.
 | `LoadModule` | `[path, config?]` | the newly loaded module record; config is JSON |
 | `StopModule` | `[name, deadline_ms]` | the stopped module record |
 | `EnableModule` | `[name, on]` | the updated module record |
-| `RescanModules` | `[]` or `[paths, dry_run]` | modules loaded or inspected from configured/explicit search paths |
+| `RescanModules` | `[]`, `[paths]`, or `[paths, dry_run]` | modules loaded or inspected from configured/explicit search paths; `dry_run` defaults to `false` |
 
 `ai.tinyhumans.tinybus.Bus` is reserved; `RequestName` for it always fails. So
 does `RequestName` for a unique name.
 
-The bus always emits `NameOwnerChanged`, with body
-`[name, old_owner, new_owner]`, either owner being `null`. This is how a peer
-learns a service died without polling it.
+When ownership changes, the bus emits `NameOwnerChanged`, with body
+`[name, old_owner, new_owner]`, either owner being `null`. Unchanged ownership
+emits no signal. This is how a peer learns a service died without polling it.
 
 An embedded module host also exposes the additive module members above. A
-broker without one returns `UnknownMethod`; the wire protocol version remains
-1 because old peers can still parse every message. Module state changes are
+broker built without the `modules` feature returns `UnknownMethod`; a
+feature-enabled broker with no registered host returns `Failed` with "module
+host is not installed". The wire protocol version remains 1 because old peers
+can still parse every message. Module state changes are
 announced as `ModuleStateChanged` with body
 `[module, old_state, new_state, detail]`; `detail` is `null` unless the new
 state has a safe refusal or fault reason.

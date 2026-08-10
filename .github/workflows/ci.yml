@@ -9,11 +9,15 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
+permissions: {}
+
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -43,7 +47,7 @@ jobs:
           RUSTDOCFLAGS: -D warnings
 
   # The bus is meant to be embeddable on every platform OpenHuman ships on. The
-  # The socket adapter remains Unix-only, while the in-process module transport
+  # socket adapter remains Unix-only, while the in-process module transport
   # and dynamic loader are portable and run on both non-Linux targets.
   portability:
     strategy:
@@ -53,6 +57,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build
@@ -70,6 +76,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build example module

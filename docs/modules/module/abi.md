@@ -28,8 +28,9 @@ the host interprets a changed layout.
 
 ## Descriptor gate
 
-The first 16 bytes are frozen: magic, revision, and descriptor size. The host
-rejects a wrong prefix, sizes outside 16–4096 bytes, and descriptors smaller
+The first 16 bytes are frozen as four 32-bit fields: magic, ABI revision,
+descriptor size, and flags. The host rejects a wrong prefix, sizes outside
+16–4096 bytes, and descriptors smaller
 than the v1 structure before reading more. Larger descriptors are accepted and
 their tail ignored.
 
@@ -53,6 +54,9 @@ separate copy of Tokio's thread-locals, so it cannot borrow the host runtime.
 The host-to-module `deliver` callback only performs a bounded `try_send` and
 never blocks a host thread. Queue capacity is reported as backpressure and the
 host retries after the module's `wake` callback.
+The symmetric module-to-host `send` callback applies bounded backpressure by
+blocking the calling module thread until host queue capacity is available.
+Modules must not call it from a thread that has to remain responsive.
 
 The SDK installs a panic hook that forwards only the source location, never the
 payload, and faults the transport so the broker releases the module's names.

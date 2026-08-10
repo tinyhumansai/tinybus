@@ -159,6 +159,9 @@ unsafe extern "C" fn invalid_shutdown(_: *mut c_void, _: u64) -> i32 {
     TB_CLOSED
 }
 
+// Oversized values are deliberately truncated. Host comparisons use the full
+// expected value, so truncation fails closed at admission instead of matching
+// a different target or toolchain accidentally.
 const fn fixed<const N: usize>(value: &str) -> [u8; N] {
     let bytes = value.as_bytes();
     let mut out = [0; N];

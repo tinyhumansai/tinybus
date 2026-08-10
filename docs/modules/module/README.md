@@ -54,16 +54,19 @@ precedence is `OPENHUMAN_MODULE_PATH`, the platform user data directory, then
 the platform system directory. `tinybus modules scan --path <dir> --dry-run`
 performs admission and dependency checks without initializing or attaching.
 
-One refusal is returned independently and does not stop other artifacts in a
-directory. Errors contain only a sanitized basename and a fixed reason.
+Refusing one artifact does not prevent the host from admitting other artifacts
+in the same directory. The refused artifact's error contains only a sanitized
+basename and fixed reason.
 
 Lifecycle states are `discovered`, `rejected`, `unresolved`, `resolved`,
 `initializing`, `ready`, `serving`, `faulted`, `failed`, `stopped`, and
 `disabled`. Rejected, faulted, failed, stopped, and disabled modules answer a
 call immediately with `ModuleUnavailable`; they are never retried in the same
 process. `ready` and `serving` reflect whether calls are in flight and do not
-emit per-call state signals. Every other edge emits `ModuleStateChanged` after
-any corresponding `NameOwnerChanged` announcement.
+emit per-call state signals. `StopModule` emits no signal through its bus-call
+path; the stopped transition is announced when the module peer subsequently
+detaches. Other lifecycle edges emit `ModuleStateChanged` after any
+corresponding `NameOwnerChanged` announcement.
 
 See [abi.md](abi.md) for the binary contract and
 [the protocol](../../protocol.md) for the bus control members.

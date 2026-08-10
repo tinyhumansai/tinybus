@@ -244,7 +244,7 @@ impl Error {
             .unwrap_or_else(|| "module".to_string());
         Self::ModuleRefused {
             file,
-            reason: reason.into(),
+            reason: sanitize_untrusted(&reason.into()),
         }
     }
 

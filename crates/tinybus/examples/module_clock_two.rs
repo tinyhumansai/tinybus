@@ -25,10 +25,12 @@ async fn setup(connection: Connection) -> Result<()> {
 }
 
 #[unsafe(no_mangle)]
+/// ABI descriptor inspected by the host before loading this fixture.
 pub static TINYBUS_MODULE_ABI_V1: tinybus::module::abi::TbAbiDescriptor =
     tinybus::module::abi::TbAbiDescriptor::current("module-clock-two", env!("CARGO_PKG_VERSION"));
 
 #[unsafe(no_mangle)]
+/// Return the fixture's v1 manifest as process-lifetime bytes.
 pub extern "C" fn tinybus_module_manifest_v1() -> tinybus::module::abi::TbSlice {
     tinybus_module::manifest_slice(tinybus_module::ManifestDeclaration {
         name: "module-clock-two",

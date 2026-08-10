@@ -122,9 +122,11 @@ configuration a slim kernel build embeds.
 ## Status
 
 The core protocol, broker, connection, proxy, macro, Unix transport and CLI are
-implemented and tested. Trusted modules can be loaded behind the non-default
-`modules` feature. File-descriptor passing, per-peer authorisation policy and
-the Windows named-pipe backend are not implemented — see `ROADMAP.md`.
+implemented and tested. Trusted in-process modules support lazy activation
+behind the non-default `modules` feature; read the module trust-boundary notes
+before enabling it. External service-process or bus-driven activation remains
+unimplemented. File-descriptor passing, per-peer authorisation policy and the
+Windows named-pipe backend are also not implemented — see `ROADMAP.md`.
 
 ## Licence
 

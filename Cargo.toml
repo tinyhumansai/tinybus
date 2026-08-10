@@ -16,9 +16,10 @@ license = "GPL-3.0-only"
 repository = "https://github.com/tinyhumansai/tinybus"
 
 [workspace.dependencies]
-tinybus = { path = "crates/tinybus", version = "0.1.0" }
+tinybus = { path = "crates/tinybus", version = "0.1.0", default-features = false }
 tinybus-macros = { path = "crates/tinybus-macros", version = "0.1.0" }
 tinybus-module = { path = "crates/tinybus-module", version = "0.1.0" }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }

@@ -11,6 +11,11 @@ fn main() {
         .arg("-vV")
         .output()
         .expect("rustc -vV must run while building tinybus");
+    assert!(
+        output.status.success(),
+        "rustc -vV failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let text = String::from_utf8(output.stdout).expect("rustc -vV is UTF-8");
     let release = text
         .lines()
