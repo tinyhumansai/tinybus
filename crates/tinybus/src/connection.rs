@@ -772,13 +772,13 @@ async fn handle_call(inner: Arc<Inner>, message: Message) {
 }
 
 struct CatchUnwind<F> {
-    future: std::panic::AssertUnwindSafe<F>,
+    future: Pin<Box<F>>,
 }
 
 impl<F> CatchUnwind<F> {
     fn new(future: F) -> Self {
         Self {
-            future: std::panic::AssertUnwindSafe(future),
+            future: Box::pin(future),
         }
     }
 }
@@ -787,8 +787,7 @@ impl<F: Future> Future for CatchUnwind<F> {
     type Output = std::result::Result<F::Output, ()>;
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        // `future` is structurally pinned with its wrapper and never moved.
-        let future = unsafe { self.map_unchecked_mut(|this| &mut this.future.0) };
+        let future = self.get_mut().future.as_mut();
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| future.poll(context))) {
             Ok(Poll::Ready(value)) => Poll::Ready(Ok(value)),
             Ok(Poll::Pending) => Poll::Pending,
