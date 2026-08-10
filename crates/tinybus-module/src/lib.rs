@@ -257,6 +257,49 @@ where
     }
 }
 
+/// Initialize a module whose setup function accepts typed JSON configuration.
+#[doc(hidden)]
+pub unsafe fn start_module_with_config<C, F, Fut>(
+    host: *const TbHostVtable,
+    out: *mut TbModuleVtable,
+    worker_threads: usize,
+    setup: F,
+) -> i32
+where
+    C: serde::de::DeserializeOwned + Send + 'static,
+    F: FnOnce(Connection, C) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<()>> + Send + 'static,
+{
+    let parsed = catch_unwind(AssertUnwindSafe(|| {
+        if host.is_null() {
+            return Err(TB_BAD_ARGUMENT);
+        }
+        let host_ref = unsafe { &*host };
+        if host_ref.size < size_of::<TbHostVtable>() as u32
+            || host_ref.config.len > 1024 * 1024
+            || (host_ref.config.ptr.is_null() && host_ref.config.len != 0)
+        {
+            return Err(TB_BAD_ARGUMENT);
+        }
+        let bytes = if host_ref.config.len == 0 {
+            b"{}".as_slice()
+        } else {
+            unsafe { std::slice::from_raw_parts(host_ref.config.ptr, host_ref.config.len) }
+        };
+        serde_json::from_slice::<C>(bytes).map_err(|_| TB_BAD_ARGUMENT)
+    }));
+    let config = match parsed {
+        Ok(Ok(config)) => config,
+        Ok(Err(code)) => return code,
+        Err(_) => return TB_PANICKED,
+    };
+    unsafe {
+        start_module(host, out, worker_threads, move |connection| {
+            setup(connection, config)
+        })
+    }
+}
+
 /// Export a tinybus module's descriptor, manifest and initialization entrypoint.
 ///
 /// ```ignore
@@ -264,6 +307,49 @@ where
 /// ```
 #[macro_export]
 macro_rules! module_export {
+    (
+        setup = $setup:path,
+        config = $config:ty,
+        worker_threads = $threads:expr,
+        provides = [$($provides:literal),* $(,)?],
+        requires = [$($requires:literal),* $(,)?],
+        optional = [$($optional:literal),* $(,)?],
+        lazy = $lazy:expr $(,)?
+    ) => {
+        #[unsafe(no_mangle)]
+        pub static TINYBUS_MODULE_ABI_V1: ::tinybus::module::abi::TbAbiDescriptor =
+            ::tinybus::module::abi::TbAbiDescriptor::current(
+                env!("CARGO_PKG_NAME"),
+                env!("CARGO_PKG_VERSION"),
+            );
+
+        #[unsafe(no_mangle)]
+        pub extern "C" fn tinybus_module_manifest_v1() -> ::tinybus::module::abi::TbSlice {
+            $crate::manifest_slice(
+                env!("CARGO_PKG_NAME"),
+                env!("CARGO_PKG_VERSION"),
+                &[$($provides),*],
+                &[$($requires),*],
+                &[$($optional),*],
+                $lazy,
+            )
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn tinybus_module_init_v1(
+            host: *const ::tinybus::module::abi::TbHostVtable,
+            out: *mut ::tinybus::module::abi::TbModuleVtable,
+        ) -> i32 {
+            unsafe {
+                $crate::start_module_with_config::<$config, _, _>(
+                    host,
+                    out,
+                    $threads,
+                    $setup,
+                )
+            }
+        }
+    };
     (setup = $setup:path, worker_threads = $threads:expr $(,)?) => {
         $crate::module_export! {
             setup = $setup,

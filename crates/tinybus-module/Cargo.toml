@@ -9,6 +9,7 @@ description = "Module-side runtime and export macro for trusted tinybus cdylibs.
 [dependencies]
 async-trait.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 tinybus = { path = "../tinybus", version = "0.1.0", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 tracing.workspace = true
