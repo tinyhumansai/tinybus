@@ -79,6 +79,7 @@ pub mod ports;
 pub mod proxy;
 pub mod router;
 pub mod service;
+pub mod stream;
 pub mod transport;
 pub mod version;
 
