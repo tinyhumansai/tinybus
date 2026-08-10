@@ -775,7 +775,7 @@ mod tests {
         )
         .await
         .unwrap();
-        run_modules(
+        assert!(run_modules(
             &address,
             timeout,
             ModulesCommand::Disable {
@@ -783,6 +783,6 @@ mod tests {
             },
         )
         .await
-        .unwrap();
+        .is_err());
     }
 }
