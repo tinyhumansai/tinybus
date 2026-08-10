@@ -133,11 +133,7 @@ pub(crate) trait ModuleControl: Send + Sync {
     fn load(self: Arc<Self>, path: PathBuf, config: serde_json::Value) -> Result<ModuleInfo>;
     fn stop(&self, name: &str, deadline: Duration) -> Result<ModuleInfo>;
     fn enable(&self, name: &str, enabled: bool) -> Result<ModuleInfo>;
-    fn rescan(
-        self: Arc<Self>,
-        paths: Vec<PathBuf>,
-        dry_run: bool,
-    ) -> Result<Vec<ModuleInfo>>;
+    fn rescan(self: Arc<Self>, paths: Vec<PathBuf>, dry_run: bool) -> Result<Vec<ModuleInfo>>;
     fn peer_detached(&self, unique_name: &BusName) -> Option<(String, ModuleState, ModuleState)>;
 }
 

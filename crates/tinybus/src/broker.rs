@@ -391,10 +391,7 @@ impl Broker {
                     .transpose()
                     .map_err(|error| Error::bad_arguments(member.clone(), error))?
                     .unwrap_or_default();
-                let dry_run = arguments
-                    .get(1)
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
+                let dry_run = arguments.get(1).and_then(Value::as_bool).unwrap_or(false);
                 if arguments.len() > 2 {
                     return Err(Error::bad_arguments(
                         member.clone(),
