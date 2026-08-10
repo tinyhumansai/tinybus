@@ -1042,6 +1042,7 @@ mod tests {
     static INIT_RAN: AtomicBool = AtomicBool::new(false);
     static LAZY_INIT_COUNT: AtomicUsize = AtomicUsize::new(0);
     static FAILED_INIT_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static FAKE_MODULE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     struct FakeModule {
         tx: std::sync::mpsc::SyncSender<Vec<u8>>,
@@ -1161,6 +1162,7 @@ mod tests {
     #[tokio::test]
     async fn a_lazy_module_initializes_on_the_first_call_and_two_racing_callers_initialize_it_once()
     {
+        let _test_guard = FAKE_MODULE_TEST_LOCK.lock().await;
         LAZY_INIT_COUNT.store(0, Ordering::Release);
         let bus = MemoryBus::new();
         let broker = Broker::new();
@@ -1281,6 +1283,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_match_rule_on_a_lazy_modules_signal_does_not_initialize_it() {
+        let _test_guard = FAKE_MODULE_TEST_LOCK.lock().await;
         LAZY_INIT_COUNT.store(0, Ordering::Release);
         let bus = MemoryBus::new();
         let broker = Broker::new();
@@ -1313,6 +1316,7 @@ mod tests {
 
     #[tokio::test]
     async fn stopping_one_module_leaves_the_other_serving() {
+        let _test_guard = FAKE_MODULE_TEST_LOCK.lock().await;
         LAZY_INIT_COUNT.store(0, Ordering::Release);
         let bus = MemoryBus::new();
         let broker = Broker::new();
