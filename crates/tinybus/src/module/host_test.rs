@@ -808,7 +808,22 @@ fn module_host_helpers_preserve_safe_names_states_and_allowlist_decisions() {
         ModuleState::Stopped,
         ModuleState::Disabled,
     ];
-    assert_eq!(states.iter().map(state_name).collect::<Vec<_>>().len(), 11);
+    assert_eq!(
+        states.iter().map(state_name).collect::<Vec<_>>(),
+        [
+            "discovered",
+            "rejected",
+            "unresolved",
+            "resolved",
+            "initializing",
+            "ready",
+            "serving",
+            "faulted",
+            "failed",
+            "stopped",
+            "disabled",
+        ]
+    );
     assert_eq!(state_detail(&states[1]), Some("no"));
     assert_eq!(state_detail(&states[2]), Some("no"));
     assert_eq!(state_detail(&states[0]), None);
@@ -901,6 +916,7 @@ fn an_allowlist_with_a_mismatched_hash_refuses_the_file() {
     assert!(error.to_string().contains("hash does not match"), "{error}");
 }
 
+#[cfg(not(windows))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires TINYBUS_TEST_MODULE to point at the built cdylib"]
 async fn a_real_cdylib_loads_and_serves_a_call() {
@@ -1046,6 +1062,7 @@ async fn scanning_loading_rescanning_and_shutting_down_a_module_directory_are_co
     task.abort();
 }
 
+#[cfg(not(windows))]
 #[tokio::test]
 #[ignore = "requires TINYBUS_TEST_MODULE to point at the built cdylib"]
 async fn duplicate_module_declarations_are_reported_without_attaching_either_copy() {

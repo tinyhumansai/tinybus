@@ -497,6 +497,8 @@ mod tests {
         let address = dir.path().join("bus");
         let listener = UnixListenerAdapter::bind(&address).await.unwrap();
         let broker = Broker::new();
+        // The broker stores module control weakly, so callers must retain this
+        // host for the test lifetime or module commands lose their controller.
         let host = ModuleHost::new(broker.clone());
         broker.spawn(listener);
         (dir, address, host)
