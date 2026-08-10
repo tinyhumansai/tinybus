@@ -18,19 +18,33 @@ const K: [u32; 64] = [
 ];
 
 pub(crate) fn file_hex(mut reader: impl Read) -> io::Result<String> {
-    let mut bytes = Vec::new();
-    reader.read_to_end(&mut bytes)?;
-    let bit_len = (bytes.len() as u64).wrapping_mul(8);
-    bytes.push(0x80);
-    while bytes.len() % 64 != 56 {
-        bytes.push(0);
-    }
-    bytes.extend_from_slice(&bit_len.to_be_bytes());
-
     let mut state = INITIAL;
-    for block in bytes.chunks_exact(64) {
-        compress(&mut state, block);
+    let mut block = [0u8; 64];
+    let mut used = 0usize;
+    let mut byte_len = 0u64;
+    loop {
+        let read = reader.read(&mut block[used..])?;
+        if read == 0 {
+            break;
+        }
+        used += read;
+        byte_len = byte_len.wrapping_add(read as u64);
+        if used == block.len() {
+            compress(&mut state, &block);
+            used = 0;
+        }
     }
+    block[used] = 0x80;
+    used += 1;
+    if used > 56 {
+        block[used..].fill(0);
+        compress(&mut state, &block);
+        block.fill(0);
+    } else {
+        block[used..56].fill(0);
+    }
+    block[56..].copy_from_slice(&byte_len.wrapping_mul(8).to_be_bytes());
+    compress(&mut state, &block);
     Ok(state.iter().map(|word| format!("{word:08x}")).collect())
 }
 
