@@ -660,14 +660,7 @@ mod tests {
         HOST_WAKES.fetch_add(1, Ordering::AcqRel);
     }
 
-    unsafe extern "C" fn host_log(_: *mut c_void, _: u32, ptr: *const u8, len: usize) {
-        if !ptr.is_null() {
-            println!(
-                "host log: {}",
-                String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(ptr, len) })
-            );
-        }
-    }
+    unsafe extern "C" fn host_log(_: *mut c_void, _: u32, _: *const u8, _: usize) {}
 
     unsafe extern "C" fn host_fault(_: *mut c_void, _: *const u8, _: usize) {
         HOST_FAULTED.store(true, Ordering::Release);
@@ -894,24 +887,19 @@ mod tests {
                 },
             )
         };
-        println!("startup code: {code}");
         assert_eq!(code, TB_OK);
         let captured = outgoing_rx.recv_timeout(Duration::from_secs(1));
-        println!("captured hello: {}", captured.is_ok());
         let hello: Message =
             serde_json::from_slice(&captured.expect("module did not send Hello")).unwrap();
-        println!("hello: {hello:?}");
         let reply = Message::method_return(
             &hello.header,
-            serde_json::Value::String(":module.1".to_string()),
+            serde_json::Value::String(":1.1".to_string()),
         );
         let reply = serde_json::to_vec(&reply).unwrap();
-        println!("reply: {}", String::from_utf8_lossy(&reply));
         assert_eq!(
             unsafe { (out.deliver)(out.module_ctx, reply.as_ptr(), reply.len()) },
             TB_OK
         );
-        println!("replied to hello");
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
         while !HOST_READY.load(Ordering::Acquire) {
             assert!(
