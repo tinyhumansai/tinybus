@@ -27,8 +27,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -356,10 +356,7 @@ impl Connection {
         enabled: bool,
     ) -> Result<crate::module::ModuleInfo> {
         let value = self
-            .call_bus(
-                "EnableModule",
-                serde_json::json!([name.as_ref(), enabled]),
-            )
+            .call_bus("EnableModule", serde_json::json!([name.as_ref(), enabled]))
             .await?;
         Ok(serde_json::from_value(value)?)
     }
@@ -367,7 +364,9 @@ impl Connection {
     /// Rescan the host's configured module directories.
     #[cfg(feature = "modules")]
     pub async fn rescan_modules(&self) -> Result<Vec<crate::module::ModuleInfo>> {
-        let value = self.call_bus("RescanModules", serde_json::json!([])).await?;
+        let value = self
+            .call_bus("RescanModules", serde_json::json!([]))
+            .await?;
         Ok(serde_json::from_value(value)?)
     }
 
@@ -607,7 +606,11 @@ impl Connection {
     /// panic policy.
     #[doc(hidden)]
     pub fn __set_panic_handler(&self, handler: Arc<dyn Fn() -> Error + Send + Sync>) {
-        *self.inner.panic_handler.write().expect("panic handler lock") = Some(handler);
+        *self
+            .inner
+            .panic_handler
+            .write()
+            .expect("panic handler lock") = Some(handler);
     }
 
     /// Call a method on the broker's own interface.
@@ -770,9 +773,7 @@ impl<F: Future> Future for CatchUnwind<F> {
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         // `future` is structurally pinned with its wrapper and never moved.
         let future = unsafe { self.map_unchecked_mut(|this| &mut this.future.0) };
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            future.poll(context)
-        })) {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| future.poll(context))) {
             Ok(Poll::Ready(value)) => Poll::Ready(Ok(value)),
             Ok(Poll::Pending) => Poll::Pending,
             Err(_) => Poll::Ready(Err(())),

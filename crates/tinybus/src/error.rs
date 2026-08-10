@@ -316,9 +316,7 @@ impl Error {
             Self::Timeout { .. } => "ai.tinyhumans.tinybus.Error.Timeout",
             Self::IncompatibleVersion { .. } => "ai.tinyhumans.tinybus.Error.IncompatibleVersion",
             Self::ModuleRefused { .. } => "ai.tinyhumans.tinybus.Error.ModuleRefused",
-            Self::ModuleUnavailable { .. } => {
-                "ai.tinyhumans.tinybus.Error.ModuleUnavailable"
-            }
+            Self::ModuleUnavailable { .. } => "ai.tinyhumans.tinybus.Error.ModuleUnavailable",
             Self::Path { .. } => "ai.tinyhumans.tinybus.Error.Path",
             Self::FeatureDisabled(_, _) => "ai.tinyhumans.tinybus.Error.FeatureDisabled",
             Self::Json(_) => "ai.tinyhumans.tinybus.Error.Json",
