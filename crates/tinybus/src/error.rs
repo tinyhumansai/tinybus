@@ -229,6 +229,12 @@ impl Error {
     pub const UNKNOWN_METHOD: &'static str = "ai.tinyhumans.tinybus.Error.UnknownMethod";
     /// The dotted error name a failing method body gets by default.
     pub const FAILED: &'static str = "ai.tinyhumans.tinybus.Error.Failed";
+    /// The dotted error name for a refused confidential delivery.
+    ///
+    /// Callers match on this to tell "the recipient is not trusted" from "the
+    /// call failed", which are different problems with different fixes: one is
+    /// an operator's trust store, the other is the service.
+    pub const NOT_ATTESTED: &'static str = "ai.tinyhumans.tinybus.Error.NotAttested";
 
     /// Build an [`Error::Protocol`] from anything displayable.
     pub fn protocol(message: impl std::fmt::Display) -> Self {
