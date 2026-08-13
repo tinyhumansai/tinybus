@@ -1155,7 +1155,14 @@ async fn one_refused_module_does_not_stop_the_others_in_the_directory_from_loadi
 /// `hash` for it, so a load can be driven against a real allowlist.
 #[cfg(unix)]
 fn staged_module(artifact: &Path, hash: &str) -> (tempfile::TempDir, PathBuf) {
-    let dir = tempfile::tempdir().unwrap();
+    // Staged inside the crate, not in `/tmp`: the loader refuses to load from a
+    // directory another user could write to, and `/tmp` is exactly that. The
+    // refusal is the admission check doing its job, so the test works with it
+    // rather than around it.
+    let dir = tempfile::Builder::new()
+        .prefix(".attestation-test-")
+        .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+        .unwrap();
     let file_name = artifact.file_name().unwrap();
     let staged = dir.path().join(file_name);
     std::fs::copy(artifact, &staged).unwrap();
