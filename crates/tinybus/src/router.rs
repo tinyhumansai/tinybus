@@ -394,6 +394,12 @@ impl Router {
 
     /// Record what the host verified about the peer owning `name`.
     ///
+    /// Gated with module loading, because that is the only thing that can
+    /// produce an attestation. Without it nothing is ever attested and every
+    /// confidential delivery is refused, which is the correct behaviour for a
+    /// build that cannot load a module in the first place.
+    #[cfg(feature = "modules")]
+    ///
     /// Stored against the peer, so it dies with the peer: a service that exits
     /// takes its attestation with it, and the next process to claim the name
     /// has to earn its own. Nothing here is ever copied forward on a name
@@ -661,6 +667,7 @@ mod tests {
         assert!(router.subscribers(&sig, a).is_empty());
     }
 
+    #[cfg(feature = "modules")]
     fn attestation(name: &str) -> Attestation {
         Attestation {
             name: BusName::new(name).unwrap(),
@@ -699,6 +706,7 @@ mod tests {
         assert_eq!(error.wire_name(), Error::NOT_ATTESTED);
     }
 
+    #[cfg(feature = "modules")]
     #[test]
     fn an_attested_owner_can_receive_a_confidential_message() {
         let mut router = Router::default();
@@ -714,6 +722,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "modules")]
     #[test]
     fn an_attestation_is_bound_to_the_name_it_was_verified_for() {
         // Holding two names must not let trust earned for one carry to the
@@ -731,6 +740,7 @@ mod tests {
         assert!(router.resolve_attested(&voice).is_err());
     }
 
+    #[cfg(feature = "modules")]
     #[test]
     fn a_dead_peers_attestation_does_not_survive_it() {
         let mut router = Router::default();
