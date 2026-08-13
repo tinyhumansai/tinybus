@@ -215,6 +215,9 @@ impl Message {
                 interface: Some(interface),
                 member: Some(member),
                 error_name: None,
+                // Structurally impossible to set: a signal is a broadcast, and
+                // `validate` refuses the combination on ingress.
+                confidential: false,
             },
             body,
         }
