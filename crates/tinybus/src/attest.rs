@@ -170,21 +170,68 @@ impl TrustStore {
     }
 }
 
-/// The executable behind a live pid, on platforms where the kernel will say.
+/// The executable behind a live pid, asked of the kernel.
 ///
-/// Linux only. `/proc/<pid>/exe` is a kernel-maintained link fixed at `execve`,
-/// so a peer cannot swap it after connecting — which is what makes hashing it
-/// meaningful rather than advisory. Elsewhere this returns `None` and every
-/// executable-backed attestation fails closed; an embedder that needs
-/// confidential messaging on another platform hosts the recipient in-process,
-/// where the module allowlist already covers it.
+/// Hashing is portable; *this* is the part that is not. There is no portable way
+/// to ask what binary another process is running, and it has to be the kernel
+/// that answers — a path the peer supplied would let it nominate any file on the
+/// machine as itself, which is the whole check gone.
+///
+/// Both implementations resolve something fixed at `execve` and not rewritable
+/// by the process afterwards, which is what makes hashing the result meaningful
+/// rather than advisory.
+///
+/// `None` means the question could not be answered here, and every
+/// executable-backed attestation then fails closed.
 fn executable_of(pid: u32) -> Option<PathBuf> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
+        // A kernel-maintained magic link, not a filesystem path the process
+        // chose. Reading it follows to the inode that was executed even if the
+        // file has since been renamed or deleted.
         std::fs::read_link(format!("/proc/{pid}/exe")).ok()
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
+        // libproc's `proc_pidpath`, declared rather than pulled in as a crate:
+        // it lives in libSystem, which every macOS binary already links, so a
+        // dependency to reach one symbol would be exactly the absorption this
+        // project exists to avoid — the same reasoning as the CLI's `getuid`.
+        unsafe extern "C" {
+            fn proc_pidpath(pid: i32, buffer: *mut u8, buffersize: u32) -> i32;
+        }
+        // PROC_PIDPATHINFO_MAXSIZE, from <sys/proc_info.h>. `proc_pidpath`
+        // refuses a smaller buffer outright rather than truncating, so this is
+        // a required size and not a guess to grow on.
+        const PROC_PIDPATHINFO_MAXSIZE: usize = 4 * 1024;
+
+        let mut buffer = vec![0u8; PROC_PIDPATHINFO_MAXSIZE];
+        // SAFETY: the buffer is at least PROC_PIDPATHINFO_MAXSIZE, which is what
+        // the call requires, and its length is passed honestly.
+        let written = unsafe {
+            proc_pidpath(
+                i32::try_from(pid).ok()?,
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+            )
+        };
+        // Returns the byte length on success; zero or negative means the pid is
+        // gone or unreadable, which fails closed.
+        let written = usize::try_from(written).ok().filter(|n| *n > 0)?;
+        let path = std::str::from_utf8(&buffer[..written]).ok()?;
+        Some(PathBuf::from(path))
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios"
+    )))]
+    {
+        // Windows is the notable gap, and it is blocked upstream rather than
+        // here: the named-pipe transport it would need does not exist yet, so
+        // there is no peer to identify. `GetNamedPipeClientProcessId` plus
+        // `QueryFullProcessImageNameW` is the shape it takes when that lands.
         let _ = pid;
         None
     }
