@@ -32,30 +32,16 @@ pub struct UnixTransport {
     reader: Mutex<tokio::net::unix::OwnedReadHalf>,
     writer: Mutex<tokio::net::unix::OwnedWriteHalf>,
     label: String,
-    /// The peer's pid as the kernel reported it at connect time, for recipient
-    /// attestation. Captured here rather than on demand because `into_split`
-    /// consumes the stream, and captured from `SO_PEERCRED` rather than asked
-    /// for because a peer that could state its own pid could name any process
-    /// on the machine as itself.
-    peer_pid: Option<u32>,
 }
 
 impl UnixTransport {
     /// Wrap an already-connected stream.
     pub fn new(stream: UnixStream, label: impl Into<String>) -> Self {
-        // A kernel that will not report credentials is not an error: the socket
-        // works, and only confidential delivery to this peer is affected.
-        let peer_pid = stream
-            .peer_cred()
-            .ok()
-            .and_then(|cred| cred.pid())
-            .and_then(|pid| u32::try_from(pid).ok());
         let (reader, writer) = stream.into_split();
         Self {
             reader: Mutex::new(reader),
             writer: Mutex::new(writer),
             label: label.into(),
-            peer_pid,
         }
     }
 
@@ -116,10 +102,6 @@ impl Transport for UnixTransport {
 
     fn describe(&self) -> String {
         self.label.clone()
-    }
-
-    fn peer_process(&self) -> Option<u32> {
-        self.peer_pid
     }
 }
 
