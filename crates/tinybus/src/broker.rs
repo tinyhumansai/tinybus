@@ -1193,11 +1193,19 @@ mod tests {
         let voice = client.proxy(VOICE_NAME, VOICE_PATH, VOICE_NAME).unwrap();
         assert!(voice.attestation().await.unwrap().is_some());
 
+        // Releasing the name drops the attestation with it, so the next
+        // claimant starts from nothing and a confidential send is refused until
+        // an artifact is verified for it again.
         service.release_name(VOICE_NAME).await.unwrap();
-        let impostor = Connection::connect(_bus_of(&client)).await;
-        drop(impostor);
-
         assert_eq!(voice.attestation().await.unwrap(), None);
+
+        service.request_name(VOICE_NAME).await.unwrap();
+        assert_eq!(voice.attestation().await.unwrap(), None);
+        let error = voice
+            .call_confidential::<String>("Transcribe", ("/tmp/secret.wav",))
+            .await
+            .unwrap_err();
+        assert_eq!(error.wire_name(), Error::NOT_ATTESTED);
     }
 
     #[tokio::test]
