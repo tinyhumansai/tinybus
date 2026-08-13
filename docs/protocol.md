@@ -55,6 +55,7 @@ omitted field and a `null` field identically.
 | `interface` | interface name | `method_call`, `signal` |
 | `member` | member name | `method_call`, `signal` |
 | `error_name` | dotted string | `error` |
+| `confidential` | bool, omitted when false | `method_call`, `method_return` |
 
 `body` is a positional JSON array for calls and signals, and a single JSON value
 for returns. `error` bodies are a string: the human-readable message, without
@@ -62,6 +63,28 @@ the error name, which travels in `error_name`.
 
 A peer **may** set `sender`; the broker overwrites it unconditionally. Nothing
 downstream may trust a `sender` that did not come from the broker.
+
+### `confidential`
+
+A peer **may** set `confidential`, and the broker does **not** overwrite it. The
+asymmetry with `sender` is deliberate: the flag can only cause more
+restrictions, so a peer that sets it restricts its own traffic and nobody
+else's.
+
+A broker that sees it **must**:
+
+- refuse a `signal` carrying it, and refuse any message carrying it without a
+  `destination`;
+- refuse a `method_call` carrying it unless the destination is a well-known name
+  whose owner the broker has independently verified, replying
+  `ai.tinyhumans.tinybus.Error.NotAttested`;
+- never deliver the message to a match-rule subscriber, and never log its body.
+
+The field is optional and defaults to false, so an older broker parses the
+message and routes it as an ordinary call. A sender that needs the guarantee
+must therefore confirm it first, by calling `GetAttestation` on the bus and
+requiring a non-null answer — a `null` answer, or an `UnknownMethod` error from
+a broker too old to have the method, both mean the guarantee is unavailable.
 
 ## Names
 
