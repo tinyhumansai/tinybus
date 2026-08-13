@@ -152,6 +152,18 @@ impl Broker {
             .request_name_for_unique(unique, name)
     }
 
+    /// Record that a loaded module's artifact matched the module allowlist.
+    ///
+    /// The in-process counterpart of the trust store: same check, same hash,
+    /// different place the operator wrote it down.
+    #[cfg(feature = "modules")]
+    pub(crate) fn attest_module(&self, unique: &BusName, attestation: crate::attest::Attestation) {
+        self.router
+            .lock()
+            .expect("router lock")
+            .set_attestation_for_unique(unique, attestation);
+    }
+
     /// Route one inbound message from peer `id`.
     async fn route(&self, from: u64, from_name: &BusName, mut message: Message) -> Result<()> {
         message.validate()?;
