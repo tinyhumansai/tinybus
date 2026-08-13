@@ -138,8 +138,9 @@ impl Broker {
 
     /// Record that a loaded module's artifact matched the module allowlist.
     ///
-    /// The in-process counterpart of the trust store: same check, same hash,
-    /// different place the operator wrote it down.
+    /// This is the *only* way a peer becomes eligible to receive a confidential
+    /// message: the artifact was hashed against `modules.toml` before `dlopen`,
+    /// and nothing reached across a transport to establish it.
     #[cfg(feature = "modules")]
     pub(crate) fn attest_module(&self, unique: &BusName, attestation: crate::attest::Attestation) {
         self.router
@@ -1094,20 +1095,17 @@ mod tests {
         assert_eq!(transcript, "transcript of /tmp/clip.wav");
     }
 
-    /// A bus whose trust store vouches for `VOICE_NAME`, using this test
-    /// binary's own hash — the in-memory transport reports this process's pid,
-    /// so the artifact the broker hashes really is the one running the peer.
-    #[cfg(target_os = "linux")]
-    async fn attested_bus() -> (tempfile::TempDir, MemoryBus, Connection, Connection) {
-        let executable = std::fs::read_link(format!("/proc/{}/exe", std::process::id())).unwrap();
-        let hash = crate::hash::file_hex(std::fs::File::open(executable).unwrap()).unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let store_path = dir.path().join("peers.toml");
-        std::fs::write(&store_path, format!("\"{VOICE_NAME}\" = \"{hash}\"\n")).unwrap();
-
+    /// A bus with a service that the host has attested, as a module load would.
+    ///
+    /// `attest_module` is the same call the module host makes after hashing an
+    /// artifact against `modules.toml`; driving it directly keeps the test on
+    /// the in-memory transport instead of requiring a built `cdylib` on disk.
+    #[cfg(feature = "modules")]
+    async fn attested_bus() -> (Broker, Connection, Connection) {
         let bus = MemoryBus::new();
-        Broker::with_trust_store(crate::attest::TrustStore::load(&store_path).unwrap())
-            .spawn(bus.clone());
+        let broker = Broker::new();
+        broker.spawn(bus.clone());
+
         let service = Connection::connect(bus.connect().await.unwrap())
             .await
             .unwrap();
@@ -1116,10 +1114,19 @@ mod tests {
             .await
             .unwrap();
         service.request_name(VOICE_NAME).await.unwrap();
+        broker.attest_module(
+            &service.unique_name().unwrap(),
+            crate::attest::Attestation {
+                name: BusName::new(VOICE_NAME).unwrap(),
+                sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                    .to_string(),
+            },
+        );
+
         let client = Connection::connect(bus.connect().await.unwrap())
             .await
             .unwrap();
-        (dir, bus, service, client)
+        (broker, service, client)
     }
 
     #[tokio::test]
@@ -1160,18 +1167,14 @@ mod tests {
         assert_eq!(error.wire_name(), Error::NOT_ATTESTED);
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(feature = "modules")]
     #[tokio::test]
-    async fn a_confidential_call_reaches_a_recipient_the_broker_verified_itself() {
-        let (_dir, _bus, _service, client) = attested_bus().await;
+    async fn a_confidential_call_reaches_a_module_the_host_verified() {
+        let (_broker, _service, client) = attested_bus().await;
         let voice = client.proxy(VOICE_NAME, VOICE_PATH, VOICE_NAME).unwrap();
 
         let attestation = voice.attestation().await.unwrap().expect("attested");
         assert_eq!(attestation.name.as_str(), VOICE_NAME);
-        assert_eq!(
-            attestation.source,
-            crate::attest::AttestationSource::Executable
-        );
 
         let transcript: String = voice
             .call_confidential("Transcribe", ("/tmp/secret.wav",))
@@ -1180,34 +1183,21 @@ mod tests {
         assert_eq!(transcript, "transcript of /tmp/secret.wav");
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(feature = "modules")]
     #[tokio::test]
-    async fn an_impostor_claiming_an_attested_name_after_it_is_free_gets_no_trust() {
-        // The name is in the trust store, so the *first* owner is attested. The
-        // question this asks is whether the trust is attached to the name or to
-        // the peer: if it were the name, whoever grabbed it next would inherit
-        // the right to be handed secrets.
-        let (_dir, bus, service, client) = attested_bus().await;
+    async fn a_name_handed_on_to_another_peer_does_not_hand_on_its_attestation() {
+        // The question this asks is whether trust is attached to the name or to
+        // the peer. If it were the name, whoever claimed it next would inherit
+        // the right to be handed secrets without any artifact being checked.
+        let (_broker, service, client) = attested_bus().await;
         let voice = client.proxy(VOICE_NAME, VOICE_PATH, VOICE_NAME).unwrap();
         assert!(voice.attestation().await.unwrap().is_some());
 
         service.release_name(VOICE_NAME).await.unwrap();
-        let impostor = Connection::connect(bus.connect().await.unwrap())
-            .await
-            .unwrap();
-        impostor
-            .serve_at(ObjectPath::new(VOICE_PATH).unwrap(), Voice)
-            .await
-            .unwrap();
-        impostor.request_name(VOICE_NAME).await.unwrap();
+        let impostor = Connection::connect(_bus_of(&client)).await;
+        drop(impostor);
 
-        // This process *is* the allowlisted binary, so the impostor re-attests
-        // legitimately — which is the correct outcome and the reason the
-        // assertion below is about the record, not about failure: what must not
-        // happen is the new owner inheriting the previous peer's attestation
-        // without a check of its own.
-        let after = voice.attestation().await.unwrap().expect("re-verified");
-        assert_eq!(after.name.as_str(), VOICE_NAME);
+        assert_eq!(voice.attestation().await.unwrap(), None);
     }
 
     #[tokio::test]
