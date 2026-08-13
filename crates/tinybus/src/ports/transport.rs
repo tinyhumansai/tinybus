@@ -40,5 +40,4 @@ pub trait Transport: Send + Sync + 'static {
     fn describe(&self) -> String {
         "transport".to_string()
     }
-
 }
