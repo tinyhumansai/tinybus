@@ -78,6 +78,7 @@ pub mod native;
 pub mod ports;
 pub mod proxy;
 pub mod router;
+pub mod secret;
 pub mod service;
 pub mod stream;
 pub mod transport;
