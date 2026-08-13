@@ -46,6 +46,13 @@ mechanism for anything else. An integration whose compromise must not reach the
 kernel's secrets belongs in a separate process — where it is, by this design,
 ineligible to receive them.
 
+A second thing it does not cover: **bulk streams**. A stream's bytes move as
+their own `Stream.Write` calls, which carry no `confidential` flag and so are
+routed without this check. Putting a `StreamRef` in a confidential call attests
+the recipient of the *handle*, not of the payload — so a secret large enough to
+want a stream currently has no attested way to travel. See
+[the protocol's `confidential` section](../../protocol.md#confidential).
+
 ## Not a signature, yet
 
 `modules.toml` is a list of hashes an operator put on disk, so an attestation

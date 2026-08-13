@@ -1260,4 +1260,41 @@ mod tests {
         let missing = BusName::new("ai.tinyhumans.openhuman.Absent").unwrap();
         assert_eq!(client.attestation(missing).await.unwrap(), None);
     }
+
+    #[tokio::test]
+    async fn the_stream_interface_gets_no_exemption_from_attestation() {
+        // Bulk payloads travel as `Stream.Write` calls rather than in a body,
+        // which makes the stream interface the one place a second delivery path
+        // could have grown. It did not: a chunk is an ordinary method call and
+        // `route` reaches it through the same check as everything else. Pinned
+        // as a test because the cost of the stream path ever being special-cased
+        // is every secret on the bus, and nothing else would notice.
+        let (_bus, service, client) = bus().await;
+        let stream = client
+            .proxy(
+                VOICE_NAME,
+                crate::stream::STREAM_PATH,
+                crate::stream::STREAM_INTERFACE,
+            )
+            .unwrap();
+
+        // The peer is reachable on the stream interface by an ordinary call —
+        // it answers `UnknownStream`, not `NotAttested` — so the refusal below
+        // is the attestation check firing and not the name failing to resolve.
+        let ordinary = stream
+            .call::<Value>("Abort", ("no-such-stream",))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            ordinary.wire_name(),
+            "ai.tinyhumans.tinybus.Error.UnknownStream"
+        );
+
+        let refused = stream
+            .call_confidential::<Value>("Abort", ("no-such-stream",))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.wire_name(), Error::NOT_ATTESTED);
+        drop(service);
+    }
 }

@@ -90,6 +90,14 @@ must therefore confirm it first, by calling `GetAttestation` and requiring a
 non-null answer — a `null` answer, or an `UnknownMethod` error from a broker too
 old to have the method, both mean the guarantee is unavailable.
 
+`confidential` covers the body of the message carrying it, and a bulk stream is
+not that body. A stream's bytes travel as separate `Stream.Write` calls (see
+[Bulk streams](#bulk-streams)) which carry no `confidential` flag and are
+therefore routed without an attestation check — putting a `StreamRef` in a
+confidential call protects the handle, not the payload it names. There is
+currently no confidential stream; a secret that must be attested has to fit in
+the body of the call itself.
+
 ## Names
 
 | Kind | Grammar |
