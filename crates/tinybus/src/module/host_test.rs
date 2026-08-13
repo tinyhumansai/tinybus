@@ -1180,7 +1180,7 @@ async fn a_module_loaded_from_an_allowlisted_artifact_becomes_an_attested_recipi
     let broker = Broker::new();
     broker.spawn(bus.clone());
     let host = ModuleHost::new(broker.clone());
-    let info = host.load(&staged, serde_json::json!({})).unwrap();
+    let info = host.load_file(&staged).unwrap();
 
     let client = Connection::connect(bus.connect().await.unwrap())
         .await
@@ -1203,6 +1203,6 @@ async fn a_module_whose_artifact_does_not_match_the_allowlist_never_loads_at_all
     let (_dir, staged) = staged_module(&artifact, &"a".repeat(64));
 
     let host = ModuleHost::new(Broker::new());
-    let error = host.load(&staged, serde_json::json!({})).unwrap_err();
+    let error = host.load_file(&staged).unwrap_err();
     assert!(error.to_string().contains("allowlist"), "{error}");
 }
