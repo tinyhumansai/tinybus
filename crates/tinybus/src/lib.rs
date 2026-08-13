@@ -88,6 +88,7 @@ pub mod version;
 #[path = "private.rs"]
 pub mod __private;
 
+pub use crate::attest::{Attestation, AttestationSource, TrustStore};
 pub use crate::connection::Connection;
 pub use crate::error::{Error, Result};
 pub use crate::events::{
