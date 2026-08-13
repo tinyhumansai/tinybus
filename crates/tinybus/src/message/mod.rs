@@ -160,6 +160,11 @@ impl Message {
                 interface: None,
                 member: None,
                 error_name: None,
+                // A reply inherits the call's confidentiality. A secret asked
+                // for confidentially is usually answered with another one — a
+                // key derivation returns a key — and a reply that quietly lost
+                // the flag would be the leak the call avoided, one hop later.
+                confidential: call.confidential,
             },
             body,
         }
