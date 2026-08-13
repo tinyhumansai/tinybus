@@ -671,4 +671,90 @@ mod tests {
         router.remove_match(b, &rule);
         assert!(router.subscribers(&sig, a).is_empty());
     }
+
+    fn attestation(name: &str) -> Attestation {
+        Attestation {
+            name: BusName::new(name).unwrap(),
+            sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                .to_string(),
+            source: crate::attest::AttestationSource::Executable,
+        }
+    }
+
+    #[test]
+    fn a_confidential_message_reaches_no_subscriber_however_broad_the_rule() {
+        let mut router = Router::default();
+        let (a, _) = router.attach(outbox(), None);
+        router.attach(outbox(), None);
+        // An empty rule matches everything, which is the worst case: if any
+        // rule could pull in a secret, this one would.
+        router.add_match(a, MatchRule::new());
+
+        let mut sig = signal("ai.tinyhumans.Test", "Tick", "/");
+        assert_eq!(router.subscribers(&sig, 99).len(), 1);
+        assert_eq!(router.broadcast_targets(&sig).len(), 1);
+
+        sig.header.confidential = true;
+        assert!(router.subscribers(&sig, 99).is_empty());
+        assert!(router.broadcast_targets(&sig).is_empty());
+    }
+
+    #[test]
+    fn an_unattested_owner_routes_normally_but_never_confidentially() {
+        let mut router = Router::default();
+        let (id, _) = router.attach(outbox(), Some(4242));
+        let name = BusName::new("ai.tinyhumans.openhuman.Wallet").unwrap();
+        router.request_name(id, name.clone()).unwrap();
+
+        assert!(router.resolve(&name).is_ok());
+        assert_eq!(router.attestation_of(&name), None);
+        let error = router.resolve_attested(&name).unwrap_err();
+        assert_eq!(error.wire_name(), Error::NOT_ATTESTED);
+        assert_eq!(router.pid_of(id), Some(4242));
+    }
+
+    #[test]
+    fn an_attested_owner_can_receive_a_confidential_message() {
+        let mut router = Router::default();
+        let (id, _) = router.attach(outbox(), None);
+        let name = BusName::new("ai.tinyhumans.openhuman.Wallet").unwrap();
+        router.request_name(id, name.clone()).unwrap();
+        router.set_attestation(id, attestation(name.as_str()));
+
+        assert!(router.resolve_attested(&name).is_ok());
+        assert_eq!(router.attestation_of(&name), Some(attestation(name.as_str())));
+    }
+
+    #[test]
+    fn an_attestation_is_bound_to_the_name_it_was_verified_for() {
+        // Holding two names must not let trust earned for one carry to the
+        // other: the operator allowlisted an artifact *as the wallet*, not as
+        // everything that process might also answer to.
+        let mut router = Router::default();
+        let (id, _) = router.attach(outbox(), None);
+        let wallet = BusName::new("ai.tinyhumans.openhuman.Wallet").unwrap();
+        let voice = BusName::new("ai.tinyhumans.openhuman.Voice").unwrap();
+        router.request_name(id, wallet.clone()).unwrap();
+        router.request_name(id, voice.clone()).unwrap();
+        router.set_attestation(id, attestation(wallet.as_str()));
+
+        assert!(router.resolve_attested(&wallet).is_ok());
+        assert!(router.resolve_attested(&voice).is_err());
+    }
+
+    #[test]
+    fn a_dead_peers_attestation_does_not_survive_it() {
+        let mut router = Router::default();
+        let (id, _) = router.attach(outbox(), None);
+        let name = BusName::new("ai.tinyhumans.openhuman.Wallet").unwrap();
+        router.request_name(id, name.clone()).unwrap();
+        router.set_attestation(id, attestation(name.as_str()));
+        router.detach(id);
+
+        // Whoever claims the name next inherits nothing and must earn its own.
+        let (next, _) = router.attach(outbox(), None);
+        router.request_name(next, name.clone()).unwrap();
+        assert_eq!(router.attestation_of(&name), None);
+        assert!(router.resolve_attested(&name).is_err());
+    }
 }
