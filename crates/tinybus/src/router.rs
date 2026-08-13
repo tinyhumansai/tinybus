@@ -465,7 +465,15 @@ impl Router {
     /// Excluding the sender is not an optimisation: a service that both emits
     /// and subscribes on the same interface would otherwise hear its own
     /// signal and, if it re-emits in response, loop.
+    /// A confidential message has no subscribers, whatever anyone matched.
+    /// `validate` already refuses confidential signals on ingress, so this can
+    /// only fire if some future path builds one internally — and the cost of
+    /// being wrong here is a secret delivered to every peer holding a match
+    /// rule, so it is checked twice rather than reasoned about once.
     pub fn subscribers(&self, signal: &Message, from: u64) -> Vec<mpsc::Sender<Message>> {
+        if signal.header.confidential {
+            return Vec::new();
+        }
         self.peers
             .iter()
             .filter(|(id, _)| **id != from)
