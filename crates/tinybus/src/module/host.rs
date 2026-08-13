@@ -583,7 +583,6 @@ impl ModuleHost {
                 crate::attest::Attestation {
                     name: admitted.manifest.bus_name.clone(),
                     sha256,
-                    source: crate::attest::AttestationSource::Module,
                 },
             );
         }
