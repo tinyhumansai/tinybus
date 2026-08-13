@@ -600,7 +600,7 @@ mod tests {
             Error::StreamTooLarge { limit: 1 },
             Error::TooManyStreams { limit: 1 },
             Error::Json(serde_json::from_str::<serde_json::Value>("{").unwrap_err()),
-            Error::not_attested(BusName::new("ai.tinyhumans.Example").unwrap()),
+            Error::not_attested(BusName::new("ai.tinyhumans.Example").unwrap(), "bad"),
         ];
         for error in errors {
             assert!(error.wire_name().starts_with("ai.tinyhumans."));
