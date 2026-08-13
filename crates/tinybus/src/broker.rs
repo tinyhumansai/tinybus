@@ -297,6 +297,53 @@ impl Broker {
         Ok(())
     }
 
+    /// Verify the artifact behind peer `id` against the trust store, and record
+    /// the result if it matched.
+    ///
+    /// Silent when the name is not in the store: an unlisted service is an
+    /// ordinary participant that simply cannot receive secrets. Loud when it is
+    /// listed and did not match, because that is either a stale hash after a
+    /// deploy or a process pretending to be the wallet, and an operator needs
+    /// to see both.
+    async fn attest_owner(&self, id: u64, name: &BusName) {
+        if self.trust.expected(name).is_none() {
+            return;
+        }
+        let Some(pid) = self.router.lock().expect("router lock").pid_of(id) else {
+            tracing::warn!(
+                name = %name,
+                "recipient is in the trust store but its transport reports no pid; \
+                 confidential delivery will be refused"
+            );
+            return;
+        };
+
+        // Hashing an artifact is unbounded file I/O. Off the runtime's core
+        // threads, and with no lock held: the router mutex is a plain
+        // `std::sync::Mutex` and the whole bus routes through it.
+        let trust = Arc::clone(&self.trust);
+        let target = name.clone();
+        let verified =
+            tokio::task::spawn_blocking(move || trust.verify(&target, pid)).await;
+
+        match verified {
+            Ok(Ok(Some(attestation))) => {
+                tracing::info!(name = %name, "recipient attested for confidential delivery");
+                self.router
+                    .lock()
+                    .expect("router lock")
+                    .set_attestation(id, attestation);
+            }
+            Ok(Ok(None)) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(name = %name, error = %error, "recipient failed attestation");
+            }
+            Err(_) => {
+                tracing::warn!(name = %name, "attestation task failed; recipient stays unattested");
+            }
+        }
+    }
+
     /// The bus's own interface. Module stop may await a blocking callback; the
     /// ordinary table still holds no lock across an await.
     async fn bus_method(
