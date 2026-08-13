@@ -568,6 +568,25 @@ impl ModuleHost {
                 return Err(error);
             }
         };
+        // A module that matched `modules.toml` is an attested recipient: the
+        // host hashed its artifact against a list the operator installed, which
+        // is the same fact the trust store asserts about an out-of-process peer.
+        // Re-read rather than plumbed down from the gate, and fails closed —
+        // an artifact that changed underneath us no longer matches, so it does
+        // not become attested.
+        if let Ok(Some(sha256)) =
+            std::fs::File::open(path).map_err(Error::from).and_then(|file| allowlisted_hash(path, file))
+        {
+            self.inner.broker.attest_module(
+                &unique,
+                crate::attest::Attestation {
+                    name: admitted.manifest.bus_name.clone(),
+                    sha256,
+                    source: crate::attest::AttestationSource::Module,
+                },
+            );
+        }
+
         let broker = self.inner.broker.clone();
         let ready_transport = transport.clone();
         let module_name = admitted.name.clone();
