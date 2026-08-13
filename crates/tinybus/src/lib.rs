@@ -100,6 +100,7 @@ pub use crate::native::{NativeRegistry, NativeRequestError};
 pub use crate::ports::{Listener, Transport};
 pub use crate::proxy::Proxy;
 pub use crate::router::MatchRule;
+pub use crate::secret::{Secret, harden_process};
 pub use crate::service::Interface;
 pub use crate::stream::{
     MAX_CHUNK_LEN, StreamDescriptor, StreamLimits, StreamReader, StreamRef, StreamWriter,
