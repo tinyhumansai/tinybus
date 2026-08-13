@@ -144,6 +144,27 @@ impl Message {
         }
     }
 
+    /// Build a method call whose body the broker must not let anyone but the
+    /// attested destination see.
+    ///
+    /// Use it for the payloads whose disclosure is the failure — a private key,
+    /// a recovery phrase, a bearer token. The broker will refuse to deliver it
+    /// unless it has itself verified the destination's artifact against the
+    /// operator's trust store, so a send that would have gone to an
+    /// impersonator fails instead of succeeding quietly. See [`crate::attest`]
+    /// for exactly what "verified" covers.
+    pub fn confidential_call(
+        destination: BusName,
+        path: ObjectPath,
+        interface: InterfaceName,
+        member: MemberName,
+        body: Value,
+    ) -> Self {
+        let mut message = Self::method_call(destination, path, interface, member, body);
+        message.header.confidential = true;
+        message
+    }
+
     /// Build the successful reply to `call`.
     pub fn method_return(call: &Header, body: Value) -> Self {
         Self {
