@@ -66,6 +66,20 @@ pub enum Error {
     #[error("no peer owns the name `{0}`")]
     NameHasNoOwner(BusName),
 
+    /// A confidential message was refused because the broker could not
+    /// establish what binary is behind the destination name.
+    ///
+    /// Carries the name and a fixed operator-facing reason, never the body it
+    /// was protecting — the whole point of the refusal is that the payload goes
+    /// nowhere, including into a log line.
+    #[error("`{name}` is not an attested recipient: {reason}")]
+    NotAttested {
+        /// The destination that failed attestation.
+        name: BusName,
+        /// Why the broker would not vouch for it.
+        reason: String,
+    },
+
     /// `RequestName` lost: another peer already owns it and did not allow
     /// replacement.
     #[error("`{name}` is already owned by {owner}")]
