@@ -278,6 +278,23 @@ impl Message {
     /// without re-checking. A call with no destination would otherwise sit in
     /// the router as an unroutable message with a caller blocked on it forever.
     pub fn validate(&self) -> Result<()> {
+        // Checked before the per-kind rules, and checked on ingress rather than
+        // at delivery: a confidential signal has no destination, so there is no
+        // one recipient to attest and fan-out is the only thing it could mean.
+        // Refusing it here means no later stage has to ask whether a broadcast
+        // might be a secret.
+        if self.header.confidential {
+            if self.header.kind == MessageKind::Signal {
+                return Err(Error::protocol(
+                    "a signal cannot be confidential: it is a broadcast",
+                ));
+            }
+            if self.header.destination.is_none() {
+                return Err(Error::protocol(
+                    "a confidential message needs a destination",
+                ));
+            }
+        }
         match self.header.kind {
             MessageKind::MethodCall => {
                 if self.header.destination.is_none() {
