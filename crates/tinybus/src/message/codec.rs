@@ -19,7 +19,8 @@ use crate::error::{Error, Result};
 /// A hard cap, not a tunable. The frame length arrives from the wire *before*
 /// the bytes do, so without this the first four bytes of a hostile or corrupt
 /// stream are a 4 GiB allocation. 16 MiB is far above any legitimate control
-/// message; bulk payloads are supposed to travel as paths, not as bodies.
+/// message; a payload that does not fit goes through [`crate::stream`], which
+/// splits it into chunks that do, rather than through a larger cap here.
 pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 
 /// The length prefix's width, in bytes.

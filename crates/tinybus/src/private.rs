@@ -63,9 +63,12 @@ mod tests {
         assert_eq!(decoded, (2, 3));
         assert_eq!(encode_reply(&5u32).unwrap(), serde_json::json!(5));
 
-        let error = decode_args::<(u32,)>(&member, serde_json::json!([1, 2])).unwrap_err();
-        assert!(error.to_string().contains("Add"));
-        assert!(error.to_string().contains("bad arguments"));
+        let sensitive = "sensitive-argument-value";
+        let error = decode_args::<(u32,)>(&member, serde_json::json!([sensitive])).unwrap_err();
+        let rendered = error.to_string();
+        assert!(rendered.contains("Add"));
+        assert!(rendered.contains("bad arguments"));
+        assert!(!rendered.contains(sensitive));
     }
 
     #[test]

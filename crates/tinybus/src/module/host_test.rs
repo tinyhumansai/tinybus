@@ -770,6 +770,13 @@ fn a_world_writable_module_directory_is_refused_before_any_dlopen() {
 
 #[cfg(unix)]
 #[test]
+fn a_sticky_world_writable_module_directory_is_accepted() {
+    assert_eq!(unix_directory_refusal(0, 0o1777, 1_000), None);
+    assert_eq!(unix_directory_refusal(1_000, 0o1777, 1_000), None);
+}
+
+#[cfg(unix)]
+#[test]
 fn a_module_directory_owned_by_another_user_is_refused() {
     assert_eq!(
         unix_directory_refusal(1_001, 0o755, 1_000),
@@ -845,6 +852,12 @@ fn module_host_helpers_preserve_safe_names_states_and_allowlist_decisions() {
     })));
     assert!(!has_library_extension(Path::new("clock.txt")));
 
+    #[cfg(windows)]
+    let _local_app_data = {
+        let directory = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("LOCALAPPDATA", directory.path()) };
+        directory
+    };
     let search_paths = ModuleHost::search_paths();
     assert!(
         search_paths
@@ -862,6 +875,21 @@ fn module_host_helpers_preserve_safe_names_states_and_allowlist_decisions() {
         "clock.so"
     });
     std::fs::write(&module, b"module bytes").unwrap();
+    let digest = crate::module::hash::file_hex(std::fs::File::open(&module).unwrap()).unwrap();
+    std::fs::write(
+        directory.path().join("modules.toml"),
+        format!(
+            "clock.{} = \"{digest}\"\n",
+            if cfg!(windows) {
+                "dll"
+            } else if cfg!(target_os = "macos") {
+                "dylib"
+            } else {
+                "so"
+            }
+        ),
+    )
+    .unwrap();
     assert!(check_file(&module).is_ok());
     let text = directory.path().join("clock.txt");
     std::fs::write(&text, b"module bytes").unwrap();

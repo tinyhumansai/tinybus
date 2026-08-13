@@ -128,6 +128,27 @@ enum ModulesCommand {
         #[arg(long, default_value = "{}")]
         config: String,
     },
+    /// Download, verify, extract, and load a GitHub release module.
+    LoadGithub {
+        /// GitHub release tag URL.
+        release_url: String,
+        /// Release archive asset name, usually ending in `.tar.gz`.
+        asset: String,
+        /// Expected SHA-256 for the release archive.
+        sha256: String,
+        /// JSON object passed to the module's setup function.
+        #[arg(long, default_value = "{}")]
+        config: String,
+    },
+    /// Generate a checksum.toml for release assets.
+    Checksum {
+        /// Release assets to hash. Repeat this option for multiple assets.
+        #[arg(long = "path", required = true)]
+        paths: Vec<PathBuf>,
+        /// Write the manifest to a file instead of stdout.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
     /// Stop a loaded module without unloading its library.
     Stop {
         /// Stable module name.
@@ -293,6 +314,13 @@ async fn run(cli: Cli) -> Result<()> {
 }
 
 async fn run_modules(address: &Path, timeout: Duration, command: ModulesCommand) -> Result<()> {
+    if let ModulesCommand::Checksum {
+        ref paths,
+        ref output,
+    } = command
+    {
+        return write_checksum_manifest(paths, output.as_deref());
+    }
     let connection = connect(address).await?;
     let bus = connection
         .proxy(tinybus::BUS_NAME, tinybus::BUS_PATH, tinybus::BUS_INTERFACE)?
@@ -354,6 +382,22 @@ async fn run_modules(address: &Path, timeout: Duration, command: ModulesCommand)
             println!("{}", serde_json::to_string_pretty(&module)?);
             Ok(())
         }
+        ModulesCommand::LoadGithub {
+            release_url,
+            asset,
+            sha256,
+            config,
+        } => {
+            let config: serde_json::Value = serde_json::from_str(&config)?;
+            let module: serde_json::Value = bus
+                .call("LoadGithubModule", (release_url, asset, sha256, config))
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&module)?);
+            Ok(())
+        }
+        ModulesCommand::Checksum { paths, output } => {
+            write_checksum_manifest(&paths, output.as_deref())
+        }
         ModulesCommand::Stop { name, deadline_ms } => {
             if Duration::from_millis(deadline_ms) >= timeout {
                 return Err(Error::failed(
@@ -394,6 +438,24 @@ async fn run_modules(address: &Path, timeout: Duration, command: ModulesCommand)
             Ok(())
         }
     }
+}
+
+fn write_checksum_manifest(paths: &[PathBuf], output: Option<&Path>) -> Result<()> {
+    let mut manifest = String::from("[sha256]\n");
+    for path in paths {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| Error::failed("checksum path has no safe filename"))?;
+        let digest = tinybus::module::sha256_file(path)?;
+        manifest.push_str(&format!("{name:?} = \"{digest}\"\n"));
+    }
+    if let Some(output) = output {
+        std::fs::write(output, manifest)?;
+    } else {
+        print!("{manifest}");
+    }
+    Ok(())
 }
 
 async fn connect(address: &Path) -> Result<Connection> {
@@ -512,8 +574,8 @@ mod tests {
         let address = dir.path().join("bus");
         let listener = UnixListenerAdapter::bind(&address).await.unwrap();
         let broker = Broker::new();
-        // The broker stores module control weakly, so callers must retain this
-        // host for the test lifetime or module commands lose their controller.
+        // The broker retains only a weak module control, so callers must keep
+        // this host bound while they issue module commands.
         let host = ModuleHost::new(broker.clone());
         broker.spawn(listener);
         (dir, address, host)
@@ -644,7 +706,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn module_commands_and_invalid_json_fail_with_a_running_broker() {
+    async fn module_commands_report_errors_and_valid_commands_succeed() {
         let (_dir, address, _host) = broker_with_module_host().await;
         let commands = [
             ModulesCommand::Show {
@@ -657,6 +719,12 @@ mod tests {
             },
             ModulesCommand::Load {
                 path: PathBuf::from("/not/a/module"),
+                config: "{}".into(),
+            },
+            ModulesCommand::LoadGithub {
+                release_url: "https://example.com/not-github".into(),
+                asset: "module.tar.gz".into(),
+                sha256: "0".repeat(64),
                 config: "{}".into(),
             },
             ModulesCommand::Stop {
@@ -688,6 +756,25 @@ mod tests {
         )
         .await
         .unwrap();
+
+        let asset = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(asset.path(), b"release asset").unwrap();
+        let manifest = tempfile::NamedTempFile::new().unwrap();
+        run_modules(
+            &address,
+            Duration::from_secs(2),
+            ModulesCommand::Checksum {
+                paths: vec![asset.path().to_path_buf()],
+                output: Some(manifest.path().to_path_buf()),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            std::fs::read_to_string(manifest.path())
+                .unwrap()
+                .contains("[sha256]")
+        );
         run_modules(&address, Duration::from_secs(2), ModulesCommand::Doctor)
             .await
             .unwrap();

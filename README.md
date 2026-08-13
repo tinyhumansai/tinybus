@@ -82,6 +82,9 @@ tinybus call ai.tinyhumans.openhuman.Voice \
     ai.tinyhumans.openhuman.Voice Transcribe '["/tmp/clip.wav"]'
 ```
 
+For a complete multi-process walkthrough with a broker, service, consumer and
+signal monitor, see [`examples/README.md`](examples/README.md).
+
 ## Layout
 
 ```

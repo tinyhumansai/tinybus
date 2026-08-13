@@ -81,14 +81,21 @@ meant to be reachable by some peers and not others.
 ## M5 — bulk payloads
 
 Bodies are JSON, and a transcript or a rendered PDF should not be base64 in a
-JSON string. Two options, and the choice is not obvious yet:
+JSON string — but nor should a 20 MB payload be undeliverable.
 
-- [ ] File-descriptor passing over `SCM_RIGHTS`, which is zero-copy and Unix-only
-- [ ] A side-channel content store the bus hands out handles to, which works
-      everywhere and costs a write
+- [x] Chunked peer-to-peer streams (`src/stream/`), flow-controlled by the
+      receiver's window and authorised by the broker-stamped `sender`. Works on
+      every transport and needs nothing from the broker, at the cost of base64
+      and a round trip per chunk.
+- [ ] File-descriptor passing over `SCM_RIGHTS`, which is zero-copy and
+      Unix-only. A fast path *under* the stream API rather than a replacement
+      for it: callers hold a `StreamRef`, so the transport underneath can change
+      without the interface changing.
+- [ ] A side-channel content store the bus hands out handles to, for payloads
+      big enough that a copy through the bus is the wrong shape entirely
 
-Until this lands, the convention is that large payloads travel as paths and the
-sender is responsible for the file's lifetime.
+Passing a path remains the cheapest option when both peers can see the same
+filesystem and the sender can own the file's lifetime.
 
 ## M6 — other platforms and other languages
 

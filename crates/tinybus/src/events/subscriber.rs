@@ -257,28 +257,45 @@ mod tests {
         let (sender, receiver) = broadcast::channel(1);
         drop(sender);
         let config = EventBusConfig::new("/events", "ai.tinyhumans.Events").unwrap();
-        let handle = spawn(receiver, config, Arc::new(Handler));
+        let mut handle = spawn(receiver, config, Arc::new(Handler));
         assert_eq!(handle.name(), "subscriber::test");
-        tokio::task::yield_now().await;
-        drop(handle);
+        (&mut handle.task).await.unwrap();
     }
 
     #[tokio::test]
     async fn malformed_and_lagged_messages_do_not_end_the_dispatch_loop() {
         let (sender, receiver) = broadcast::channel(1);
         let config = EventBusConfig::new("/events", "ai.tinyhumans.Events").unwrap();
-        let message = Message::signal(
+        let malformed = Message::signal(
             crate::ObjectPath::new("/events/test").unwrap(),
             crate::InterfaceName::new("ai.tinyhumans.Other").unwrap(),
             crate::MemberName::new("Published").unwrap(),
             serde_json::json!([TestEvent]),
         );
-        sender.send(message.clone()).unwrap();
-        sender.send(message).unwrap();
-        let handle = spawn(receiver, config, Arc::new(Handler));
-        tokio::task::yield_now().await;
+        let valid = Message::signal(
+            crate::ObjectPath::new("/events/test").unwrap(),
+            crate::InterfaceName::new("ai.tinyhumans.Events").unwrap(),
+            crate::MemberName::new("Published").unwrap(),
+            serde_json::json!([TestEvent]),
+        );
+        let (seen_tx, mut seen_rx) = tokio::sync::mpsc::channel(1);
+        sender.send(malformed).unwrap();
+        sender.send(valid.clone()).unwrap();
+        sender.send(valid).unwrap();
+        let handler = FnSubscriber {
+            name: "subscriber::test".to_string(),
+            handler: move |_| {
+                let seen_tx = seen_tx.clone();
+                async move { seen_tx.send(()).await.unwrap() }
+            },
+            _event: std::marker::PhantomData::<fn() -> TestEvent>,
+        };
+        let handle = spawn(receiver, config, Arc::new(handler));
         assert_eq!(handle.name(), "subscriber::test");
-        drop(sender);
+        tokio::time::timeout(std::time::Duration::from_secs(1), seen_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
         drop(handle);
     }
 }

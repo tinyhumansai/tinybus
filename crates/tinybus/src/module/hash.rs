@@ -1,9 +1,11 @@
-//! Dependency-free SHA-256 used by the module allowlist.
+//! Dependency-free SHA-256 used by module artifact verification.
 //!
-//! Gated with the rest of module loading, because the allowlist is the only
-//! thing that hashes anything: a recipient earns the right to be handed a
-//! secret by having its artifact verified at load, and nothing outside the
-//! loader ever needs to compute a digest.
+//! Verification at load is what an attestation later stands on: a recipient
+//! earns the right to be handed a confidential body by having its artifact
+//! digested here and matched against the operator's allowlist. Compiled
+//! unconditionally rather than behind `modules`, because `module::sha256_file`
+//! offers the same digest to callers that publish an asset without ever
+//! loading one.
 
 use std::io::{self, Read};
 

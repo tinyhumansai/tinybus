@@ -157,6 +157,51 @@ announced as `ModuleStateChanged` with body
 state has a safe refusal or fault reason.
 Name ownership changes still announce when a module attaches or stops.
 
+## Bulk streams
+
+A payload larger than one frame does not travel in a body. The sender opens a
+stream on the *receiving peer* and writes it as chunks; the method call carries
+only a handle. The broker is not involved beyond routing — every member below is
+an ordinary method call addressed to the receiving peer.
+
+Path `/ai/tinyhumans/tinybus/Stream`, interface `ai.tinyhumans.tinybus.Stream`.
+Every peer answers it, whether or not it exported anything.
+
+| Member | Body | Returns |
+| --- | --- | --- |
+| `Open` | `[{"content_type"?, "total_len"?}]` | an opaque stream id |
+| `Write` | `[id, seq, base64]` | `null` once the chunk is accepted |
+| `Close` | `[id, total_len]` | `null`; `total_len` must equal what was written |
+| `Abort` | `[id]` | `null` |
+
+The handle that travels in a method body is
+`{"id": …, "content_type"?: …, "len"?: …}`.
+
+Rules a receiver enforces, and a sender must expect:
+
+- **Chunks are capped at 524 288 bytes** before base64 — a chunk plus its
+  encoding overhead must fit a frame with room to spare.
+- **`seq` starts at 0 and increments by exactly one.** A gap aborts the stream
+  rather than transposing it. Do not pipeline writes: two chunks in flight can
+  be dispatched into two tasks and land either way round.
+- **`Write` does not reply until the chunk has room** in the receiver's window.
+  That reply is the flow control; a sender is never more than a window ahead.
+  Like every call it has a deadline, so a receiver that stops reading surfaces
+  as an error rather than a hang.
+- **Only the peer that called `Open` may write to the stream.** Authorisation is
+  the broker-stamped `sender` and nothing else. Any other peer gets
+  `UnknownStream`, which is also what an id naming nothing returns — the two are
+  deliberately indistinguishable.
+- **`Close` declares the total.** A mismatch is an error and the payload is not
+  delivered as a short read.
+- **Limits belong to the receiver** and are not negotiated: a maximum stream
+  length, a maximum number of concurrent streams per peer, a window, and an idle
+  timeout after which an abandoned stream is reaped.
+
+Send the call carrying the handle *before* writing the payload. The window is a
+few megabytes, so a sender that writes everything up front stalls against a
+reader that has not been dispatched yet.
+
 ## Match rules
 
 Comma-separated `key=value`. Unset keys match anything; every set key must
@@ -191,6 +236,10 @@ Bus-generated names:
 | `…Error.UnknownMethod` | the interface has no such member |
 | `…Error.BadArguments` | the body did not match the member's signature |
 | `…Error.Failed` | a method failed with no more specific mapping |
+| `…Error.UnknownStream` | no such stream, or not one this peer opened |
+| `…Error.StreamAborted` | the stream ended before it was complete |
+| `…Error.StreamTooLarge` | the stream exceeds what the receiver accepts |
+| `…Error.TooManyStreams` | this peer already holds its share of open streams |
 
 (`…` is `ai.tinyhumans.tinybus`.) A service should define its own dotted names
 under its own interface — `ai.tinyhumans.openhuman.Voice.Error.NoDevice` — for

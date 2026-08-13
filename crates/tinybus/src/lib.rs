@@ -80,6 +80,7 @@ pub mod ports;
 pub mod proxy;
 pub mod router;
 pub mod service;
+pub mod stream;
 pub mod transport;
 pub mod version;
 
@@ -101,6 +102,9 @@ pub use crate::ports::{Listener, Transport};
 pub use crate::proxy::Proxy;
 pub use crate::router::MatchRule;
 pub use crate::service::Interface;
+pub use crate::stream::{
+    MAX_CHUNK_LEN, StreamDescriptor, StreamLimits, StreamReader, StreamRef, StreamWriter,
+};
 pub use crate::version::{
     Compatibility, InterfaceVersion, PeerManifest, PeerRecord, Version, VersionRange,
 };

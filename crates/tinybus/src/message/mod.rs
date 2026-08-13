@@ -8,9 +8,10 @@
 //! What we get in exchange is that `tinybus monitor` is readable, a service can
 //! be written in any language in an afternoon, and `serde` derives on the
 //! kernel side are the entire client binding. The one place this would be the
-//! wrong trade is bulk binary payloads (audio, PDFs), and that is exactly what
-//! `ROADMAP.md`'s file-descriptor passing milestone is for; until then large
-//! payloads travel as paths, not as base64.
+//! wrong trade is bulk binary payloads (audio, PDFs), which is why those do not
+//! travel in a body at all: [`crate::stream`] carries them beside the call as
+//! chunks, and the body carries only a handle. A path is still cheaper when
+//! both peers can see the same filesystem.
 //!
 //! # Why the header is flat
 //!
