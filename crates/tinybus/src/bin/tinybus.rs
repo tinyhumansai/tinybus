@@ -38,7 +38,12 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Run the broker until interrupted.
-    Serve,
+    Serve {
+        /// Path to the peer trust store: `name = "sha256"` per attested
+        /// recipient. Without it the bus refuses every confidential message.
+        #[arg(long, value_name = "PATH")]
+        trust_store: Option<PathBuf>,
+    },
 
     /// Call a method and print the reply as JSON.
     Call {
@@ -53,6 +58,10 @@ enum Command {
         /// Positional arguments as a JSON array. Defaults to `[]`.
         #[arg(default_value = "[]")]
         args: String,
+        /// Send the body confidentially: the bus refuses to deliver it unless
+        /// it has verified the destination's artifact itself.
+        #[arg(long)]
+        confidential: bool,
     },
 
     /// Emit a signal.
@@ -180,9 +189,15 @@ async fn run(cli: Cli) -> Result<()> {
     let timeout = Duration::from_secs(cli.timeout);
 
     match cli.command {
-        Command::Serve => {
+        Command::Serve { trust_store } => {
             let listener = UnixListenerAdapter::bind(&address).await?;
-            let broker = Broker::new();
+            // Loaded before the listener starts handing out peers: a bus that
+            // could widen its trust while running would let whoever widened it
+            // redirect the next secret.
+            let broker = match trust_store {
+                Some(path) => Broker::with_trust_store(tinybus::TrustStore::load(path)?),
+                None => Broker::new(),
+            };
             // Serve and Ctrl-C race, and whichever wins ends the process. The
             // listener's Drop unlinks the socket either way, so the next start
             // does not trip over a leftover.
@@ -437,10 +452,16 @@ fn render(message: &tinybus::Message) -> String {
         .map(|i| i.to_string())
         .unwrap_or_default();
     let member = h.member.as_ref().map(|m| m.to_string()).unwrap_or_default();
-    format!(
-        "{kind:<6} {sender:<10} {path} {interface}.{member} {}",
-        message.body
-    )
+    // The monitor is a terminal, a scrollback buffer and often a pasted bug
+    // report. A confidential body must not reach any of them, and the routing
+    // rules mean one should never arrive here in the first place — so this is
+    // the second lock on a door that is already shut.
+    let body = if h.confidential {
+        "<confidential>".to_string()
+    } else {
+        message.body.to_string()
+    };
+    format!("{kind:<6} {sender:<10} {path} {interface}.{member} {body}")
 }
 
 #[cfg(test)]
