@@ -45,6 +45,10 @@ pub const PEER_QUEUE_CAPACITY: usize = 256;
 pub struct Broker {
     router: Arc<Mutex<Router>>,
     id: String,
+    /// Which artifact the operator will vouch for under which name. Empty by
+    /// default, so a broker nobody configured attests nobody and refuses every
+    /// confidential delivery — the failure direction that cannot leak.
+    trust: Arc<crate::attest::TrustStore>,
     // `Weak`, not `Arc`: the module host owns this broker, so a strong
     // reference back would form a cycle and leak both. Callers tolerate a
     // failed upgrade by falling back to the ordinary routing error.
