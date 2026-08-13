@@ -398,6 +398,56 @@ impl Router {
         self.peers.get(id).map(|p| p.unique.clone())
     }
 
+    /// The pid the transport reported for `id`, for attestation.
+    pub fn pid_of(&self, id: u64) -> Option<u32> {
+        self.peers.get(&id)?.pid
+    }
+
+    /// Record what the broker verified about the peer owning `name`.
+    ///
+    /// Stored against the peer, so it dies with the peer: a service that exits
+    /// takes its attestation with it, and the next process to claim the name
+    /// has to earn its own. Nothing here is ever copied forward on a name
+    /// handover, which is what stops a released name carrying its predecessor's
+    /// trust to whoever grabs it next.
+    pub fn set_attestation(&mut self, id: u64, attestation: Attestation) {
+        if let Some(peer) = self.peers.get_mut(&id) {
+            peer.attestations
+                .insert(attestation.name.clone(), attestation);
+        }
+    }
+
+    /// What the broker verified about whoever owns `name`, if anything.
+    pub fn attestation_of(&self, name: &BusName) -> Option<Attestation> {
+        let id = self.names.get(name)?;
+        self.peers.get(id)?.attestations.get(name).cloned()
+    }
+
+    /// The outbox of whoever owns `destination`, but only if the broker has
+    /// verified that peer's artifact *for that name*.
+    ///
+    /// The lookup and the check are one operation on purpose. Resolving first
+    /// and checking after would leave a window in which a caller could hold a
+    /// sender for an unattested peer, and every such window eventually becomes
+    /// a delivery.
+    pub fn resolve_attested(&self, destination: &BusName) -> Result<mpsc::Sender<Message>> {
+        let id = self
+            .names
+            .get(destination)
+            .ok_or_else(|| Error::NameHasNoOwner(destination.clone()))?;
+        let peer = self
+            .peers
+            .get(id)
+            .ok_or_else(|| Error::NameHasNoOwner(destination.clone()))?;
+        if !peer.attestations.contains_key(destination) {
+            return Err(Error::not_attested(
+                destination.clone(),
+                "the broker has not verified this recipient's artifact",
+            ));
+        }
+        Ok(peer.outbox.clone())
+    }
+
     /// The outbox of whoever owns `destination`.
     pub fn resolve(&self, destination: &BusName) -> Result<mpsc::Sender<Message>> {
         let id = self
