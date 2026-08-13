@@ -258,6 +258,17 @@ impl Broker {
             .bus_method(from, from_name, &member, message.body)
             .await;
 
+        // Attest before replying, not after. A service's own `RequestName`
+        // reply is the event it uses to announce itself, so anything that
+        // happens after it races with the first call from whoever was waiting —
+        // and losing that race would mean a legitimate confidential send failing
+        // for timing reasons, which is how a guarantee gets worked around.
+        for change in &changes {
+            if change.new_owner.is_some() {
+                self.attest_owner(from, &change.name).await;
+            }
+        }
+
         let reply = match result {
             Ok(value) => Message::method_return(&header, value),
             Err(e) => Message::error_reply(&header, &e),
