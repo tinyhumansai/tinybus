@@ -1,10 +1,9 @@
-//! Dependency-free SHA-256, the crate's one integrity primitive.
+//! Dependency-free SHA-256 used by the module allowlist.
 //!
-//! Always compiled, not gated behind `modules`, because the confidential
-//! routing rule in [`crate::attest`] depends on it: a slim `--no-default-features`
-//! broker that could not hash an artifact would have to either refuse every
-//! confidential message or forward it unattested, and the second of those is a
-//! silent downgrade of the guarantee.
+//! Gated with the rest of module loading, because the allowlist is the only
+//! thing that hashes anything: a recipient earns the right to be handed a
+//! secret by having its artifact verified at load, and nothing outside the
+//! loader ever needs to compute a digest.
 
 use std::io::{self, Read};
 

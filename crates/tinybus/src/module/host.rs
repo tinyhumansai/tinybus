@@ -1174,7 +1174,7 @@ fn allowlisted_hash(path: &Path, file: std::fs::File) -> Result<Option<String>> 
             "module allowlist contains an invalid hash",
         ));
     }
-    let actual = crate::hash::file_hex(file)
+    let actual = crate::module::hash::file_hex(file)
         .map_err(|_| Error::module_refused(path, "artifact hash could not be read"))?;
     if actual != expected {
         return Err(Error::module_refused(
