@@ -5,8 +5,6 @@
 //! modules are trusted code with the host's full address-space privileges.
 
 pub mod abi;
-#[cfg(feature = "modules")]
-mod hash;
 pub mod manifest;
 
 #[cfg(feature = "modules")]
