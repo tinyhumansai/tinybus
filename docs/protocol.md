@@ -125,6 +125,7 @@ interface `ai.tinyhumans.tinybus.Bus`.
 | `GetManifest` | `[name]` | that peer's manifest, or `null` |
 | `ListPeers` | `[]` | unique names, owned names, and peer manifests |
 | `GetNameOwner` | `[name]` | the owner's unique name, or `null` |
+| `GetAttestation` | `[name]` | what the broker verified about that owner, or `null` |
 | `AddMatch` | `[rule]` | `null` |
 | `RemoveMatch` | `[rule]` | `null` |
 | `ListModules` | `[]` | every module known to the embedded host |
