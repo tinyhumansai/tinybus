@@ -117,6 +117,10 @@ impl Transport for UnixTransport {
     fn describe(&self) -> String {
         self.label.clone()
     }
+
+    fn peer_process(&self) -> Option<u32> {
+        self.peer_pid
+    }
 }
 
 /// The broker's accept side.
