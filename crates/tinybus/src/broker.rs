@@ -1101,7 +1101,7 @@ mod tests {
     /// artifact against `modules.toml`; driving it directly keeps the test on
     /// the in-memory transport instead of requiring a built `cdylib` on disk.
     #[cfg(feature = "modules")]
-    async fn attested_bus() -> (Broker, Connection, Connection) {
+    async fn attested_bus() -> (MemoryBus, Broker, Connection, Connection) {
         let bus = MemoryBus::new();
         let broker = Broker::new();
         broker.spawn(bus.clone());
@@ -1126,7 +1126,7 @@ mod tests {
         let client = Connection::connect(bus.connect().await.unwrap())
             .await
             .unwrap();
-        (broker, service, client)
+        (bus, broker, service, client)
     }
 
     #[tokio::test]
@@ -1170,7 +1170,7 @@ mod tests {
     #[cfg(feature = "modules")]
     #[tokio::test]
     async fn a_confidential_call_reaches_a_module_the_host_verified() {
-        let (_broker, _service, client) = attested_bus().await;
+        let (_bus, _broker, _service, client) = attested_bus().await;
         let voice = client.proxy(VOICE_NAME, VOICE_PATH, VOICE_NAME).unwrap();
 
         let attestation = voice.attestation().await.unwrap().expect("attested");
@@ -1186,20 +1186,32 @@ mod tests {
     #[cfg(feature = "modules")]
     #[tokio::test]
     async fn a_name_handed_on_to_another_peer_does_not_hand_on_its_attestation() {
-        // The question this asks is whether trust is attached to the name or to
-        // the peer. If it were the name, whoever claimed it next would inherit
-        // the right to be handed secrets without any artifact being checked.
-        let (_broker, service, client) = attested_bus().await;
+        // The property under test is whether trust is attached to the *name* or
+        // to the *peer*. If it were the name, any process that grabbed it after
+        // the real module released it would inherit the right to be handed
+        // secrets without a single byte having been hashed.
+        let (bus, _broker, service, client) = attested_bus().await;
         let voice = client.proxy(VOICE_NAME, VOICE_PATH, VOICE_NAME).unwrap();
         assert!(voice.attestation().await.unwrap().is_some());
 
-        // Releasing the name drops the attestation with it, so the next
-        // claimant starts from nothing and a confidential send is refused until
-        // an artifact is verified for it again.
         service.release_name(VOICE_NAME).await.unwrap();
-        assert_eq!(voice.attestation().await.unwrap(), None);
+        let impostor = Connection::connect(bus.connect().await.unwrap())
+            .await
+            .unwrap();
+        impostor
+            .serve_at(ObjectPath::new(VOICE_PATH).unwrap(), Voice)
+            .await
+            .unwrap();
+        impostor.request_name(VOICE_NAME).await.unwrap();
 
-        service.request_name(VOICE_NAME).await.unwrap();
+        // The impostor owns the name and answers ordinary calls...
+        assert!(
+            voice
+                .call::<String>("Transcribe", ("/tmp/a.wav",))
+                .await
+                .is_ok()
+        );
+        // ...and is refused the secret, because nothing verified its artifact.
         assert_eq!(voice.attestation().await.unwrap(), None);
         let error = voice
             .call_confidential::<String>("Transcribe", ("/tmp/secret.wav",))
