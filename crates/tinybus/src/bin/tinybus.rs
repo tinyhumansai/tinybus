@@ -216,13 +216,18 @@ async fn run(cli: Cli) -> Result<()> {
             interface,
             member,
             args,
+            confidential,
         } => {
             let connection = connect(&address).await?;
             let args: serde_json::Value = serde_json::from_str(&args)?;
             let proxy = connection
                 .proxy(&destination, &path, &interface)?
                 .with_timeout(timeout);
-            let reply: serde_json::Value = proxy.call(&member, args).await?;
+            let reply: serde_json::Value = if confidential {
+                proxy.call_confidential(&member, args).await?
+            } else {
+                proxy.call(&member, args).await?
+            };
             println!("{}", serde_json::to_string_pretty(&reply)?);
             Ok(())
         }
