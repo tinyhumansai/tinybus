@@ -721,6 +721,7 @@ mod tests {
                 interface: INTERFACE.into(),
                 member: "Echo".into(),
                 args: "not json".into(),
+                confidential: false,
             },
             Command::Emit {
                 path: PATH.into(),
