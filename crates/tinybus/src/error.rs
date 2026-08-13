@@ -331,6 +331,7 @@ impl Error {
             Self::ConnectionClosed => "ai.tinyhumans.tinybus.Error.ConnectionClosed",
             Self::Backpressure => "ai.tinyhumans.tinybus.Error.Backpressure",
             Self::NameHasNoOwner(_) => "ai.tinyhumans.tinybus.Error.NameHasNoOwner",
+            Self::NotAttested { .. } => Self::NOT_ATTESTED,
             Self::NameTaken { .. } => "ai.tinyhumans.tinybus.Error.NameTaken",
             Self::UnknownObject { .. } => "ai.tinyhumans.tinybus.Error.UnknownObject",
             Self::UnknownInterface { .. } => "ai.tinyhumans.tinybus.Error.UnknownInterface",
