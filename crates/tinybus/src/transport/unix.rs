@@ -32,6 +32,12 @@ pub struct UnixTransport {
     reader: Mutex<tokio::net::unix::OwnedReadHalf>,
     writer: Mutex<tokio::net::unix::OwnedWriteHalf>,
     label: String,
+    /// The peer's pid as the kernel reported it at connect time, for recipient
+    /// attestation. Captured here rather than on demand because `into_split`
+    /// consumes the stream, and captured from `SO_PEERCRED` rather than asked
+    /// for because a peer that could state its own pid could name any process
+    /// on the machine as itself.
+    peer_pid: Option<u32>,
 }
 
 impl UnixTransport {
