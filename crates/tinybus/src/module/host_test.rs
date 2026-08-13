@@ -1150,3 +1150,59 @@ async fn one_refused_module_does_not_stop_the_others_in_the_directory_from_loadi
         1
     );
 }
+
+/// Copy `artifact` into a fresh directory beside a `modules.toml` listing
+/// `hash` for it, so a load can be driven against a real allowlist.
+#[cfg(unix)]
+fn staged_module(artifact: &Path, hash: &str) -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let file_name = artifact.file_name().unwrap();
+    let staged = dir.path().join(file_name);
+    std::fs::copy(artifact, &staged).unwrap();
+    std::fs::write(
+        dir.path().join("modules.toml"),
+        format!("{:?} = {hash:?}\n", file_name.to_str().unwrap()),
+    )
+    .unwrap();
+    (dir, staged)
+}
+
+#[tokio::test]
+#[ignore = "requires TINYBUS_TEST_MODULE to point at the built cdylib"]
+async fn a_module_loaded_from_an_allowlisted_artifact_becomes_an_attested_recipient() {
+    // The one seam the in-memory fixtures cannot reach: a real artifact, hashed
+    // off the disk by the host, becoming eligible to receive a secret.
+    let artifact = PathBuf::from(std::env::var_os("TINYBUS_TEST_MODULE").unwrap());
+    let hash = crate::module::hash::file_hex(std::fs::File::open(&artifact).unwrap()).unwrap();
+    let (_dir, staged) = staged_module(&artifact, &hash);
+
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    broker.spawn(bus.clone());
+    let host = ModuleHost::new(broker.clone());
+    let info = host.load(&staged, serde_json::json!({})).unwrap();
+
+    let client = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let attestation = client
+        .attestation(info.manifest.bus_name.clone())
+        .await
+        .unwrap()
+        .expect("an allowlisted module is attested");
+    assert_eq!(attestation.sha256, hash);
+    assert_eq!(attestation.name, info.manifest.bus_name);
+}
+
+#[tokio::test]
+#[ignore = "requires TINYBUS_TEST_MODULE to point at the built cdylib"]
+async fn a_module_whose_artifact_does_not_match_the_allowlist_never_loads_at_all() {
+    // The refusal happens before `dlopen`, so the question of attestation never
+    // arises: unverified code is not admitted, let alone handed a secret.
+    let artifact = PathBuf::from(std::env::var_os("TINYBUS_TEST_MODULE").unwrap());
+    let (_dir, staged) = staged_module(&artifact, &"a".repeat(64));
+
+    let host = ModuleHost::new(Broker::new());
+    let error = host.load(&staged, serde_json::json!({})).unwrap_err();
+    assert!(error.to_string().contains("allowlist"), "{error}");
+}
