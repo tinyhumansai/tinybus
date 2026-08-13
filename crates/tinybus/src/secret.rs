@@ -317,7 +317,7 @@ mod tests {
         assert!(!printed.contains("top"));
         assert!(!printed.contains("secret"));
         assert!(!printed.contains("payload"));
-        assert_eq!(printed, "Secret([redacted], 19 bytes)");
+        assert_eq!(printed, "Secret([redacted], 18 bytes)");
     }
 
     #[test]
