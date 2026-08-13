@@ -485,6 +485,9 @@ impl Router {
     /// Every attached peer's outbox. Used for bus-generated announcements that
     /// still go through match filtering at the call site.
     pub fn broadcast_targets(&self, signal: &Message) -> Vec<mpsc::Sender<Message>> {
+        if signal.header.confidential {
+            return Vec::new();
+        }
         self.peers
             .values()
             .filter(|peer| peer.matches.iter().any(|rule| rule.matches(signal)))
