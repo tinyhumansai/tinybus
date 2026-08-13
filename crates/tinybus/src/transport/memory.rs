@@ -102,6 +102,12 @@ impl Transport for MemoryTransport {
     fn describe(&self) -> String {
         self.label.clone()
     }
+
+    fn peer_process(&self) -> Option<u32> {
+        // Not a guess: both ends of an in-memory link are this process, so the
+        // executable attestation hashes is genuinely the one running the peer.
+        Some(std::process::id())
+    }
 }
 
 /// An in-process bus: a listener plus the connect side that feeds it.
