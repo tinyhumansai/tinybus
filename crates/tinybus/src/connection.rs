@@ -260,6 +260,18 @@ impl Connection {
         Ok(serde_json::from_value(value)?)
     }
 
+    /// What the broker has verified about whoever owns `name`.
+    ///
+    /// The check a sender makes before it commits to handing over a secret.
+    /// `None` means the bus will refuse a confidential message to that name —
+    /// nothing owns it, or the operator never allowlisted an artifact for it.
+    pub async fn attestation(&self, name: BusName) -> Result<Option<crate::attest::Attestation>> {
+        let value = self
+            .call_bus("GetAttestation", serde_json::json!([name]))
+            .await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
     /// Tell the broker what this peer speaks and accepts.
     ///
     /// Announcing is optional and additive: a peer that never calls this stays
@@ -649,7 +661,7 @@ impl Connection {
 /// `["/tmp/a.wav"]` mean the same thing; a caller writing a bare `"/tmp/a.wav"`
 /// almost certainly also does. Wrapping a scalar rather than rejecting it makes
 /// the one-argument case — by far the most common — pleasant to write.
-fn to_body(value: &impl Serialize) -> Result<Value> {
+pub(crate) fn to_body(value: &impl Serialize) -> Result<Value> {
     let value = serde_json::to_value(value)?;
     Ok(match value {
         Value::Array(_) => value,
