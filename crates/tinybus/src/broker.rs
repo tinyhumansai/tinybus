@@ -216,6 +216,12 @@ impl Broker {
                 };
                 #[cfg(feature = "modules")]
                 let target = target.map_err(|error| {
+                    // A refused attestation is the more specific answer and
+                    // must survive: rewriting it as "the module is unavailable"
+                    // would send an operator to fix the wrong thing.
+                    if matches!(error, Error::NotAttested { .. }) {
+                        return error;
+                    }
                     let control = self
                         .modules
                         .lock()
