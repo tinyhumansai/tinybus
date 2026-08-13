@@ -77,6 +77,26 @@ pub struct Header {
     /// For [`MessageKind::Error`]: the stable dotted error name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_name: Option<String>,
+    /// This body is a secret: deliver it to the attested destination or to
+    /// nobody.
+    ///
+    /// Set by the sender and *not* overwritten on ingress, unlike `sender`. The
+    /// asymmetry is deliberate and safe in this direction: the flag only ever
+    /// causes the broker to apply more restrictions, so a peer that forges it
+    /// can restrict its own traffic and nothing else. A flag the broker
+    /// controlled would instead need a rule for who may ask for confidentiality,
+    /// and there is no such rule worth having — everyone may.
+    ///
+    /// An older broker that does not know this field routes the message
+    /// normally, which is why a sender must not assume the guarantee holds
+    /// without checking `GetAttestation` first. See [`crate::attest`].
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub confidential: bool,
+}
+
+/// `skip_serializing_if` needs a path, and `bool::not` takes `self` by value.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// A framed message: header plus a JSON body.
