@@ -209,7 +209,10 @@ pub(crate) struct NameChange {
 
 impl Router {
     /// Attach a peer and mint its unique name.
-    pub fn attach(&mut self, outbox: mpsc::Sender<Message>) -> (u64, BusName) {
+    ///
+    /// `pid` is whatever the transport could learn from the kernel about the
+    /// far end, and is the only identity input attestation will accept.
+    pub fn attach(&mut self, outbox: mpsc::Sender<Message>, pid: Option<u32>) -> (u64, BusName) {
         // Ids start at 1 and are never reused, so a stale reply addressed to a
         // dead `:1.4` can never be delivered to its replacement.
         self.next_id += 1;
