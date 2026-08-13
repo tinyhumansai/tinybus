@@ -103,6 +103,13 @@ discussion in the pull request:
   control story in full.
 - **Every call has a deadline.** It cannot be disabled. A call with no deadline
   reintroduces the hang that motivated the project.
+- **A confidential message goes to a verified recipient or to nobody.** The
+  broker refuses to deliver one unless it has itself hashed the destination's
+  artifact and matched it against the operator's trust store — never against
+  anything the peer claimed. It is never fanned out to a subscriber, never
+  printed by `monitor`, and never carried by a signal. The flag is the one
+  header field the broker does not overwrite on ingress, because it can only
+  ever restrict the sender's own traffic. See `docs/modules/attest/README.md`.
 - **A misbehaving peer must not affect another peer.** Bounded per-peer queues,
   best-effort signal delivery, and an accept loop that survives a bad client are
   all this invariant. Any change that lets one peer's slowness reach another's
