@@ -27,6 +27,7 @@ use std::collections::HashMap;
 
 use tokio::sync::mpsc;
 
+use crate::attest::Attestation;
 use crate::error::{Error, Result};
 use crate::message::{Message, MessageKind};
 use crate::name::{BusName, InterfaceName, MemberName, ObjectPath};
