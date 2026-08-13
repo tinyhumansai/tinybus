@@ -175,6 +175,16 @@ struct Peer {
     /// and a peer that never announces stays routable, so manifests can be
     /// adopted one service at a time rather than as a flag day.
     manifest: Option<PeerManifest>,
+    /// The pid the transport reported, or `None` where the kernel would not
+    /// say. Never peer-supplied; see [`crate::ports::Transport::peer_process`].
+    pid: Option<u32>,
+    /// What the broker verified about this peer, per name it owns.
+    ///
+    /// Keyed by name rather than one per peer because a peer may hold several
+    /// well-known names and the operator allowlists an artifact *for a name*.
+    /// Empty for every peer until something is actually checked — the absence
+    /// of an entry is what refuses a confidential delivery.
+    attestations: HashMap<BusName, Attestation>,
 }
 
 /// Who is attached, what they are called, and what they want to hear.
