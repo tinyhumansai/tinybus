@@ -225,6 +225,8 @@ impl Router {
                 outbox,
                 matches: Vec::new(),
                 manifest: None,
+                pid,
+                attestations: HashMap::new(),
             },
         );
         self.names.insert(unique.clone(), id);
