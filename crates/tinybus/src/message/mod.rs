@@ -138,6 +138,7 @@ impl Message {
                 interface: Some(interface),
                 member: Some(member),
                 error_name: None,
+                confidential: false,
             },
             body,
         }
