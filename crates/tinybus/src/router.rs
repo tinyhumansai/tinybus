@@ -568,20 +568,20 @@ mod tests {
     #[test]
     fn unique_names_are_minted_in_order_and_never_reused() {
         let mut router = Router::default();
-        let (a, a_name) = router.attach(outbox());
-        let (_, b_name) = router.attach(outbox());
+        let (a, a_name) = router.attach(outbox(), None);
+        let (_, b_name) = router.attach(outbox(), None);
         assert_eq!(a_name.as_str(), ":1.1");
         assert_eq!(b_name.as_str(), ":1.2");
         router.detach(a);
-        let (_, c_name) = router.attach(outbox());
+        let (_, c_name) = router.attach(outbox(), None);
         assert_eq!(c_name.as_str(), ":1.3");
     }
 
     #[test]
     fn a_well_known_name_has_one_owner_and_the_loser_is_told_who_won() {
         let mut router = Router::default();
-        let (a, a_unique) = router.attach(outbox());
-        let (b, _) = router.attach(outbox());
+        let (a, a_unique) = router.attach(outbox(), None);
+        let (b, _) = router.attach(outbox(), None);
         let name = BusName::new("ai.tinyhumans.openhuman.Voice").unwrap();
 
         router.request_name(a, name.clone()).unwrap();
@@ -598,7 +598,7 @@ mod tests {
     #[test]
     fn detaching_frees_the_names_and_reports_the_change() {
         let mut router = Router::default();
-        let (a, a_unique) = router.attach(outbox());
+        let (a, a_unique) = router.attach(outbox(), None);
         let name = BusName::new("ai.tinyhumans.openhuman.Voice").unwrap();
         router.request_name(a, name.clone()).unwrap();
 
@@ -618,7 +618,7 @@ mod tests {
     #[test]
     fn the_bus_name_and_unique_names_cannot_be_claimed() {
         let mut router = Router::default();
-        let (a, _) = router.attach(outbox());
+        let (a, _) = router.attach(outbox(), None);
         assert!(
             router
                 .request_name(a, BusName::new(crate::BUS_NAME).unwrap())
@@ -634,8 +634,8 @@ mod tests {
     #[test]
     fn a_sender_never_receives_its_own_signal() {
         let mut router = Router::default();
-        let (a, _) = router.attach(outbox());
-        let (b, _) = router.attach(outbox());
+        let (a, _) = router.attach(outbox(), None);
+        let (b, _) = router.attach(outbox(), None);
         router.add_match(a, MatchRule::new().signals());
         router.add_match(b, MatchRule::new().signals());
 
@@ -647,8 +647,8 @@ mod tests {
     #[test]
     fn an_unsubscribed_peer_is_not_woken() {
         let mut router = Router::default();
-        let (a, _) = router.attach(outbox());
-        let (b, _) = router.attach(outbox());
+        let (a, _) = router.attach(outbox(), None);
+        let (b, _) = router.attach(outbox(), None);
         router.add_match(
             b,
             MatchRule::new()
@@ -662,8 +662,8 @@ mod tests {
     #[test]
     fn removing_a_match_stops_delivery() {
         let mut router = Router::default();
-        let (a, _) = router.attach(outbox());
-        let (b, _) = router.attach(outbox());
+        let (a, _) = router.attach(outbox(), None);
+        let (b, _) = router.attach(outbox(), None);
         let rule = MatchRule::new().signals();
         router.add_match(b, rule.clone());
         let sig = signal("ai.tinyhumans.Mail", "Received", "/ai/Mail");

@@ -554,7 +554,7 @@ mod tests {
         assert!(matches!(cli.command, Command::Call { args, .. } if args == "[1]"));
         assert!(matches!(
             Cli::try_parse_from(["tinybus", "serve"]).unwrap().command,
-            Command::Serve
+            Command::Serve { .. }
         ));
         assert!(matches!(
             Cli::try_parse_from(["tinybus", "list"]).unwrap().command,
@@ -615,6 +615,7 @@ mod tests {
             address: Some(address.clone()),
             timeout: 1,
             command: Command::Call {
+                confidential: false,
                 destination: DESTINATION.into(),
                 path: PATH.into(),
                 interface: INTERFACE.into(),
