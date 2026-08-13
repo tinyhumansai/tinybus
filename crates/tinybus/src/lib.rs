@@ -65,12 +65,14 @@
 // likely to break silently, so it has to be covered here.
 extern crate self as tinybus;
 
+pub mod attest;
 pub mod broker;
 pub mod build_info;
 pub mod connection;
 pub mod error;
 pub mod events;
 pub mod global;
+mod hash;
 pub mod message;
 pub mod module;
 pub mod name;
