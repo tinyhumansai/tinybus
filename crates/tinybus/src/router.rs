@@ -417,6 +417,19 @@ impl Router {
         }
     }
 
+    /// [`Router::set_attestation`] addressed by the peer's unique name, for the
+    /// module host, which holds that rather than the internal peer id.
+    #[cfg(feature = "modules")]
+    pub(crate) fn set_attestation_for_unique(
+        &mut self,
+        unique: &BusName,
+        attestation: Attestation,
+    ) {
+        if let Some(id) = self.names.get(unique).copied() {
+            self.set_attestation(id, attestation);
+        }
+    }
+
     /// What the broker verified about whoever owns `name`, if anything.
     pub fn attestation_of(&self, name: &BusName) -> Option<Attestation> {
         let id = self.names.get(name)?;
