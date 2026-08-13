@@ -574,8 +574,9 @@ impl ModuleHost {
         // Re-read rather than plumbed down from the gate, and fails closed —
         // an artifact that changed underneath us no longer matches, so it does
         // not become attested.
-        if let Ok(Some(sha256)) =
-            std::fs::File::open(path).map_err(Error::from).and_then(|file| allowlisted_hash(path, file))
+        if let Ok(Some(sha256)) = std::fs::File::open(path)
+            .map_err(Error::from)
+            .and_then(|file| allowlisted_hash(path, file))
         {
             self.inner.broker.attest_module(
                 &unique,

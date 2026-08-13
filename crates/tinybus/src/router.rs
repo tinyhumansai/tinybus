@@ -675,8 +675,7 @@ mod tests {
     fn attestation(name: &str) -> Attestation {
         Attestation {
             name: BusName::new(name).unwrap(),
-            sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-                .to_string(),
+            sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
             source: crate::attest::AttestationSource::Executable,
         }
     }
@@ -722,7 +721,10 @@ mod tests {
         router.set_attestation(id, attestation(name.as_str()));
 
         assert!(router.resolve_attested(&name).is_ok());
-        assert_eq!(router.attestation_of(&name), Some(attestation(name.as_str())));
+        assert_eq!(
+            router.attestation_of(&name),
+            Some(attestation(name.as_str()))
+        );
     }
 
     #[test]

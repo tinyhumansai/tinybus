@@ -203,8 +203,8 @@ impl Broker {
                 // peer that made the call — that peer already chose to take
                 // part in the exchange, and unique names are never reused, so
                 // there is no one else the reply could reach.
-                let confidential_call = message.header.confidential
-                    && message.header.kind == MessageKind::MethodCall;
+                let confidential_call =
+                    message.header.confidential && message.header.kind == MessageKind::MethodCall;
                 let target = if confidential_call {
                     if destination.is_unique() {
                         // The broker knows *which connection* a unique name is,
@@ -335,8 +335,7 @@ impl Broker {
         // `std::sync::Mutex` and the whole bus routes through it.
         let trust = Arc::clone(&self.trust);
         let target = name.clone();
-        let verified =
-            tokio::task::spawn_blocking(move || trust.verify(&target, pid)).await;
+        let verified = tokio::task::spawn_blocking(move || trust.verify(&target, pid)).await;
 
         match verified {
             Ok(Ok(Some(attestation))) => {
@@ -1203,7 +1202,12 @@ mod tests {
         // refusal meaningful rather than incidental.
         let (_bus, _service, client) = bus().await;
         let voice = client.proxy(VOICE_NAME, VOICE_PATH, VOICE_NAME).unwrap();
-        assert!(voice.call::<String>("Transcribe", ("/tmp/a.wav",)).await.is_ok());
+        assert!(
+            voice
+                .call::<String>("Transcribe", ("/tmp/a.wav",))
+                .await
+                .is_ok()
+        );
 
         let error = voice
             .call_confidential::<String>("Transcribe", ("/tmp/secret.wav",))

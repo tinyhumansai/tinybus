@@ -438,11 +438,19 @@ mod tests {
         assert!(c.header.confidential);
         c.validate().unwrap();
 
-        assert!(Message::method_return(&c.header, Value::Null).header.confidential);
+        assert!(
+            Message::method_return(&c.header, Value::Null)
+                .header
+                .confidential
+        );
         // The error path stays deliverable: it carries no value, and a
         // confidential error to an unattested caller would swallow the reason
         // the call failed.
-        assert!(!Message::error_reply(&c.header, &Error::failed("no")).header.confidential);
+        assert!(
+            !Message::error_reply(&c.header, &Error::failed("no"))
+                .header
+                .confidential
+        );
     }
 
     #[test]

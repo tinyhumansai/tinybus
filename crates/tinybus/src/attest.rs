@@ -150,10 +150,12 @@ impl TrustStore {
                 "the peer's executable could not be identified on this platform",
             ));
         };
-        let file = std::fs::File::open(&executable)
-            .map_err(|_| Error::not_attested(name.clone(), "the peer's executable is unreadable"))?;
-        let actual = crate::hash::file_hex(file)
-            .map_err(|_| Error::not_attested(name.clone(), "the peer's executable could not be hashed"))?;
+        let file = std::fs::File::open(&executable).map_err(|_| {
+            Error::not_attested(name.clone(), "the peer's executable is unreadable")
+        })?;
+        let actual = crate::hash::file_hex(file).map_err(|_| {
+            Error::not_attested(name.clone(), "the peer's executable could not be hashed")
+        })?;
         if actual != expected {
             return Err(Error::not_attested(
                 name.clone(),
@@ -270,7 +272,9 @@ mod tests {
 
     #[test]
     fn an_unlisted_name_is_not_attested_and_is_not_an_error() {
-        let (_dir, store) = store(&format!("\"ai.tinyhumans.openhuman.Wallet\" = \"{HASH}\"\n"));
+        let (_dir, store) = store(&format!(
+            "\"ai.tinyhumans.openhuman.Wallet\" = \"{HASH}\"\n"
+        ));
         let other = BusName::new("ai.tinyhumans.openhuman.Voice").unwrap();
         assert_eq!(store.verify(&other, std::process::id()).unwrap(), None);
     }
@@ -287,7 +291,9 @@ mod tests {
     #[test]
     fn a_listed_name_whose_binary_does_not_match_is_refused() {
         // This process is certainly not the empty file whose hash is listed.
-        let (_dir, store) = store(&format!("\"ai.tinyhumans.openhuman.Wallet\" = \"{HASH}\"\n"));
+        let (_dir, store) = store(&format!(
+            "\"ai.tinyhumans.openhuman.Wallet\" = \"{HASH}\"\n"
+        ));
         let name = BusName::new("ai.tinyhumans.openhuman.Wallet").unwrap();
         let error = store.verify(&name, std::process::id()).unwrap_err();
         assert_eq!(error.wire_name(), Error::NOT_ATTESTED);
@@ -298,7 +304,9 @@ mod tests {
     fn a_listed_name_matching_its_own_running_binary_attests() {
         let executable = std::fs::read_link(format!("/proc/{}/exe", std::process::id())).unwrap();
         let hash = crate::hash::file_hex(std::fs::File::open(executable).unwrap()).unwrap();
-        let (_dir, store) = store(&format!("\"ai.tinyhumans.openhuman.Wallet\" = \"{hash}\"\n"));
+        let (_dir, store) = store(&format!(
+            "\"ai.tinyhumans.openhuman.Wallet\" = \"{hash}\"\n"
+        ));
         let name = BusName::new("ai.tinyhumans.openhuman.Wallet").unwrap();
         let attestation = store.verify(&name, std::process::id()).unwrap().unwrap();
         assert_eq!(attestation.sha256, hash);
@@ -309,7 +317,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_pid_that_is_gone_fails_closed_rather_than_attesting() {
-        let (_dir, store) = store(&format!("\"ai.tinyhumans.openhuman.Wallet\" = \"{HASH}\"\n"));
+        let (_dir, store) = store(&format!(
+            "\"ai.tinyhumans.openhuman.Wallet\" = \"{HASH}\"\n"
+        ));
         let name = BusName::new("ai.tinyhumans.openhuman.Wallet").unwrap();
         // Above the default pid_max, so it cannot name a live process.
         assert!(store.verify(&name, u32::MAX).is_err());
