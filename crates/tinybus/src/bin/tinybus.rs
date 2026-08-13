@@ -38,12 +38,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Run the broker until interrupted.
-    Serve {
-        /// Path to the peer trust store: `name = "sha256"` per attested
-        /// recipient. Without it the bus refuses every confidential message.
-        #[arg(long, value_name = "PATH")]
-        trust_store: Option<PathBuf>,
-    },
+    Serve,
 
     /// Call a method and print the reply as JSON.
     Call {
@@ -189,15 +184,9 @@ async fn run(cli: Cli) -> Result<()> {
     let timeout = Duration::from_secs(cli.timeout);
 
     match cli.command {
-        Command::Serve { trust_store } => {
+        Command::Serve => {
             let listener = UnixListenerAdapter::bind(&address).await?;
-            // Loaded before the listener starts handing out peers: a bus that
-            // could widen its trust while running would let whoever widened it
-            // redirect the next secret.
-            let broker = match trust_store {
-                Some(path) => Broker::with_trust_store(tinybus::TrustStore::load(path)?),
-                None => Broker::new(),
-            };
+            let broker = Broker::new();
             // Serve and Ctrl-C race, and whichever wins ends the process. The
             // listener's Drop unlinks the socket either way, so the next start
             // does not trip over a leftover.
@@ -554,7 +543,7 @@ mod tests {
         assert!(matches!(cli.command, Command::Call { args, .. } if args == "[1]"));
         assert!(matches!(
             Cli::try_parse_from(["tinybus", "serve"]).unwrap().command,
-            Command::Serve { .. }
+            Command::Serve
         ));
         assert!(matches!(
             Cli::try_parse_from(["tinybus", "list"]).unwrap().command,
