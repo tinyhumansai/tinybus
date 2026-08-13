@@ -393,6 +393,16 @@ impl Broker {
                     Ok(serde_json::to_value(router.manifest_of(&name))?)
                 }
                 "ListPeers" => Ok(serde_json::to_value(router.peer_records())?),
+                // What the broker verified about a prospective recipient, so a
+                // sender can find out *before* it builds a message around a
+                // secret rather than after the refusal. Returns null for an
+                // unattested name; the answer is deliberately not a bare bool,
+                // because an operator debugging this needs the hash that
+                // matched.
+                "GetAttestation" => {
+                    let (name,): (BusName,) = parse_args(member, body)?;
+                    Ok(serde_json::to_value(router.attestation_of(&name))?)
+                }
                 "GetNameOwner" => {
                     let (name,): (BusName,) = parse_args(member, body)?;
                     Ok(serde_json::to_value(router.owner_of(&name))?)
