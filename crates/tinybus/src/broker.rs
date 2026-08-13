@@ -132,7 +132,7 @@ impl Broker {
             .router
             .lock()
             .expect("router lock is never held across a panic point")
-            .attach(outbox);
+            .attach(outbox, transport.peer_process());
 
         tracing::debug!(peer = %unique, transport = %transport.describe(), "peer attached");
         tokio::spawn(writer_task(transport.clone(), inbox));
