@@ -40,4 +40,20 @@ pub trait Transport: Send + Sync + 'static {
     fn describe(&self) -> String {
         "transport".to_string()
     }
+
+    /// The process id on the far end, if the transport can learn it from the
+    /// kernel rather than from the peer.
+    ///
+    /// This is the root of recipient attestation: it must come from something
+    /// the peer cannot choose, which is why it is a transport concern and not a
+    /// handshake field. A Unix socket has `SO_PEERCRED`; a transport that has
+    /// no such channel returns `None`, and every confidential delivery to that
+    /// peer is refused rather than assumed.
+    ///
+    /// `None` is therefore the correct default for any new transport: a
+    /// transport that guessed would be forging the one fact the guarantee rests
+    /// on.
+    fn peer_process(&self) -> Option<u32> {
+        None
+    }
 }
