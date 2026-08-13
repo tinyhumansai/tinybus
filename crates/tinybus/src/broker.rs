@@ -59,8 +59,20 @@ pub struct Broker {
 impl Broker {
     /// Build a broker with an empty routing table.
     pub fn new() -> Self {
+        Self::with_trust_store(crate::attest::TrustStore::empty())
+    }
+
+    /// Build a broker that will vouch for the recipients in `trust`.
+    ///
+    /// Only a broker built this way can carry a confidential message to a peer
+    /// across a transport. This is a constructor rather than a setter because
+    /// the trust store must be in place before the first peer attaches: a bus
+    /// whose trust could be widened while it is running would let whoever
+    /// widened it redirect the next secret.
+    pub fn with_trust_store(trust: crate::attest::TrustStore) -> Self {
         Self {
             router: Arc::new(Mutex::new(Router::default())),
+            trust: Arc::new(trust),
             #[cfg(feature = "modules")]
             modules: Arc::new(Mutex::new(None)),
             // The id changes per broker *process*, so a peer that reconnects
