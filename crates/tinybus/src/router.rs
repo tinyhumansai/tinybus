@@ -176,15 +176,13 @@ struct Peer {
     /// and a peer that never announces stays routable, so manifests can be
     /// adopted one service at a time rather than as a flag day.
     manifest: Option<PeerManifest>,
-    /// The pid the transport reported, or `None` where the kernel would not
-    /// say. Never peer-supplied; see [`crate::ports::Transport::peer_process`].
-    pid: Option<u32>,
-    /// What the broker verified about this peer, per name it owns.
+    /// What the host verified about this peer, per name it owns.
     ///
     /// Keyed by name rather than one per peer because a peer may hold several
     /// well-known names and the operator allowlists an artifact *for a name*.
-    /// Empty for every peer until something is actually checked — the absence
-    /// of an entry is what refuses a confidential delivery.
+    /// Empty for every peer until a module load actually verifies one — the
+    /// absence of an entry is what refuses a confidential delivery, so an
+    /// ordinary out-of-process peer is ineligible by construction.
     attestations: HashMap<BusName, Attestation>,
 }
 
@@ -209,10 +207,7 @@ pub(crate) struct NameChange {
 
 impl Router {
     /// Attach a peer and mint its unique name.
-    ///
-    /// `pid` is whatever the transport could learn from the kernel about the
-    /// far end, and is the only identity input attestation will accept.
-    pub fn attach(&mut self, outbox: mpsc::Sender<Message>, pid: Option<u32>) -> (u64, BusName) {
+    pub fn attach(&mut self, outbox: mpsc::Sender<Message>) -> (u64, BusName) {
         // Ids start at 1 and are never reused, so a stale reply addressed to a
         // dead `:1.4` can never be delivered to its replacement.
         self.next_id += 1;
@@ -225,7 +220,6 @@ impl Router {
                 outbox,
                 matches: Vec::new(),
                 manifest: None,
-                pid,
                 attestations: HashMap::new(),
             },
         );
@@ -398,12 +392,7 @@ impl Router {
         self.peers.get(id).map(|p| p.unique.clone())
     }
 
-    /// The pid the transport reported for `id`, for attestation.
-    pub fn pid_of(&self, id: u64) -> Option<u32> {
-        self.peers.get(&id)?.pid
-    }
-
-    /// Record what the broker verified about the peer owning `name`.
+    /// Record what the host verified about the peer owning `name`.
     ///
     /// Stored against the peer, so it dies with the peer: a service that exits
     /// takes its attestation with it, and the next process to claim the name
@@ -436,7 +425,7 @@ impl Router {
         self.peers.get(id)?.attestations.get(name).cloned()
     }
 
-    /// The outbox of whoever owns `destination`, but only if the broker has
+    /// The outbox of whoever owns `destination`, but only if the host has
     /// verified that peer's artifact *for that name*.
     ///
     /// The lookup and the check are one operation on purpose. Resolving first
@@ -455,7 +444,7 @@ impl Router {
         if !peer.attestations.contains_key(destination) {
             return Err(Error::not_attested(
                 destination.clone(),
-                "the broker has not verified this recipient's artifact",
+                "only a loaded module with a verified artifact may receive a secret",
             ));
         }
         Ok(peer.outbox.clone())
@@ -568,20 +557,20 @@ mod tests {
     #[test]
     fn unique_names_are_minted_in_order_and_never_reused() {
         let mut router = Router::default();
-        let (a, a_name) = router.attach(outbox(), None);
-        let (_, b_name) = router.attach(outbox(), None);
+        let (a, a_name) = router.attach(outbox());
+        let (_, b_name) = router.attach(outbox());
         assert_eq!(a_name.as_str(), ":1.1");
         assert_eq!(b_name.as_str(), ":1.2");
         router.detach(a);
-        let (_, c_name) = router.attach(outbox(), None);
+        let (_, c_name) = router.attach(outbox());
         assert_eq!(c_name.as_str(), ":1.3");
     }
 
     #[test]
     fn a_well_known_name_has_one_owner_and_the_loser_is_told_who_won() {
         let mut router = Router::default();
-        let (a, a_unique) = router.attach(outbox(), None);
-        let (b, _) = router.attach(outbox(), None);
+        let (a, a_unique) = router.attach(outbox());
+        let (b, _) = router.attach(outbox());
         let name = BusName::new("ai.tinyhumans.openhuman.Voice").unwrap();
 
         router.request_name(a, name.clone()).unwrap();
@@ -598,7 +587,7 @@ mod tests {
     #[test]
     fn detaching_frees_the_names_and_reports_the_change() {
         let mut router = Router::default();
-        let (a, a_unique) = router.attach(outbox(), None);
+        let (a, a_unique) = router.attach(outbox());
         let name = BusName::new("ai.tinyhumans.openhuman.Voice").unwrap();
         router.request_name(a, name.clone()).unwrap();
 
@@ -618,7 +607,7 @@ mod tests {
     #[test]
     fn the_bus_name_and_unique_names_cannot_be_claimed() {
         let mut router = Router::default();
-        let (a, _) = router.attach(outbox(), None);
+        let (a, _) = router.attach(outbox());
         assert!(
             router
                 .request_name(a, BusName::new(crate::BUS_NAME).unwrap())
@@ -634,8 +623,8 @@ mod tests {
     #[test]
     fn a_sender_never_receives_its_own_signal() {
         let mut router = Router::default();
-        let (a, _) = router.attach(outbox(), None);
-        let (b, _) = router.attach(outbox(), None);
+        let (a, _) = router.attach(outbox());
+        let (b, _) = router.attach(outbox());
         router.add_match(a, MatchRule::new().signals());
         router.add_match(b, MatchRule::new().signals());
 
@@ -647,8 +636,8 @@ mod tests {
     #[test]
     fn an_unsubscribed_peer_is_not_woken() {
         let mut router = Router::default();
-        let (a, _) = router.attach(outbox(), None);
-        let (b, _) = router.attach(outbox(), None);
+        let (a, _) = router.attach(outbox());
+        let (b, _) = router.attach(outbox());
         router.add_match(
             b,
             MatchRule::new()
@@ -662,8 +651,8 @@ mod tests {
     #[test]
     fn removing_a_match_stops_delivery() {
         let mut router = Router::default();
-        let (a, _) = router.attach(outbox(), None);
-        let (b, _) = router.attach(outbox(), None);
+        let (a, _) = router.attach(outbox());
+        let (b, _) = router.attach(outbox());
         let rule = MatchRule::new().signals();
         router.add_match(b, rule.clone());
         let sig = signal("ai.tinyhumans.Mail", "Received", "/ai/Mail");
@@ -683,8 +672,8 @@ mod tests {
     #[test]
     fn a_confidential_message_reaches_no_subscriber_however_broad_the_rule() {
         let mut router = Router::default();
-        let (a, _) = router.attach(outbox(), None);
-        router.attach(outbox(), None);
+        let (a, _) = router.attach(outbox());
+        router.attach(outbox());
         // An empty rule matches everything, which is the worst case: if any
         // rule could pull in a secret, this one would.
         router.add_match(a, MatchRule::new());
@@ -701,7 +690,7 @@ mod tests {
     #[test]
     fn an_unattested_owner_routes_normally_but_never_confidentially() {
         let mut router = Router::default();
-        let (id, _) = router.attach(outbox(), Some(4242));
+        let (id, _) = router.attach(outbox());
         let name = BusName::new("ai.tinyhumans.openhuman.Wallet").unwrap();
         router.request_name(id, name.clone()).unwrap();
 
@@ -709,13 +698,12 @@ mod tests {
         assert_eq!(router.attestation_of(&name), None);
         let error = router.resolve_attested(&name).unwrap_err();
         assert_eq!(error.wire_name(), Error::NOT_ATTESTED);
-        assert_eq!(router.pid_of(id), Some(4242));
     }
 
     #[test]
     fn an_attested_owner_can_receive_a_confidential_message() {
         let mut router = Router::default();
-        let (id, _) = router.attach(outbox(), None);
+        let (id, _) = router.attach(outbox());
         let name = BusName::new("ai.tinyhumans.openhuman.Wallet").unwrap();
         router.request_name(id, name.clone()).unwrap();
         router.set_attestation(id, attestation(name.as_str()));
@@ -733,7 +721,7 @@ mod tests {
         // other: the operator allowlisted an artifact *as the wallet*, not as
         // everything that process might also answer to.
         let mut router = Router::default();
-        let (id, _) = router.attach(outbox(), None);
+        let (id, _) = router.attach(outbox());
         let wallet = BusName::new("ai.tinyhumans.openhuman.Wallet").unwrap();
         let voice = BusName::new("ai.tinyhumans.openhuman.Voice").unwrap();
         router.request_name(id, wallet.clone()).unwrap();
@@ -747,14 +735,14 @@ mod tests {
     #[test]
     fn a_dead_peers_attestation_does_not_survive_it() {
         let mut router = Router::default();
-        let (id, _) = router.attach(outbox(), None);
+        let (id, _) = router.attach(outbox());
         let name = BusName::new("ai.tinyhumans.openhuman.Wallet").unwrap();
         router.request_name(id, name.clone()).unwrap();
         router.set_attestation(id, attestation(name.as_str()));
         router.detach(id);
 
         // Whoever claims the name next inherits nothing and must earn its own.
-        let (next, _) = router.attach(outbox(), None);
+        let (next, _) = router.attach(outbox());
         router.request_name(next, name.clone()).unwrap();
         assert_eq!(router.attestation_of(&name), None);
         assert!(router.resolve_attested(&name).is_err());

@@ -45,10 +45,6 @@ pub const PEER_QUEUE_CAPACITY: usize = 256;
 pub struct Broker {
     router: Arc<Mutex<Router>>,
     id: String,
-    /// Which artifact the operator will vouch for under which name. Empty by
-    /// default, so a broker nobody configured attests nobody and refuses every
-    /// confidential delivery — the failure direction that cannot leak.
-    trust: Arc<crate::attest::TrustStore>,
     // `Weak`, not `Arc`: the module host owns this broker, so a strong
     // reference back would form a cycle and leak both. Callers tolerate a
     // failed upgrade by falling back to the ordinary routing error.
@@ -59,20 +55,8 @@ pub struct Broker {
 impl Broker {
     /// Build a broker with an empty routing table.
     pub fn new() -> Self {
-        Self::with_trust_store(crate::attest::TrustStore::empty())
-    }
-
-    /// Build a broker that will vouch for the recipients in `trust`.
-    ///
-    /// Only a broker built this way can carry a confidential message to a peer
-    /// across a transport. This is a constructor rather than a setter because
-    /// the trust store must be in place before the first peer attaches: a bus
-    /// whose trust could be widened while it is running would let whoever
-    /// widened it redirect the next secret.
-    pub fn with_trust_store(trust: crate::attest::TrustStore) -> Self {
         Self {
             router: Arc::new(Mutex::new(Router::default())),
-            trust: Arc::new(trust),
             #[cfg(feature = "modules")]
             modules: Arc::new(Mutex::new(None)),
             // The id changes per broker *process*, so a peer that reconnects
@@ -132,7 +116,7 @@ impl Broker {
             .router
             .lock()
             .expect("router lock is never held across a panic point")
-            .attach(outbox, transport.peer_process());
+            .attach(outbox);
 
         tracing::debug!(peer = %unique, transport = %transport.describe(), "peer attached");
         tokio::spawn(writer_task(transport.clone(), inbox));
@@ -270,17 +254,6 @@ impl Broker {
             .bus_method(from, from_name, &member, message.body)
             .await;
 
-        // Attest before replying, not after. A service's own `RequestName`
-        // reply is the event it uses to announce itself, so anything that
-        // happens after it races with the first call from whoever was waiting —
-        // and losing that race would mean a legitimate confidential send failing
-        // for timing reasons, which is how a guarantee gets worked around.
-        for change in &changes {
-            if change.new_owner.is_some() {
-                self.attest_owner(from, &change.name).await;
-            }
-        }
-
         let reply = match result {
             Ok(value) => Message::method_return(&header, value),
             Err(e) => Message::error_reply(&header, &e),
@@ -307,52 +280,6 @@ impl Broker {
         #[cfg(not(feature = "modules"))]
         let _ = module_states;
         Ok(())
-    }
-
-    /// Verify the artifact behind peer `id` against the trust store, and record
-    /// the result if it matched.
-    ///
-    /// Silent when the name is not in the store: an unlisted service is an
-    /// ordinary participant that simply cannot receive secrets. Loud when it is
-    /// listed and did not match, because that is either a stale hash after a
-    /// deploy or a process pretending to be the wallet, and an operator needs
-    /// to see both.
-    async fn attest_owner(&self, id: u64, name: &BusName) {
-        if self.trust.expected(name).is_none() {
-            return;
-        }
-        let Some(pid) = self.router.lock().expect("router lock").pid_of(id) else {
-            tracing::warn!(
-                name = %name,
-                "recipient is in the trust store but its transport reports no pid; \
-                 confidential delivery will be refused"
-            );
-            return;
-        };
-
-        // Hashing an artifact is unbounded file I/O. Off the runtime's core
-        // threads, and with no lock held: the router mutex is a plain
-        // `std::sync::Mutex` and the whole bus routes through it.
-        let trust = Arc::clone(&self.trust);
-        let target = name.clone();
-        let verified = tokio::task::spawn_blocking(move || trust.verify(&target, pid)).await;
-
-        match verified {
-            Ok(Ok(Some(attestation))) => {
-                tracing::info!(name = %name, "recipient attested for confidential delivery");
-                self.router
-                    .lock()
-                    .expect("router lock")
-                    .set_attestation(id, attestation);
-            }
-            Ok(Ok(None)) => {}
-            Ok(Err(error)) => {
-                tracing::warn!(name = %name, error = %error, "recipient failed attestation");
-            }
-            Err(_) => {
-                tracing::warn!(name = %name, "attestation task failed; recipient stays unattested");
-            }
-        }
     }
 
     /// The bus's own interface. Module stop may await a blocking callback; the
