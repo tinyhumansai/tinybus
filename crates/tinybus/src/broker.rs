@@ -185,11 +185,35 @@ impl Broker {
                     return self.handle_bus_call(from, from_name, message).await;
                 }
 
-                let target = self
-                    .router
-                    .lock()
-                    .expect("router lock")
-                    .resolve(&destination);
+                // A confidential *call* may only go to a well-known name the
+                // broker has verified an artifact for. A confidential *reply*
+                // goes back to the unique name the broker itself minted for the
+                // peer that made the call — that peer already chose to take
+                // part in the exchange, and unique names are never reused, so
+                // there is no one else the reply could reach.
+                let confidential_call = message.header.confidential
+                    && message.header.kind == MessageKind::MethodCall;
+                let target = if confidential_call {
+                    if destination.is_unique() {
+                        // The broker knows *which connection* a unique name is,
+                        // but not what binary is behind it. A sender that needs
+                        // that answer has to address the well-known name.
+                        Err(Error::not_attested(
+                            destination.clone(),
+                            "a confidential call must address a well-known name",
+                        ))
+                    } else {
+                        self.router
+                            .lock()
+                            .expect("router lock")
+                            .resolve_attested(&destination)
+                    }
+                } else {
+                    self.router
+                        .lock()
+                        .expect("router lock")
+                        .resolve(&destination)
+                };
                 #[cfg(feature = "modules")]
                 let target = target.map_err(|error| {
                     let control = self
