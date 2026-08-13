@@ -53,6 +53,13 @@ the recipient of the *handle*, not of the payload — so a secret large enough t
 want a stream currently has no attested way to travel. See
 [the protocol's `confidential` section](../../protocol.md#confidential).
 
+A third case worth naming explicitly: a module loaded from a GitHub release
+extracts into a fresh temporary directory that holds no `modules.toml`, so
+`allowlisted_hash` finds nothing to compare against and the module is never
+attested — this is the fail-closed default working as intended, not a bug, but
+it means a GitHub-loaded module can never be a confidential recipient until the
+operator also places its digest in the local allowlist beside it.
+
 ## Not a signature, yet
 
 `modules.toml` is a list of hashes an operator put on disk, so an attestation
