@@ -186,6 +186,11 @@ impl Message {
                 interface: None,
                 member: None,
                 error_name: Some(error.wire_name().to_string()),
+                // Not inherited. Errors never carry the value that caused them,
+                // so an error reply has no secret to protect — and marking it
+                // confidential would make it undeliverable exactly when the
+                // recipient failed attestation, swallowing the diagnosis.
+                confidential: false,
             },
             body: Value::String(error.wire_message()),
         }
