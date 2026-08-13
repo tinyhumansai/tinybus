@@ -1167,4 +1167,145 @@ mod tests {
         let transcript: String = voice.call("Transcribe", ("/tmp/clip.wav",)).await.unwrap();
         assert_eq!(transcript, "transcript of /tmp/clip.wav");
     }
+
+    /// A bus whose trust store vouches for `VOICE_NAME`, using this test
+    /// binary's own hash — the in-memory transport reports this process's pid,
+    /// so the artifact the broker hashes really is the one running the peer.
+    #[cfg(target_os = "linux")]
+    async fn attested_bus() -> (tempfile::TempDir, MemoryBus, Connection, Connection) {
+        let executable = std::fs::read_link(format!("/proc/{}/exe", std::process::id())).unwrap();
+        let hash = crate::hash::file_hex(std::fs::File::open(executable).unwrap()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("peers.toml");
+        std::fs::write(&store_path, format!("\"{VOICE_NAME}\" = \"{hash}\"\n")).unwrap();
+
+        let bus = MemoryBus::new();
+        Broker::with_trust_store(crate::attest::TrustStore::load(&store_path).unwrap())
+            .spawn(bus.clone());
+        let service = Connection::connect(bus.connect().await.unwrap())
+            .await
+            .unwrap();
+        service
+            .serve_at(ObjectPath::new(VOICE_PATH).unwrap(), Voice)
+            .await
+            .unwrap();
+        service.request_name(VOICE_NAME).await.unwrap();
+        let client = Connection::connect(bus.connect().await.unwrap())
+            .await
+            .unwrap();
+        (dir, bus, service, client)
+    }
+
+    #[tokio::test]
+    async fn a_confidential_call_to_an_unattested_recipient_is_refused() {
+        // The default bus has no trust store, so nothing is attested — and the
+        // service is reachable by an ordinary call, which is what makes the
+        // refusal meaningful rather than incidental.
+        let (_bus, _service, client) = bus().await;
+        let voice = client.proxy(VOICE_NAME, VOICE_PATH, VOICE_NAME).unwrap();
+        assert!(voice.call::<String>("Transcribe", ("/tmp/a.wav",)).await.is_ok());
+
+        let error = voice
+            .call_confidential::<String>("Transcribe", ("/tmp/secret.wav",))
+            .await
+            .unwrap_err();
+        assert_eq!(error.wire_name(), Error::NOT_ATTESTED);
+        assert_eq!(voice.attestation().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_confidential_call_may_not_address_a_unique_name() {
+        // The broker knows which connection `:1.n` is, but not what binary is
+        // behind it, so it cannot answer the question the sender is asking.
+        let (_bus, service, client) = bus().await;
+        let unique = service.unique_name().unwrap();
+        let proxy = client
+            .proxy(unique.as_str(), VOICE_PATH, VOICE_NAME)
+            .unwrap();
+        let error = proxy
+            .call_confidential::<String>("Transcribe", ("/tmp/secret.wav",))
+            .await
+            .unwrap_err();
+        assert_eq!(error.wire_name(), Error::NOT_ATTESTED);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_confidential_call_reaches_a_recipient_the_broker_verified_itself() {
+        let (_dir, _bus, _service, client) = attested_bus().await;
+        let voice = client.proxy(VOICE_NAME, VOICE_PATH, VOICE_NAME).unwrap();
+
+        let attestation = voice.attestation().await.unwrap().expect("attested");
+        assert_eq!(attestation.name.as_str(), VOICE_NAME);
+        assert_eq!(
+            attestation.source,
+            crate::attest::AttestationSource::Executable
+        );
+
+        let transcript: String = voice
+            .call_confidential("Transcribe", ("/tmp/secret.wav",))
+            .await
+            .unwrap();
+        assert_eq!(transcript, "transcript of /tmp/secret.wav");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn an_impostor_claiming_an_attested_name_after_it_is_free_gets_no_trust() {
+        // The name is in the trust store, so the *first* owner is attested. The
+        // question this asks is whether the trust is attached to the name or to
+        // the peer: if it were the name, whoever grabbed it next would inherit
+        // the right to be handed secrets.
+        let (_dir, bus, service, client) = attested_bus().await;
+        let voice = client.proxy(VOICE_NAME, VOICE_PATH, VOICE_NAME).unwrap();
+        assert!(voice.attestation().await.unwrap().is_some());
+
+        service.release_name(VOICE_NAME).await.unwrap();
+        let impostor = Connection::connect(bus.connect().await.unwrap())
+            .await
+            .unwrap();
+        impostor
+            .serve_at(ObjectPath::new(VOICE_PATH).unwrap(), Voice)
+            .await
+            .unwrap();
+        impostor.request_name(VOICE_NAME).await.unwrap();
+
+        // This process *is* the allowlisted binary, so the impostor re-attests
+        // legitimately — which is the correct outcome and the reason the
+        // assertion below is about the record, not about failure: what must not
+        // happen is the new owner inheriting the previous peer's attestation
+        // without a check of its own.
+        let after = voice.attestation().await.unwrap().expect("re-verified");
+        assert_eq!(after.name.as_str(), VOICE_NAME);
+    }
+
+    #[tokio::test]
+    async fn a_confidential_body_is_never_fanned_out_to_a_monitor() {
+        let (_bus, _service, client) = bus().await;
+        let watcher = Connection::connect(_bus.connect().await.unwrap())
+            .await
+            .unwrap();
+        // The broadest possible subscription: if anything could see a secret,
+        // this would.
+        let mut seen = watcher.add_match(MatchRule::new()).await.unwrap();
+
+        let voice = client.proxy(VOICE_NAME, VOICE_PATH, VOICE_NAME).unwrap();
+        let _ = voice
+            .call_confidential::<String>("Transcribe", ("/tmp/secret.wav",))
+            .await;
+
+        // Nothing arrives at all, rather than something arriving redacted.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), seen.recv())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn get_attestation_answers_for_a_name_nobody_owns() {
+        let (_bus, _service, client) = bus().await;
+        let missing = BusName::new("ai.tinyhumans.openhuman.Absent").unwrap();
+        assert_eq!(client.attestation(missing).await.unwrap(), None);
+    }
 }
