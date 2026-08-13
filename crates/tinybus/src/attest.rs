@@ -221,17 +221,69 @@ fn executable_of(pid: u32) -> Option<PathBuf> {
         let path = std::str::from_utf8(&buffer[..written]).ok()?;
         Some(PathBuf::from(path))
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
+            fn QueryFullProcessImageNameW(
+                process: *mut std::ffi::c_void,
+                flags: u32,
+                buffer: *mut u16,
+                size: *mut u32,
+            ) -> i32;
+            fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+        }
+
+        // The weakest right that answers the question. `PROCESS_QUERY_INFORMATION`
+        // would also work and would additionally let us read the process's
+        // memory; a check that only needs a path should not hold a handle that
+        // could do more than read one.
+        const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+        // 32767 wide chars is the documented ceiling for an extended-length
+        // path, so this cannot truncate a legitimate answer.
+        const MAX_EXTENDED_PATH: usize = 32_767;
+
+        // SAFETY: a pid and two plain integers; the returned handle is checked
+        // for null before use and closed on every path below.
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if process.is_null() {
+            // The process is gone, or this account may not query it. Either way
+            // the artifact is unidentified, which fails closed.
+            return None;
+        }
+
+        let mut buffer = vec![0u16; MAX_EXTENDED_PATH];
+        let mut size = buffer.len() as u32;
+        // SAFETY: `process` is a live handle from the call above, and `size` is
+        // the true capacity of `buffer` in wide characters. The call writes at
+        // most `size` elements and updates it to the length written.
+        let status = unsafe {
+            QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr(), &raw mut size)
+        };
+        // SAFETY: `process` came from `OpenProcess` above and is closed exactly
+        // once, here, before every return path below.
+        unsafe { CloseHandle(process) };
+
+        if status == 0 {
+            return None;
+        }
+        // The Win32 path of the image the process was started from, which it
+        // cannot rewrite for itself — the property the hash relies on.
+        Some(PathBuf::from(std::ffi::OsString::from_wide(
+            &buffer[..size as usize],
+        )))
+    }
     #[cfg(not(any(
         target_os = "linux",
         target_os = "android",
         target_os = "macos",
-        target_os = "ios"
+        target_os = "ios",
+        windows
     )))]
     {
-        // Windows is the notable gap, and it is blocked upstream rather than
-        // here: the named-pipe transport it would need does not exist yet, so
-        // there is no peer to identify. `GetNamedPipeClientProcessId` plus
-        // `QueryFullProcessImageNameW` is the shape it takes when that lands.
         let _ = pid;
         None
     }
