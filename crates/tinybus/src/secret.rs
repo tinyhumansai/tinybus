@@ -401,14 +401,18 @@ mod tests {
         // dropped (which would be a read of freed memory and undefined
         // behaviour).
         let mut bytes = vec![1u8, 2, 3, 4, 5, 255, 128, 7];
-        zeroize(&mut bytes);
+        // SAFETY: `bytes.as_mut_ptr()` is valid for `bytes.len()` writes —
+        // the `Vec`'s own guarantee.
+        unsafe { zeroize_raw(bytes.as_mut_ptr(), bytes.len()) };
         assert_eq!(bytes, vec![0u8; 8]);
     }
 
     #[test]
     fn zeroizing_an_empty_buffer_is_a_harmless_no_op() {
         let mut bytes: Vec<u8> = Vec::new();
-        zeroize(&mut bytes);
+        // SAFETY: `len` is `0`, so no byte is ever written; the pointer's
+        // validity for zero writes is unconditional.
+        unsafe { zeroize_raw(bytes.as_mut_ptr(), bytes.len()) };
         assert!(bytes.is_empty());
     }
 
