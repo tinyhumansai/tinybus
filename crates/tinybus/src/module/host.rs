@@ -735,6 +735,11 @@ impl ModuleHost {
         let descriptor_info = Arc::new(Mutex::new(None));
         let loaded_descriptor_info = descriptor_info.clone();
         transport.defer_initializer(host_vtable, move |host| {
+            // Registration may precede the first call by hours. Re-run file
+            // admission immediately before the platform loader so an artifact
+            // replaced after discovery cannot inherit the old hash attestation.
+            check_file(&artifact_path)
+                .map_err(|_| "module library no longer passes admission".to_string())?;
             let artifact = loader::load(&artifact_path, strict)
                 .map_err(|_| "module library could not be loaded".to_string())?;
             let rustc = sanitized_field(&artifact.descriptor.rustc_version);
