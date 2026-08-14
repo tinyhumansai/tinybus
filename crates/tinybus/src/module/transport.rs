@@ -187,7 +187,10 @@ impl ModuleTransport {
                 .await;
                 let module = match initialized {
                     Ok(Ok(Ok(initialized))) => initialized,
-                    Ok(Ok(Err(reason))) => return Err(reason),
+                    Ok(Ok(Err(reason))) => {
+                        self.clear_config();
+                        return Err(reason);
+                    }
                     Ok(Err(_)) => return Err("module initialization panicked".to_string()),
                     Err(_) => return Err("module initialization exceeded its deadline".to_string()),
                 };
@@ -699,7 +702,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_initializer_is_reported_to_callers() {
-        let (transport, host) = ModuleTransport::new("fails-init".to_string(), Vec::new());
+        let (transport, host) =
+            ModuleTransport::new("fails-init".to_string(), br#"{"secret":"value"}"#.to_vec());
         transport.defer_initialize(initialize_fails, host);
         transport.send(call()).await.unwrap();
         assert_eq!(
@@ -707,6 +711,7 @@ mod tests {
             MessageKind::Error
         );
         assert!(transport.init_failed());
+        assert!(transport.context.config.lock().unwrap().is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]

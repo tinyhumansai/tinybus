@@ -44,7 +44,9 @@ To keep a library entirely out of the host address space until it is called,
 install a JSON copy of its embedded manifest next to the artifact. For an
 artifact named `wallet.so`, the sidecar is `wallet.so.manifest.json` (and the
 same suffix rule applies to `.dylib` and `.dll`). The manifest must set
-`lazy_init` to `true`.
+`lazy_init` to `true`. The sidecar must be a regular file, must not be a
+symlink, and must be no larger than 1 MiB. A sidecar that fails admission
+refuses the artifact instead of falling back to eager loading.
 
 At discovery, TinyBus validates the artifact and the sidecar, resolves
 dependencies, reserves the declared bus name, and attaches a dormant bounded

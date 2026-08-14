@@ -243,6 +243,44 @@ async fn a_lazy_manifest_registers_an_unmapped_library_and_the_first_call_loads_
     broker_task.abort();
 }
 
+#[test]
+fn an_invalid_lazy_sidecar_refuses_the_artifact_instead_of_loading_it_eagerly() {
+    let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let artifact = directory.path().join(if cfg!(windows) {
+        "clock.dll"
+    } else if cfg!(target_os = "macos") {
+        "clock.dylib"
+    } else {
+        "clock.so"
+    });
+    std::fs::write(&artifact, b"not a dynamic library").unwrap();
+    std::fs::write(lazy_manifest_path(&artifact), b"not valid JSON").unwrap();
+
+    let error = read_lazy_manifest(&artifact).unwrap_err();
+    assert!(error.to_string().contains("not valid JSON"), "{error}");
+}
+
+#[test]
+fn a_sidecar_without_lazy_init_refuses_the_artifact_instead_of_loading_it_eagerly() {
+    let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let artifact = directory.path().join(if cfg!(windows) {
+        "clock.dll"
+    } else if cfg!(target_os = "macos") {
+        "clock.dylib"
+    } else {
+        "clock.so"
+    });
+    std::fs::write(&artifact, b"not a dynamic library").unwrap();
+    std::fs::write(
+        lazy_manifest_path(&artifact),
+        serde_json::to_vec(&manifest()).unwrap(),
+    )
+    .unwrap();
+
+    let error = read_lazy_manifest(&artifact).unwrap_err();
+    assert!(error.to_string().contains("must set lazy_init"), "{error}");
+}
+
 #[tokio::test]
 async fn a_module_whose_init_fails_is_terminal_and_is_never_initialized_again() {
     FAILED_INIT_COUNT.store(0, Ordering::Release);

@@ -21,6 +21,7 @@ use crate::ports::Transport;
 use crate::version::Version;
 
 const LAZY_MANIFEST_SUFFIX: &str = ".manifest.json";
+const LAZY_MANIFEST_MAX_LEN: u64 = 1024 * 1024;
 
 /// Current lifecycle state of a discovered module.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -735,6 +736,11 @@ impl ModuleHost {
         let descriptor_info = Arc::new(Mutex::new(None));
         let loaded_descriptor_info = descriptor_info.clone();
         transport.defer_initializer(host_vtable, move |host| {
+            // Registration may precede the first call by hours. Re-run file
+            // admission immediately before the platform loader so an artifact
+            // replaced after discovery cannot inherit the old hash attestation.
+            check_file(&artifact_path)
+                .map_err(|_| "module library no longer passes admission".to_string())?;
             let artifact = loader::load(&artifact_path, strict)
                 .map_err(|_| "module library could not be loaded".to_string())?;
             let rustc = sanitized_field(&artifact.descriptor.rustc_version);
@@ -1274,7 +1280,7 @@ fn read_lazy_manifest(path: &Path) -> Result<Option<ModuleManifest>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(Error::module_refused(path, "lazy manifest is unreadable")),
     };
-    if !sidecar_metadata.file_type().is_file() || sidecar_metadata.len() > 1024 * 1024 {
+    if !sidecar_metadata.file_type().is_file() || sidecar_metadata.len() > LAZY_MANIFEST_MAX_LEN {
         return Err(Error::module_refused(
             path,
             "lazy manifest is not a regular file below the 1 MiB limit",
@@ -1300,17 +1306,17 @@ fn read_lazy_manifest(path: &Path) -> Result<Option<ModuleManifest>> {
     let metadata = file
         .metadata()
         .map_err(|_| Error::module_refused(path, "lazy manifest metadata is unavailable"))?;
-    if !metadata.file_type().is_file() || metadata.len() > 1024 * 1024 {
+    if !metadata.file_type().is_file() || metadata.len() > LAZY_MANIFEST_MAX_LEN {
         return Err(Error::module_refused(
             path,
             "lazy manifest is not a regular file below the 1 MiB limit",
         ));
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take(1024 * 1024 + 1)
+    file.take(LAZY_MANIFEST_MAX_LEN + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| Error::module_refused(path, "lazy manifest is unreadable"))?;
-    if bytes.len() > 1024 * 1024 {
+    if bytes.len() as u64 > LAZY_MANIFEST_MAX_LEN {
         return Err(Error::module_refused(
             path,
             "lazy manifest is not a regular file below the 1 MiB limit",
