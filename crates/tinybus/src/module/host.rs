@@ -1,6 +1,7 @@
 //! Module admission, dependency ordering, attachment, and lifecycle.
 
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -18,6 +19,8 @@ use crate::module::transport::ModuleTransport;
 use crate::name::{BusName, ObjectPath};
 use crate::ports::Transport;
 use crate::version::Version;
+
+const LAZY_MANIFEST_SUFFIX: &str = ".manifest.json";
 
 /// Current lifecycle state of a discovered module.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,9 +76,11 @@ pub struct ModuleInfo {
     pub state: ModuleState,
     /// Module dependency and surface declaration.
     pub manifest: ModuleManifest,
-    /// Toolchain recorded by the descriptor, sanitized for display.
+    /// Toolchain recorded by the descriptor, sanitized for display. Empty
+    /// until a truly lazy module is first loaded.
     pub rustc_version: String,
-    /// Whether this module's toolchain differs from the host.
+    /// Whether this module's toolchain differs from the host. This becomes
+    /// meaningful once a truly lazy module has been loaded.
     pub rustc_mismatch: bool,
     /// Whether discovery should admit this module on future scans.
     pub enabled: bool,
@@ -86,6 +91,35 @@ struct LoadedModule {
     transport: Arc<ModuleTransport>,
     unique_name: BusName,
     transition_from: Option<ModuleState>,
+    descriptor_info: Option<DescriptorInfo>,
+}
+
+enum PendingModule {
+    Loaded(Box<LoadedArtifact>),
+    Lazy(Box<ModuleManifest>),
+}
+
+type DescriptorInfo = Arc<Mutex<Option<DescriptorMetadata>>>;
+
+#[derive(Clone)]
+struct DescriptorMetadata {
+    rustc_version: String,
+    rustc_mismatch: bool,
+}
+
+struct Activation {
+    lazy_init: bool,
+    lazy_load: bool,
+    descriptor_info: Option<DescriptorInfo>,
+}
+
+impl PendingModule {
+    fn manifest(&self) -> &ModuleManifest {
+        match self {
+            Self::Loaded(artifact) => &artifact.manifest,
+            Self::Lazy(manifest) => manifest,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -98,6 +132,14 @@ enum RefusalClass {
 impl LoadedModule {
     fn snapshot(&self) -> ModuleInfo {
         let mut info = self.info.clone();
+        if let Some(metadata) = self
+            .descriptor_info
+            .as_ref()
+            .and_then(|value| value.lock().expect("module descriptor lock").clone())
+        {
+            info.rustc_version = metadata.rustc_version;
+            info.rustc_mismatch = metadata.rustc_mismatch;
+        }
         if self.transport.init_failed()
             && !matches!(info.state, ModuleState::Stopped | ModuleState::Disabled)
         {
@@ -301,6 +343,10 @@ impl ModuleHost {
                 })?;
             }
             check_file(path)?;
+            if let Some(manifest) = read_lazy_manifest(path)? {
+                self.ensure_dependencies(&manifest, path)?;
+                return self.register_lazy(path, manifest, config);
+            }
             let artifact = loader::load(path, self.inner.strict.load(Ordering::Acquire))?;
             let rejected_manifest = artifact.manifest.clone();
             if let Err(error) = self.ensure_dependencies(&artifact.manifest, path) {
@@ -313,6 +359,39 @@ impl ModuleHost {
             self.record_rejection(error);
         }
         result
+    }
+
+    /// Register a module without mapping its library into this process.
+    ///
+    /// `manifest` must be the same manifest embedded in the library and must
+    /// set `lazy_init`. The first method call loads the artifact, verifies the
+    /// embedded declaration against this copy, and initializes it exactly once.
+    pub fn register_lazy_file(
+        &self,
+        path: impl AsRef<Path>,
+        manifest: ModuleManifest,
+    ) -> Result<ModuleInfo> {
+        self.register_lazy_file_with_config(path, manifest, serde_json::json!({}))
+    }
+
+    /// Configured form of [`ModuleHost::register_lazy_file`].
+    pub fn register_lazy_file_with_config(
+        &self,
+        path: impl AsRef<Path>,
+        manifest: ModuleManifest,
+        config: serde_json::Value,
+    ) -> Result<ModuleInfo> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            check_directory(if parent.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                parent
+            })?;
+        }
+        check_file(path)?;
+        self.ensure_dependencies(&manifest, path)?;
+        self.register_lazy(path, manifest, config)
     }
 
     /// Discover and load every platform library in a private directory.
@@ -349,46 +428,59 @@ impl ModuleHost {
         let mut outcomes = Vec::new();
         let mut pending = Vec::new();
         for path in paths {
-            match check_file(&path)
-                .and_then(|()| loader::load(&path, self.inner.strict.load(Ordering::Acquire)))
-            {
-                Ok(artifact) => pending.push((path, artifact)),
+            let inspected = check_file(&path).and_then(|()| {
+                if let Some(manifest) = read_lazy_manifest(&path)? {
+                    Ok(PendingModule::Lazy(Box::new(manifest)))
+                } else {
+                    loader::load(&path, self.inner.strict.load(Ordering::Acquire))
+                        .map(|artifact| PendingModule::Loaded(Box::new(artifact)))
+                }
+            });
+            match inspected {
+                Ok(module) => pending.push((path, module)),
                 Err(error) => outcomes.push(Err(error)),
             }
         }
 
         let manifests = pending
             .iter()
-            .map(|(_, artifact)| artifact.manifest.clone())
+            .map(|(_, module)| module.manifest().clone())
             .collect::<Vec<_>>();
         let resolution = crate::module::resolve::resolve(&manifests, &self.provided_interfaces());
         let mut pending = pending.into_iter().map(Some).collect::<Vec<_>>();
         for (index, reason) in resolution.unresolved {
-            let (path, artifact) = pending[index].take().expect("resolver index is valid");
+            let (path, module) = pending[index].take().expect("resolver index is valid");
             let error = Error::module_refused(&path, reason);
-            self.record_manifest_rejection(&error, artifact.manifest, RefusalClass::Unresolved);
+            self.record_manifest_rejection(
+                &error,
+                module.manifest().clone(),
+                RefusalClass::Unresolved,
+            );
             outcomes.push(Err(error));
         }
         for index in resolution.order {
-            let (path, artifact) = pending[index].take().expect("resolver index is valid");
+            let (path, module) = pending[index].take().expect("resolver index is valid");
             let config = self
                 .inner
                 .configs
                 .lock()
                 .expect("module config lock")
-                .get(&artifact.manifest.module.name)
+                .get(&module.manifest().module.name)
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({}));
             let result = self
-                .ensure_dependencies(&artifact.manifest, &path)
+                .ensure_dependencies(module.manifest(), &path)
                 .inspect_err(|error| {
                     self.record_manifest_rejection(
                         error,
-                        artifact.manifest.clone(),
+                        module.manifest().clone(),
                         RefusalClass::Unresolved,
                     );
                 })
-                .and_then(|()| self.activate(&path, artifact, config));
+                .and_then(|()| match module {
+                    PendingModule::Loaded(artifact) => self.activate(&path, *artifact, config),
+                    PendingModule::Lazy(manifest) => self.register_lazy(&path, *manifest, config),
+                });
             outcomes.push(result);
         }
         for error in outcomes.iter().filter_map(|outcome| outcome.as_ref().err()) {
@@ -447,12 +539,16 @@ impl ModuleHost {
         let mut results = Vec::new();
         let mut admitted = Vec::new();
         for path in paths {
-            let inspected = check_file(&path)
-                .and_then(|()| loader::load(&path, self.inner.strict.load(Ordering::Acquire)))
-                .and_then(|artifact| {
+            let inspected = check_file(&path).and_then(|()| {
+                if let Some(manifest) = read_lazy_manifest(&path)? {
+                    let info = provisional_info(&path, &manifest)?;
+                    Ok((PendingModule::Lazy(Box::new(manifest)), info))
+                } else {
+                    let artifact = loader::load(&path, self.inner.strict.load(Ordering::Acquire))?;
                     let info = self.validate(&path, &artifact.descriptor, &artifact.manifest)?;
-                    Ok((artifact, info))
-                });
+                    Ok((PendingModule::Loaded(Box::new(artifact)), info))
+                }
+            });
             match inspected {
                 Ok((artifact, info)) => admitted.push((artifact, info)),
                 Err(error) => results.push(rejection_info(&error)),
@@ -460,7 +556,7 @@ impl ModuleHost {
         }
         let manifests = admitted
             .iter()
-            .map(|(artifact, _)| artifact.manifest.clone())
+            .map(|(module, _)| module.manifest().clone())
             .collect::<Vec<_>>();
         let resolution = crate::module::resolve::resolve(&manifests, &self.provided_interfaces());
         let mut admitted = admitted.into_iter().map(Some).collect::<Vec<_>>();
@@ -553,6 +649,98 @@ impl ModuleHost {
             }
         }
 
+        self.attach_transport(
+            path,
+            admitted,
+            manifest,
+            transport,
+            Activation {
+                lazy_init: artifact.manifest.lazy_init,
+                lazy_load: false,
+                descriptor_info: None,
+            },
+        )
+    }
+
+    fn register_lazy(
+        &self,
+        path: &Path,
+        manifest: ModuleManifest,
+        config: serde_json::Value,
+    ) -> Result<ModuleInfo> {
+        let _admission = self.inner.admission.lock().expect("module admission lock");
+        let admitted = provisional_info(path, &manifest).inspect_err(|error| {
+            self.record_manifest_rejection(error, manifest.clone(), RefusalClass::Rejected);
+        })?;
+        if self
+            .inner
+            .loaded
+            .lock()
+            .expect("module list lock")
+            .iter()
+            .any(|loaded| loaded.info.name == admitted.name)
+        {
+            let error = Error::module_refused(path, "module name is already loaded");
+            self.record_manifest_rejection(&error, manifest.clone(), RefusalClass::Unresolved);
+            return Err(error);
+        }
+        let config = serde_json::to_vec(&config).map_err(|_| {
+            let error = Error::module_refused(path, "module configuration is invalid");
+            self.record_manifest_rejection(&error, manifest.clone(), RefusalClass::Rejected);
+            error
+        })?;
+        let (transport, host_vtable) = ModuleTransport::new(admitted.name.clone(), config);
+        let expected = manifest.clone();
+        let artifact_path = path.to_path_buf();
+        let strict = self.inner.strict.load(Ordering::Acquire);
+        let descriptor_info = Arc::new(Mutex::new(None));
+        let loaded_descriptor_info = descriptor_info.clone();
+        transport.defer_initializer(host_vtable, move |host| {
+            let artifact = loader::load(&artifact_path, strict)
+                .map_err(|_| "module library could not be loaded".to_string())?;
+            let rustc = sanitized_field(&artifact.descriptor.rustc_version);
+            if artifact.manifest != expected
+                || loaded_identity(&artifact.descriptor, &artifact.manifest).is_none()
+                || rustc.is_none()
+            {
+                return Err("loaded module does not match its lazy manifest".to_string());
+            }
+            *loaded_descriptor_info
+                .lock()
+                .expect("module descriptor lock") = Some(DescriptorMetadata {
+                rustc_version: rustc.expect("checked above"),
+                rustc_mismatch: field_bytes(&artifact.descriptor.rustc_version)
+                    != build_info::RUSTC_VERSION.as_bytes(),
+            });
+            let mut module = TbModuleVtable::default();
+            let code = unsafe { (artifact.init)(&host, &mut module) };
+            if code == TB_OK {
+                Ok(module)
+            } else {
+                Err("module initialization failed".to_string())
+            }
+        });
+        self.attach_transport(
+            path,
+            admitted,
+            manifest,
+            transport,
+            Activation {
+                lazy_init: true,
+                lazy_load: true,
+                descriptor_info: Some(descriptor_info),
+            },
+        )
+    }
+
+    fn attach_transport(
+        &self,
+        path: &Path,
+        admitted: ModuleInfo,
+        manifest: ModuleManifest,
+        transport: Arc<ModuleTransport>,
+        activation: Activation,
+    ) -> Result<ModuleInfo> {
         let transport_for_broker: Arc<dyn Transport> = transport.clone();
         let unique = self.inner.broker.attach(transport_for_broker);
         let reserved_change = match self
@@ -572,7 +760,9 @@ impl ModuleHost {
         let ready_transport = transport.clone();
         let module_name = admitted.name.clone();
         let previous_state = state_name(&admitted.state);
-        let lazy_init = artifact.manifest.lazy_init;
+        let lazy_init = activation.lazy_init;
+        let lazy_load = activation.lazy_load;
+        let descriptor_info = activation.descriptor_info;
         tokio::spawn(async move {
             if lazy_init {
                 ready_transport.wait_initializing().await;
@@ -604,7 +794,11 @@ impl ModuleHost {
                 "in-process modules are inside the host trust boundary"
             );
         }
-        tracing::info!(module = %admitted.name, "module loaded");
+        if lazy_load {
+            tracing::info!(module = %admitted.name, "module registered for lazy loading");
+        } else {
+            tracing::info!(module = %admitted.name, "module loaded");
+        }
         self.inner
             .loaded
             .lock()
@@ -614,6 +808,7 @@ impl ModuleHost {
                 transport,
                 unique_name: unique,
                 transition_from: None,
+                descriptor_info,
             });
         Ok(admitted)
     }
@@ -983,6 +1178,118 @@ impl ModuleControl for ModuleHostInner {
             detail,
         })
     }
+}
+
+fn lazy_manifest_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    path.with_file_name(format!("{name}{LAZY_MANIFEST_SUFFIX}"))
+}
+
+fn read_lazy_manifest(path: &Path) -> Result<Option<ModuleManifest>> {
+    let sidecar = lazy_manifest_path(path);
+    let sidecar_metadata = match std::fs::symlink_metadata(&sidecar) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(Error::module_refused(path, "lazy manifest is unreadable")),
+    };
+    if !sidecar_metadata.file_type().is_file() || sidecar_metadata.len() > 1024 * 1024 {
+        return Err(Error::module_refused(
+            path,
+            "lazy manifest is not a regular file below the 1 MiB limit",
+        ));
+    }
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        #[cfg(target_os = "macos")]
+        const O_NOFOLLOW: i32 = 0x100;
+        #[cfg(not(target_os = "macos"))]
+        const O_NOFOLLOW: i32 = 0x2_0000;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NOFOLLOW)
+            .open(&sidecar)
+            .map_err(|_| Error::module_refused(path, "lazy manifest is unreadable"))?
+    };
+    #[cfg(windows)]
+    let file = std::fs::File::open(&sidecar)
+        .map_err(|_| Error::module_refused(path, "lazy manifest is unreadable"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| Error::module_refused(path, "lazy manifest metadata is unavailable"))?;
+    if !metadata.file_type().is_file() || metadata.len() > 1024 * 1024 {
+        return Err(Error::module_refused(
+            path,
+            "lazy manifest is not a regular file below the 1 MiB limit",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| Error::module_refused(path, "lazy manifest is unreadable"))?;
+    if bytes.len() > 1024 * 1024 {
+        return Err(Error::module_refused(
+            path,
+            "lazy manifest is not a regular file below the 1 MiB limit",
+        ));
+    }
+    let manifest: ModuleManifest = serde_json::from_slice(&bytes)
+        .map_err(|_| Error::module_refused(path, "lazy manifest is not valid JSON"))?;
+    if !manifest.lazy_init {
+        return Err(Error::module_refused(
+            path,
+            "lazy manifest must set lazy_init",
+        ));
+    }
+    Ok(Some(manifest))
+}
+
+fn provisional_info(path: &Path, manifest: &ModuleManifest) -> Result<ModuleInfo> {
+    let name = sanitize_untrusted(&manifest.module.name);
+    let version = sanitize_untrusted(&manifest.module.version.to_string());
+    if !manifest.lazy_init
+        || manifest.schema != MANIFEST_SCHEMA
+        || name.is_empty()
+        || name != manifest.module.name
+        || version != manifest.module.version.to_string()
+        || manifest.module.name.len() > 64
+        || manifest.module.version.to_string().len() > 32
+    {
+        return Err(Error::module_refused(
+            path,
+            "lazy manifest identity is invalid",
+        ));
+    }
+    Ok(ModuleInfo {
+        name,
+        version,
+        file: safe_file_name(path),
+        state: ModuleState::Resolved,
+        manifest: manifest.clone(),
+        // These descriptor facts are unavailable until the first call maps the
+        // library. They remain empty/false rather than pretending to be known.
+        rustc_version: String::new(),
+        rustc_mismatch: false,
+        enabled: true,
+    })
+}
+
+fn loaded_identity(
+    descriptor: &TbAbiDescriptor,
+    manifest: &ModuleManifest,
+) -> Option<(String, String)> {
+    let name = sanitized_field(&descriptor.module_name)?;
+    let version = sanitized_field(&descriptor.module_version)?;
+    (manifest.schema == MANIFEST_SCHEMA
+        && sanitize_untrusted(&manifest.module.name) == name
+        && sanitize_untrusted(&manifest.module.version.to_string()) == version
+        && manifest.module.name.len() <= 64
+        && manifest.module.version.to_string().len() <= 32)
+        .then_some((name, version))
 }
 
 fn rejection_info(error: &Error) -> ModuleInfo {

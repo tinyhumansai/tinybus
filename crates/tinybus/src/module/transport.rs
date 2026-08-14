@@ -46,7 +46,7 @@ pub(crate) struct ModuleTransport {
     inbound: Mutex<mpsc::Receiver<Vec<u8>>>,
     context: &'static HostContext,
     label: String,
-    initializer: StdMutex<Option<(crate::module::abi::TbModuleInit, TbHostVtable)>>,
+    initializer: StdMutex<Option<DeferredInitializer>>,
     init_result: OnceCell<std::result::Result<(), String>>,
     pending: Mutex<VecDeque<Message>>,
     drain_started: AtomicBool,
@@ -57,19 +57,24 @@ pub(crate) struct ModuleTransport {
 unsafe impl Send for ModuleTransport {}
 unsafe impl Sync for ModuleTransport {}
 
-struct SendHostVtable(TbHostVtable);
+type Initializer =
+    Box<dyn FnOnce(TbHostVtable) -> std::result::Result<TbModuleVtable, String> + Send + 'static>;
+
+struct DeferredInitializer {
+    initialize: Initializer,
+    host: TbHostVtable,
+}
+
 struct SendModuleVtable(TbModuleVtable);
 
 // The opaque host context is process-lifetime state and every callback is
 // required by the ABI to be thread-safe.
-unsafe impl Send for SendHostVtable {}
+unsafe impl Send for DeferredInitializer {}
 unsafe impl Send for SendModuleVtable {}
 
-impl SendHostVtable {
-    fn initialize(self, init: crate::module::abi::TbModuleInit) -> (i32, SendModuleVtable) {
-        let mut module = TbModuleVtable::default();
-        let code = unsafe { init(&self.0, &mut module) };
-        (code, SendModuleVtable(module))
+impl DeferredInitializer {
+    fn run(self) -> std::result::Result<SendModuleVtable, String> {
+        (self.initialize)(self.host).map(SendModuleVtable)
     }
 }
 
@@ -132,7 +137,25 @@ impl ModuleTransport {
         init: crate::module::abi::TbModuleInit,
         host: TbHostVtable,
     ) {
-        *self.initializer.lock().expect("module initializer lock") = Some((init, host));
+        self.defer_initializer(host, move |host| {
+            let mut module = TbModuleVtable::default();
+            let code = unsafe { init(&host, &mut module) };
+            if code == TB_OK {
+                Ok(module)
+            } else {
+                Err("module initialization failed".to_string())
+            }
+        });
+    }
+
+    pub(crate) fn defer_initializer<F>(&self, host: TbHostVtable, initialize: F)
+    where
+        F: FnOnce(TbHostVtable) -> std::result::Result<TbModuleVtable, String> + Send + 'static,
+    {
+        *self.initializer.lock().expect("module initializer lock") = Some(DeferredInitializer {
+            initialize: Box::new(initialize),
+            host,
+        });
     }
 
     async fn ensure_initialized(&self) -> Result<()> {
@@ -141,7 +164,7 @@ impl ModuleTransport {
             .get_or_init(|| async {
                 self.context.init_started.store(true, Ordering::Release);
                 self.context.init_notify.notify_waiters();
-                let Some((init, host)) = self
+                let Some(initializer) = self
                     .initializer
                     .lock()
                     .expect("module initializer lock")
@@ -157,21 +180,18 @@ impl ModuleTransport {
                 // worker threads and bound how long the broker waits; a timed
                 // out blocking task may remain wedged, so its borrowed config
                 // remains allocated rather than being invalidated underneath it.
-                let host = SendHostVtable(host);
                 let initialized = tokio::time::timeout(
                     MODULE_INIT_DEADLINE,
-                    tokio::task::spawn_blocking(move || host.initialize(init)),
+                    tokio::task::spawn_blocking(move || initializer.run()),
                 )
                 .await;
-                let (code, module) = match initialized {
-                    Ok(Ok(initialized)) => initialized,
+                let module = match initialized {
+                    Ok(Ok(Ok(initialized))) => initialized,
+                    Ok(Ok(Err(reason))) => return Err(reason),
                     Ok(Err(_)) => return Err("module initialization panicked".to_string()),
                     Err(_) => return Err("module initialization exceeded its deadline".to_string()),
                 };
                 self.clear_config();
-                if code != TB_OK {
-                    return Err("module initialization failed".to_string());
-                }
                 self.initialize(module.0)
                     .map_err(|_| "module returned an invalid vtable".to_string())?;
                 Ok(())

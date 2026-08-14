@@ -28,7 +28,8 @@ restart.
 1. Check every directory component's ownership/mode, require a regular
    platform library file no larger than 512 MiB, and enforce `modules.toml`
    when present.
-2. Load eagerly and locally (`RTLD_NOW | RTLD_LOCAL` on Unix).
+2. Read an adjacent lazy manifest when one is present; otherwise load eagerly
+   and locally (`RTLD_NOW | RTLD_LOCAL` on Unix).
 3. Resolve `TINYBUS_MODULE_ABI_V1` against that specific handle.
 4. Read and validate only the frozen 16-byte descriptor prefix.
 5. Validate the full descriptor, then parse the manifest.
@@ -36,6 +37,28 @@ restart.
 7. Call `tinybus_module_init_v1`, receive its vtable, and attach the transport.
    A manifest with `lazy_init = true` defers this step until its first method
    call; racing first calls share one initialization and retain their order.
+
+## Lazy loading
+
+To keep a library entirely out of the host address space until it is called,
+install a JSON copy of its embedded manifest next to the artifact. For an
+artifact named `wallet.so`, the sidecar is `wallet.so.manifest.json` (and the
+same suffix rule applies to `.dylib` and `.dll`). The manifest must set
+`lazy_init` to `true`.
+
+At discovery, TinyBus validates the artifact and the sidecar, resolves
+dependencies, reserves the declared bus name, and attaches a dormant bounded
+transport without calling `dlopen` or `LoadLibraryExW`. The first method call
+loads the library on a blocking worker, applies the normal ABI gate, requires
+the embedded manifest to exactly match the sidecar, and runs setup. Concurrent
+first calls share that one attempt and remain queued in arrival order. A load
+or setup failure is terminal for the process and all callers receive
+`ModuleUnavailable` rather than waiting for their individual deadlines.
+
+`ModuleHost::register_lazy_file` provides the same behavior when an embedding
+host already has the trusted manifest in memory. Modules without a sidecar keep
+the existing behavior: their library is mapped during discovery, while
+`lazy_init = true` still defers setup.
 
 The host vtable also carries borrowed JSON configuration. The SDK copies and
 deserializes it during initialization; the module never retains a pointer into

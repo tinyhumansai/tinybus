@@ -111,7 +111,9 @@ pub struct ModuleManifest {
     /// Declared privileges for operator inspection.
     #[serde(default)]
     pub capabilities: Vec<Capability>,
-    /// Defer setup until the first method call.
+    /// Defer setup until the first method call. When this manifest is installed
+    /// as the artifact's `.manifest.json` sidecar, library mapping is deferred
+    /// as well.
     #[serde(default)]
     pub lazy_init: bool,
     /// Tokio worker threads owned by this module.
