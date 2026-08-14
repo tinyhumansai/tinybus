@@ -203,6 +203,10 @@ unsafe fn zeroize_raw(ptr: *mut u8, len: usize) {
 ///
 /// Both syscalls are attempted independently and neither failure is
 /// propagated to the caller — see [`Secret::new`] for why.
+///
+/// Callers pass `bytes.len()`, not `bytes.capacity()` — unlike
+/// [`Secret`]'s zeroization, which does cover the full allocation. See the
+/// rationale on [`Secret::new`] for why the two deliberately differ.
 fn harden_buffer(ptr: *mut u8, len: usize) -> bool {
     if len == 0 {
         return false;
