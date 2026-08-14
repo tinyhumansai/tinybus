@@ -20,7 +20,9 @@
 //!    support it does not have.
 //! 3. Zeroize on [`Drop`], via a volatile write loop the compiler cannot
 //!    elide, so the plaintext does not linger in freed memory that gets
-//!    reused (and possibly paged or dumped) later.
+//!    reused (and possibly paged or dumped) later. This covers the buffer's
+//!    full `capacity`, not just its `len` — see [`Secret::new`] for why that
+//!    distinction matters.
 //!
 //! [`harden_process`] is a separate, opt-in, process-wide knob: it does not
 //! run automatically anywhere in this crate.
