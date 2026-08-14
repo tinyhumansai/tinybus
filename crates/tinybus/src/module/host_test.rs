@@ -1198,20 +1198,12 @@ async fn one_refused_module_does_not_stop_the_others_in_the_directory_from_loadi
 /// existing loader tests that run against the CI-provisioned directories.
 #[cfg(unix)]
 fn staged_module(artifact: &Path, hash: &str) -> (tempfile::TempDir, PathBuf) {
-    // Staged beside the artifact, because that is the one directory known to
-    // satisfy the loader's own admission check on every platform CI runs.
-    //
-    // The check refuses any directory another user could write to, and no
-    // fixed location satisfies it everywhere: `/tmp` is world-writable on
-    // Unix, while on Windows the checkout tree carries permissive inherited
-    // ACLs. CI works around this per-platform — on Unix the artifacts sit in
-    // the user-owned `target/debug/examples`, and on Windows the workflow
-    // builds `target/private-module-tests` with an owner-only ACL, copies the
-    // DLLs in, and redirects `TEMP`/`TMP` there.
-    //
-    // Deriving the staging root from the artifact rather than from a constant
-    // inherits whichever of those CI already arranged: on Windows the ACL is
-    // set with `ContainerInherit`, so a directory created here picks it up.
+    // Staged beside the artifact rather than in `/tmp`: the loader refuses a
+    // directory another user could write to, and `/tmp` is exactly that. The
+    // artifact's own directory is user-owned (CI builds into
+    // `target/debug/examples`), so it already satisfies the check that `/tmp`
+    // fails — which is the admission check doing its job, not an obstacle to
+    // route around.
     let root = artifact.parent().expect("artifact has a parent directory");
     let dir = tempfile::tempdir_in(root).unwrap();
     let file_name = artifact.file_name().unwrap();
