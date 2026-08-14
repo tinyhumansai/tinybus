@@ -206,9 +206,23 @@ async fn a_lazy_manifest_registers_an_unmapped_library_and_the_first_call_loads_
     let broker = Broker::new();
     let broker_task = broker.spawn(bus.clone());
     let host = ModuleHost::new(broker);
-    let loaded = host.load_dir(directory.path()).unwrap();
-    assert_eq!(loaded.len(), 1);
-    assert_eq!(loaded[0].as_ref().unwrap().state, ModuleState::Resolved);
+    #[cfg(not(windows))]
+    let info = {
+        let loaded = host.load_dir(directory.path()).unwrap();
+        assert_eq!(loaded.len(), 1);
+        loaded.into_iter().next().unwrap().unwrap()
+    };
+    #[cfg(windows)]
+    let info = {
+        // Windows module directories admit only their owner, LocalSystem, and
+        // Administrators. TempDir inherits a CI-runner ACE that is deliberately
+        // rejected before discovery, so exercise the same sidecar seam directly;
+        // the dedicated loader job covers a CI-provisioned private directory.
+        let discovered = read_lazy_manifest(&artifact).unwrap().unwrap();
+        host.register_lazy(&artifact, discovered, serde_json::json!({}))
+            .unwrap()
+    };
+    assert_eq!(info.state, ModuleState::Resolved);
 
     let connection = Connection::connect(bus.connect().await.unwrap())
         .await
