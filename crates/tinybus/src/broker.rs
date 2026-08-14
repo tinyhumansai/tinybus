@@ -1290,6 +1290,54 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "modules")]
+    #[tokio::test]
+    async fn a_confidential_call_carrying_a_stream_handle_is_refused_before_it_is_sent() {
+        // The footgun this closes: a stream's bytes travel as their own
+        // unflagged `Write` calls, so a handle inside a confidential body would
+        // attest the recipient of the *handle* while the payload it stands for
+        // went out unattested — and the caller would have every reason to
+        // believe otherwise. Refused in the sender's own process, because the
+        // broker would have to read a confidential body to see it.
+        let (_bus, _broker, _service, client) = attested_bus().await;
+        let voice = client.proxy(VOICE_NAME, VOICE_PATH, VOICE_NAME).unwrap();
+
+        // The recipient really is attested, so the refusal below is about the
+        // stream handle and nothing else.
+        assert!(voice.attestation().await.unwrap().is_some());
+
+        let handle = crate::stream::StreamRef {
+            id: "s1".to_string(),
+            content_type: None,
+            len: Some(4096),
+        };
+        let error = voice
+            .call_confidential::<Value>("Transcribe", (handle,))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("stream handle"), "{error}");
+
+        // The same handle in a *non*-confidential call is not intercepted: this
+        // guards a confidentiality claim, it does not ban streams. The call
+        // still fails, because this fixture's `Transcribe` takes a string — but
+        // it fails at the service, having been sent, rather than being refused
+        // here. Asserting on which error distinguishes the two.
+        let sent = voice
+            .call::<Value>(
+                "Transcribe",
+                (crate::stream::StreamRef {
+                    id: "s1".to_string(),
+                    content_type: None,
+                    len: Some(4096),
+                },),
+            )
+            .await
+            .unwrap_err();
+        // Only that the guard did not fire — which error the fixture's own
+        // signature mismatch produces downstream is not this test's business.
+        assert!(!sent.to_string().contains("stream handle"), "{sent}");
+    }
+
     #[tokio::test]
     async fn get_attestation_answers_for_a_name_nobody_owns() {
         let (_bus, _service, client) = bus().await;

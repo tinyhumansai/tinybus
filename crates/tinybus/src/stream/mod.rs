@@ -789,5 +789,63 @@ impl StreamReader {
     }
 }
 
+/// Whether `body` carries a [`StreamRef`] anywhere inside it.
+///
+/// # Why this exists, and why it is not a broker check
+///
+/// A stream's bytes do not travel in the call that carries its handle. They
+/// travel as their own `Write` calls, which are ordinary method calls with no
+/// `confidential` flag on them — so a handle placed in a confidential body
+/// attests the recipient of the *handle*, while the payload it stands for goes
+/// out unattested. A caller who wrote `call_confidential(…, stream_ref)` would
+/// reasonably believe the payload was covered. It is not.
+///
+/// The refusal therefore has to happen in the **sending** peer's own process,
+/// which already owns the body it just built. It deliberately cannot be a
+/// broker rule: spotting a handle means reading the body, and a broker that
+/// read a confidential body would be the very thing confidentiality exists to
+/// prevent. See `docs/modules/attest/README.md`.
+///
+/// # Precision
+///
+/// Matching is structural — an object whose keys are exactly a [`StreamRef`]'s,
+/// with `id` present — and never looks *inside* `id`, which is documented as
+/// opaque and may be minted in any form by any implementation. The cost is that
+/// a bare `{"id": "…"}` in a confidential body is refused even when it was
+/// never a stream handle. That is the direction to be wrong in: the failure is
+/// loud, local, and recoverable by restructuring the call, whereas the
+/// alternative failure is a secret leaving unattested and nobody finding out.
+pub(crate) fn body_contains_stream_ref(body: &Value) -> bool {
+    /// Detection-only mirror of [`StreamRef`]. `deny_unknown_fields` is the
+    /// whole point: it stops every JSON object that merely happens to carry an
+    /// `id` alongside other fields from matching.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct StreamRefShape {
+        #[allow(dead_code)]
+        id: String,
+        #[serde(default)]
+        #[allow(dead_code)]
+        content_type: Option<String>,
+        #[serde(default)]
+        #[allow(dead_code)]
+        len: Option<u64>,
+    }
+
+    match body {
+        Value::Object(_) => {
+            if serde_json::from_value::<StreamRefShape>(body.clone()).is_ok() {
+                return true;
+            }
+            body.as_object()
+                .expect("matched Value::Object")
+                .values()
+                .any(body_contains_stream_ref)
+        }
+        Value::Array(values) => values.iter().any(body_contains_stream_ref),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod stream_test;
