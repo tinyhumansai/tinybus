@@ -66,6 +66,24 @@ pub enum Error {
     #[error("no peer owns the name `{0}`")]
     NameHasNoOwner(BusName),
 
+    /// A confidential message was refused because the broker could not
+    /// establish what binary is behind the destination name.
+    ///
+    /// Carries the name and a fixed operator-facing reason, never the body it
+    /// was protecting — the whole point of the refusal is that the payload goes
+    /// nowhere, including into a log line.
+    #[error("`{name}` is not an attested recipient: {reason}")]
+    NotAttested {
+        /// The destination that failed attestation.
+        name: BusName,
+        /// Why the broker would not vouch for it.
+        ///
+        /// Fixed text, not caller-composed: this error travels back across
+        /// the bus, and a `String` here would be a standing invitation for a
+        /// future call site to interpolate something it shouldn't.
+        reason: &'static str,
+    },
+
     /// `RequestName` lost: another peer already owns it and did not allow
     /// replacement.
     #[error("`{name}` is already owned by {owner}")]
@@ -251,6 +269,12 @@ impl Error {
     pub const UNKNOWN_METHOD: &'static str = "ai.tinyhumans.tinybus.Error.UnknownMethod";
     /// The dotted error name a failing method body gets by default.
     pub const FAILED: &'static str = "ai.tinyhumans.tinybus.Error.Failed";
+    /// The dotted error name for a refused confidential delivery.
+    ///
+    /// Callers match on this to tell "the recipient is not trusted" from "the
+    /// call failed", which are different problems with different fixes: one is
+    /// an operator's trust store, the other is the service.
+    pub const NOT_ATTESTED: &'static str = "ai.tinyhumans.tinybus.Error.NotAttested";
 
     /// Build an [`Error::Protocol`] from anything displayable.
     pub fn protocol(message: impl std::fmt::Display) -> Self {
@@ -260,6 +284,16 @@ impl Error {
     /// Build an [`Error::Transport`] from anything displayable.
     pub fn transport(message: impl std::fmt::Display) -> Self {
         Self::Transport(message.to_string())
+    }
+
+    /// Build an [`Error::NotAttested`] for `name`.
+    ///
+    /// `reason` is a fixed `&'static str`, not `impl Into<String>`: this error
+    /// travels back to a caller that just failed to send a secret, and the
+    /// type itself is what stops a future call site from composing it out of
+    /// peer input.
+    pub fn not_attested(name: BusName, reason: &'static str) -> Self {
+        Self::NotAttested { name, reason }
     }
 
     /// Build an [`Error::Path`] for `path`.
@@ -347,6 +381,7 @@ impl Error {
             Self::ConnectionClosed => "ai.tinyhumans.tinybus.Error.ConnectionClosed",
             Self::Backpressure => "ai.tinyhumans.tinybus.Error.Backpressure",
             Self::NameHasNoOwner(_) => "ai.tinyhumans.tinybus.Error.NameHasNoOwner",
+            Self::NotAttested { .. } => Self::NOT_ATTESTED,
             Self::NameTaken { .. } => "ai.tinyhumans.tinybus.Error.NameTaken",
             Self::UnknownObject { .. } => "ai.tinyhumans.tinybus.Error.UnknownObject",
             Self::UnknownInterface { .. } => "ai.tinyhumans.tinybus.Error.UnknownInterface",
@@ -566,6 +601,7 @@ mod tests {
             Error::StreamTooLarge { limit: 1 },
             Error::TooManyStreams { limit: 1 },
             Error::Json(serde_json::from_str::<serde_json::Value>("{").unwrap_err()),
+            Error::not_attested(BusName::new("ai.tinyhumans.Example").unwrap(), "bad"),
         ];
         for error in errors {
             assert!(error.wire_name().starts_with("ai.tinyhumans."));

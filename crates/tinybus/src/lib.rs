@@ -65,6 +65,7 @@
 // likely to break silently, so it has to be covered here.
 extern crate self as tinybus;
 
+pub mod attest;
 pub mod broker;
 pub mod build_info;
 pub mod connection;
@@ -87,6 +88,7 @@ pub mod version;
 #[path = "private.rs"]
 pub mod __private;
 
+pub use crate::attest::Attestation;
 pub use crate::connection::Connection;
 pub use crate::error::{Error, Result};
 pub use crate::events::{

@@ -78,6 +78,26 @@ pub struct Header {
     /// For [`MessageKind::Error`]: the stable dotted error name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_name: Option<String>,
+    /// This body is a secret: deliver it to the attested destination or to
+    /// nobody.
+    ///
+    /// Set by the sender and *not* overwritten on ingress, unlike `sender`. The
+    /// asymmetry is deliberate and safe in this direction: the flag only ever
+    /// causes the broker to apply more restrictions, so a peer that forges it
+    /// can restrict its own traffic and nothing else. A flag the broker
+    /// controlled would instead need a rule for who may ask for confidentiality,
+    /// and there is no such rule worth having — everyone may.
+    ///
+    /// An older broker that does not know this field routes the message
+    /// normally, which is why a sender must not assume the guarantee holds
+    /// without checking `GetAttestation` first. See [`crate::attest`].
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub confidential: bool,
+}
+
+/// `skip_serializing_if` needs a path, and `bool::not` takes `self` by value.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// A framed message: header plus a JSON body.
@@ -119,9 +139,31 @@ impl Message {
                 interface: Some(interface),
                 member: Some(member),
                 error_name: None,
+                confidential: false,
             },
             body,
         }
+    }
+
+    /// Build a method call whose body the broker must not let anyone but the
+    /// attested destination see.
+    ///
+    /// Use it for the payloads whose disclosure is the failure — a private key,
+    /// a recovery phrase, a bearer token. The broker will refuse to deliver it
+    /// unless it has itself verified the destination's artifact against the
+    /// operator's trust store, so a send that would have gone to an
+    /// impersonator fails instead of succeeding quietly. See [`crate::attest`]
+    /// for exactly what "verified" covers.
+    pub fn confidential_call(
+        destination: BusName,
+        path: ObjectPath,
+        interface: InterfaceName,
+        member: MemberName,
+        body: Value,
+    ) -> Self {
+        let mut message = Self::method_call(destination, path, interface, member, body);
+        message.header.confidential = true;
+        message
     }
 
     /// Build the successful reply to `call`.
@@ -140,6 +182,11 @@ impl Message {
                 interface: None,
                 member: None,
                 error_name: None,
+                // A reply inherits the call's confidentiality. A secret asked
+                // for confidentially is usually answered with another one — a
+                // key derivation returns a key — and a reply that quietly lost
+                // the flag would be the leak the call avoided, one hop later.
+                confidential: call.confidential,
             },
             body,
         }
@@ -161,6 +208,11 @@ impl Message {
                 interface: None,
                 member: None,
                 error_name: Some(error.wire_name().to_string()),
+                // Not inherited. Errors never carry the value that caused them,
+                // so an error reply has no secret to protect — and marking it
+                // confidential would make it undeliverable exactly when the
+                // recipient failed attestation, swallowing the diagnosis.
+                confidential: false,
             },
             body: Value::String(error.wire_message()),
         }
@@ -185,6 +237,9 @@ impl Message {
                 interface: Some(interface),
                 member: Some(member),
                 error_name: None,
+                // Structurally impossible to set: a signal is a broadcast, and
+                // `validate` refuses the combination on ingress.
+                confidential: false,
             },
             body,
         }
@@ -224,6 +279,23 @@ impl Message {
     /// without re-checking. A call with no destination would otherwise sit in
     /// the router as an unroutable message with a caller blocked on it forever.
     pub fn validate(&self) -> Result<()> {
+        // Checked before the per-kind rules, and checked on ingress rather than
+        // at delivery: a confidential signal has no destination, so there is no
+        // one recipient to attest and fan-out is the only thing it could mean.
+        // Refusing it here means no later stage has to ask whether a broadcast
+        // might be a secret.
+        if self.header.confidential {
+            if self.header.kind == MessageKind::Signal {
+                return Err(Error::protocol(
+                    "a signal cannot be confidential: it is a broadcast",
+                ));
+            }
+            if self.header.destination.is_none() {
+                return Err(Error::protocol(
+                    "a confidential message needs a destination",
+                ));
+            }
+        }
         match self.header.kind {
             MessageKind::MethodCall => {
                 if self.header.destination.is_none() {
@@ -328,6 +400,81 @@ mod tests {
         let json = serde_json::to_string(&sig).unwrap();
         assert!(!json.contains("null"), "{json}");
         assert!(!json.contains("destination"), "{json}");
+    }
+
+    #[test]
+    fn a_signal_cannot_be_confidential_because_it_is_a_broadcast() {
+        let mut sig = Message::signal(
+            ObjectPath::root(),
+            InterfaceName::new("ai.tinyhumans.Test").unwrap(),
+            MemberName::new("Tick").unwrap(),
+            Value::Null,
+        );
+        sig.header.confidential = true;
+        let err = sig.validate().unwrap_err();
+        assert!(err.to_string().contains("broadcast"), "{err}");
+    }
+
+    #[test]
+    fn a_confidential_message_without_a_destination_is_refused_on_ingress() {
+        let mut c = call();
+        c.header.confidential = true;
+        c.header.destination = None;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn a_reply_inherits_confidentiality_and_an_error_reply_never_does() {
+        // A key-derivation call answers with a key. A reply that quietly lost
+        // the flag would leak on the way back what the call protected on the
+        // way out.
+        let mut c = Message::confidential_call(
+            BusName::new("ai.tinyhumans.openhuman.Wallet").unwrap(),
+            ObjectPath::new("/ai/tinyhumans/openhuman/Wallet").unwrap(),
+            InterfaceName::new("ai.tinyhumans.openhuman.Wallet").unwrap(),
+            MemberName::new("DeriveKey").unwrap(),
+            serde_json::json!([]),
+        );
+        c.header.sender = Some(BusName::new(":1.3").unwrap());
+        assert!(c.header.confidential);
+        c.validate().unwrap();
+
+        assert!(
+            Message::method_return(&c.header, Value::Null)
+                .header
+                .confidential
+        );
+        // The error path stays deliverable: it carries no value, and a
+        // confidential error to an unattested caller would swallow the reason
+        // the call failed.
+        assert!(
+            !Message::error_reply(&c.header, &Error::failed("no"))
+                .header
+                .confidential
+        );
+    }
+
+    #[test]
+    fn an_ordinary_message_does_not_pay_for_the_confidential_flag() {
+        let json = serde_json::to_string(&call()).unwrap();
+        assert!(!json.contains("confidential"), "{json}");
+    }
+
+    #[test]
+    fn a_header_from_a_peer_that_predates_the_flag_reads_as_not_confidential() {
+        // Adding an optional field is a compatible change only if the old wire
+        // form still parses. This is that guarantee, asserted rather than
+        // assumed.
+        let old = serde_json::json!({
+            "kind": "method_call",
+            "serial": 1,
+            "destination": "ai.tinyhumans.openhuman.Voice",
+            "path": "/ai/tinyhumans/openhuman/Voice",
+            "interface": "ai.tinyhumans.openhuman.Voice",
+            "member": "Transcribe"
+        });
+        let header: Header = serde_json::from_value(old).unwrap();
+        assert!(!header.confidential);
     }
 
     #[test]

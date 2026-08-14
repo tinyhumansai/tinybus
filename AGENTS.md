@@ -103,6 +103,17 @@ discussion in the pull request:
   control story in full.
 - **Every call has a deadline.** It cannot be disabled. A call with no deadline
   reintroduces the hang that motivated the project.
+- **A confidential message goes to a loaded, hash-verified module or to
+  nobody.** Only a module whose artifact the host hashed against its allowlist
+  before `dlopen` may receive one; a peer reached across a transport never can,
+  by design rather than by omission. The message is never fanned out to a
+  subscriber, never printed by `monitor`, and never carried by a signal. This is
+  admission control, not isolation — a loaded module is already inside the trust
+  boundary and could read host memory directly; what the rule buys is that the
+  bus will not be the delivery mechanism for unverified code. `confidential` is
+  the one header field the broker does not overwrite on ingress, because it can
+  only ever restrict the sender's own traffic. See
+  `docs/modules/attest/README.md`.
 - **A misbehaving peer must not affect another peer.** Bounded per-peer queues,
   best-effort signal delivery, and an accept loop that survives a bad client are
   all this invariant. Any change that lets one peer's slowness reach another's

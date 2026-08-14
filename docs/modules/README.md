@@ -13,6 +13,7 @@ behaviours other modules rely on.
 | `transport` | [transport/README.md](transport/README.md) |
 | `router` | [router/README.md](router/README.md) |
 | `broker` | [broker/README.md](broker/README.md) |
+| `attest` | [attest/README.md](attest/README.md) |
 | `connection` | [connection/README.md](connection/README.md) |
 | `proxy` | [proxy/README.md](proxy/README.md) |
 | `service` | [service/README.md](service/README.md) |

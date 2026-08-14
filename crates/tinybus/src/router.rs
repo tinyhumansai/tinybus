@@ -27,6 +27,7 @@ use std::collections::HashMap;
 
 use tokio::sync::mpsc;
 
+use crate::attest::Attestation;
 use crate::error::{Error, Result};
 use crate::message::{Message, MessageKind};
 use crate::name::{BusName, InterfaceName, MemberName, ObjectPath};
@@ -175,6 +176,14 @@ struct Peer {
     /// and a peer that never announces stays routable, so manifests can be
     /// adopted one service at a time rather than as a flag day.
     manifest: Option<PeerManifest>,
+    /// What the host verified about this peer, per name it owns.
+    ///
+    /// Keyed by name rather than one per peer because a peer may hold several
+    /// well-known names and the operator allowlists an artifact *for a name*.
+    /// Empty for every peer until a module load actually verifies one — the
+    /// absence of an entry is what refuses a confidential delivery, so an
+    /// ordinary out-of-process peer is ineligible by construction.
+    attestations: HashMap<BusName, Attestation>,
 }
 
 /// Who is attached, what they are called, and what they want to hear.
@@ -211,6 +220,7 @@ impl Router {
                 outbox,
                 matches: Vec::new(),
                 manifest: None,
+                attestations: HashMap::new(),
             },
         );
         self.names.insert(unique.clone(), id);
@@ -382,6 +392,70 @@ impl Router {
         self.peers.get(id).map(|p| p.unique.clone())
     }
 
+    /// Record what the host verified about the peer owning `name`.
+    ///
+    /// Gated with module loading, because that is the only thing that can
+    /// produce an attestation. Without it nothing is ever attested and every
+    /// confidential delivery is refused, which is the correct behaviour for a
+    /// build that cannot load a module in the first place.
+    #[cfg(feature = "modules")]
+    ///
+    /// Stored against the peer, so it dies with the peer: a service that exits
+    /// takes its attestation with it, and the next process to claim the name
+    /// has to earn its own. Nothing here is ever copied forward on a name
+    /// handover, which is what stops a released name carrying its predecessor's
+    /// trust to whoever grabs it next.
+    pub fn set_attestation(&mut self, id: u64, attestation: Attestation) {
+        if let Some(peer) = self.peers.get_mut(&id) {
+            peer.attestations
+                .insert(attestation.name.clone(), attestation);
+        }
+    }
+
+    /// [`Router::set_attestation`] addressed by the peer's unique name, for the
+    /// module host, which holds that rather than the internal peer id.
+    #[cfg(feature = "modules")]
+    pub(crate) fn set_attestation_for_unique(
+        &mut self,
+        unique: &BusName,
+        attestation: Attestation,
+    ) {
+        if let Some(id) = self.names.get(unique).copied() {
+            self.set_attestation(id, attestation);
+        }
+    }
+
+    /// What the broker verified about whoever owns `name`, if anything.
+    pub fn attestation_of(&self, name: &BusName) -> Option<Attestation> {
+        let id = self.names.get(name)?;
+        self.peers.get(id)?.attestations.get(name).cloned()
+    }
+
+    /// The outbox of whoever owns `destination`, but only if the host has
+    /// verified that peer's artifact *for that name*.
+    ///
+    /// The lookup and the check are one operation on purpose. Resolving first
+    /// and checking after would leave a window in which a caller could hold a
+    /// sender for an unattested peer, and every such window eventually becomes
+    /// a delivery.
+    pub fn resolve_attested(&self, destination: &BusName) -> Result<mpsc::Sender<Message>> {
+        let id = self
+            .names
+            .get(destination)
+            .ok_or_else(|| Error::NameHasNoOwner(destination.clone()))?;
+        let peer = self
+            .peers
+            .get(id)
+            .ok_or_else(|| Error::NameHasNoOwner(destination.clone()))?;
+        if !peer.attestations.contains_key(destination) {
+            return Err(Error::not_attested(
+                destination.clone(),
+                "only a loaded module with a verified artifact may receive a secret",
+            ));
+        }
+        Ok(peer.outbox.clone())
+    }
+
     /// The outbox of whoever owns `destination`.
     pub fn resolve(&self, destination: &BusName) -> Result<mpsc::Sender<Message>> {
         let id = self
@@ -399,7 +473,15 @@ impl Router {
     /// Excluding the sender is not an optimisation: a service that both emits
     /// and subscribes on the same interface would otherwise hear its own
     /// signal and, if it re-emits in response, loop.
+    /// A confidential message has no subscribers, whatever anyone matched.
+    /// `validate` already refuses confidential signals on ingress, so this can
+    /// only fire if some future path builds one internally — and the cost of
+    /// being wrong here is a secret delivered to every peer holding a match
+    /// rule, so it is checked twice rather than reasoned about once.
     pub fn subscribers(&self, signal: &Message, from: u64) -> Vec<mpsc::Sender<Message>> {
+        if signal.header.confidential {
+            return Vec::new();
+        }
         self.peers
             .iter()
             .filter(|(id, _)| **id != from)
@@ -411,6 +493,9 @@ impl Router {
     /// Every attached peer's outbox. Used for bus-generated announcements that
     /// still go through match filtering at the call site.
     pub fn broadcast_targets(&self, signal: &Message) -> Vec<mpsc::Sender<Message>> {
+        if signal.header.confidential {
+            return Vec::new();
+        }
         self.peers
             .values()
             .filter(|peer| peer.matches.iter().any(|rule| rule.matches(signal)))
@@ -580,5 +665,95 @@ mod tests {
         assert_eq!(router.subscribers(&sig, a).len(), 1);
         router.remove_match(b, &rule);
         assert!(router.subscribers(&sig, a).is_empty());
+    }
+
+    #[cfg(feature = "modules")]
+    fn attestation(name: &str) -> Attestation {
+        Attestation {
+            name: BusName::new(name).unwrap(),
+            sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_confidential_message_reaches_no_subscriber_however_broad_the_rule() {
+        let mut router = Router::default();
+        let (a, _) = router.attach(outbox());
+        router.attach(outbox());
+        // An empty rule matches everything, which is the worst case: if any
+        // rule could pull in a secret, this one would.
+        router.add_match(a, MatchRule::new());
+
+        let mut sig = signal("ai.tinyhumans.Test", "Tick", "/");
+        assert_eq!(router.subscribers(&sig, 99).len(), 1);
+        assert_eq!(router.broadcast_targets(&sig).len(), 1);
+
+        sig.header.confidential = true;
+        assert!(router.subscribers(&sig, 99).is_empty());
+        assert!(router.broadcast_targets(&sig).is_empty());
+    }
+
+    #[test]
+    fn an_unattested_owner_routes_normally_but_never_confidentially() {
+        let mut router = Router::default();
+        let (id, _) = router.attach(outbox());
+        let name = BusName::new("ai.tinyhumans.openhuman.Wallet").unwrap();
+        router.request_name(id, name.clone()).unwrap();
+
+        assert!(router.resolve(&name).is_ok());
+        assert_eq!(router.attestation_of(&name), None);
+        let error = router.resolve_attested(&name).unwrap_err();
+        assert_eq!(error.wire_name(), Error::NOT_ATTESTED);
+    }
+
+    #[cfg(feature = "modules")]
+    #[test]
+    fn an_attested_owner_can_receive_a_confidential_message() {
+        let mut router = Router::default();
+        let (id, _) = router.attach(outbox());
+        let name = BusName::new("ai.tinyhumans.openhuman.Wallet").unwrap();
+        router.request_name(id, name.clone()).unwrap();
+        router.set_attestation(id, attestation(name.as_str()));
+
+        assert!(router.resolve_attested(&name).is_ok());
+        assert_eq!(
+            router.attestation_of(&name),
+            Some(attestation(name.as_str()))
+        );
+    }
+
+    #[cfg(feature = "modules")]
+    #[test]
+    fn an_attestation_is_bound_to_the_name_it_was_verified_for() {
+        // Holding two names must not let trust earned for one carry to the
+        // other: the operator allowlisted an artifact *as the wallet*, not as
+        // everything that process might also answer to.
+        let mut router = Router::default();
+        let (id, _) = router.attach(outbox());
+        let wallet = BusName::new("ai.tinyhumans.openhuman.Wallet").unwrap();
+        let voice = BusName::new("ai.tinyhumans.openhuman.Voice").unwrap();
+        router.request_name(id, wallet.clone()).unwrap();
+        router.request_name(id, voice.clone()).unwrap();
+        router.set_attestation(id, attestation(wallet.as_str()));
+
+        assert!(router.resolve_attested(&wallet).is_ok());
+        assert!(router.resolve_attested(&voice).is_err());
+    }
+
+    #[cfg(feature = "modules")]
+    #[test]
+    fn a_dead_peers_attestation_does_not_survive_it() {
+        let mut router = Router::default();
+        let (id, _) = router.attach(outbox());
+        let name = BusName::new("ai.tinyhumans.openhuman.Wallet").unwrap();
+        router.request_name(id, name.clone()).unwrap();
+        router.set_attestation(id, attestation(name.as_str()));
+        router.detach(id);
+
+        // Whoever claims the name next inherits nothing and must earn its own.
+        let (next, _) = router.attach(outbox());
+        router.request_name(next, name.clone()).unwrap();
+        assert_eq!(router.attestation_of(&name), None);
+        assert!(router.resolve_attested(&name).is_err());
     }
 }

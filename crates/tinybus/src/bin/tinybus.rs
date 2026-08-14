@@ -53,6 +53,10 @@ enum Command {
         /// Positional arguments as a JSON array. Defaults to `[]`.
         #[arg(default_value = "[]")]
         args: String,
+        /// Send the body confidentially: the bus refuses to deliver it unless
+        /// it has verified the destination's artifact itself.
+        #[arg(long)]
+        confidential: bool,
     },
 
     /// Emit a signal.
@@ -222,13 +226,18 @@ async fn run(cli: Cli) -> Result<()> {
             interface,
             member,
             args,
+            confidential,
         } => {
             let connection = connect(&address).await?;
             let args: serde_json::Value = serde_json::from_str(&args)?;
             let proxy = connection
                 .proxy(&destination, &path, &interface)?
                 .with_timeout(timeout);
-            let reply: serde_json::Value = proxy.call(&member, args).await?;
+            let reply: serde_json::Value = if confidential {
+                proxy.call_confidential(&member, args).await?
+            } else {
+                proxy.call(&member, args).await?
+            };
             println!("{}", serde_json::to_string_pretty(&reply)?);
             Ok(())
         }
@@ -499,10 +508,16 @@ fn render(message: &tinybus::Message) -> String {
         .map(|i| i.to_string())
         .unwrap_or_default();
     let member = h.member.as_ref().map(|m| m.to_string()).unwrap_or_default();
-    format!(
-        "{kind:<6} {sender:<10} {path} {interface}.{member} {}",
-        message.body
-    )
+    // The monitor is a terminal, a scrollback buffer and often a pasted bug
+    // report. A confidential body must not reach any of them, and the routing
+    // rules mean one should never arrive here in the first place — so this is
+    // the second lock on a door that is already shut.
+    let body = if h.confidential {
+        "<confidential>".to_string()
+    } else {
+        message.body.to_string()
+    };
+    format!("{kind:<6} {sender:<10} {path} {interface}.{member} {body}")
 }
 
 #[cfg(test)]
@@ -651,6 +666,7 @@ mod tests {
             address: Some(address.clone()),
             timeout: 1,
             command: Command::Call {
+                confidential: false,
                 destination: DESTINATION.into(),
                 path: PATH.into(),
                 interface: INTERFACE.into(),
@@ -781,6 +797,7 @@ mod tests {
                 interface: INTERFACE.into(),
                 member: "Echo".into(),
                 args: "not json".into(),
+                confidential: false,
             },
             Command::Emit {
                 path: PATH.into(),

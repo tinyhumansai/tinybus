@@ -607,6 +607,25 @@ impl ModuleHost {
                 return Err(error);
             }
         };
+        // A module that matched `modules.toml` is an attested recipient: the
+        // host hashed its artifact against a list the operator installed, which
+        // is the same fact the trust store asserts about an out-of-process peer.
+        // Re-read rather than plumbed down from the gate, and fails closed —
+        // an artifact that changed underneath us no longer matches, so it does
+        // not become attested.
+        if let Ok(Some(sha256)) = std::fs::File::open(path)
+            .map_err(Error::from)
+            .and_then(|file| allowlisted_hash(path, file))
+        {
+            self.inner.broker.attest_module(
+                &unique,
+                crate::attest::Attestation {
+                    name: admitted.manifest.bus_name.clone(),
+                    sha256,
+                },
+            );
+        }
+
         let broker = self.inner.broker.clone();
         let ready_transport = transport.clone();
         let module_name = admitted.name.clone();
@@ -1171,12 +1190,23 @@ fn check_file(path: &Path) -> Result<()> {
 }
 
 fn check_allowlist(path: &Path, file: std::fs::File) -> Result<()> {
+    allowlisted_hash(path, file).map(|_| ())
+}
+
+/// The artifact's verified SHA-256, or `None` where the directory carries no
+/// allowlist at all.
+///
+/// Splitting the value out of the gate is what lets a loaded module become an
+/// attested recipient: the hash the operator vouched for is exactly the fact a
+/// confidential sender needs, and recomputing it later from a file that may
+/// since have changed would attest something nobody checked.
+fn allowlisted_hash(path: &Path, file: std::fs::File) -> Result<Option<String>> {
     let Some(directory) = path.parent() else {
-        return Ok(());
+        return Ok(None);
     };
     let allowlist = directory.join("modules.toml");
     if !allowlist.exists() {
-        return Ok(());
+        return Ok(None);
     }
     let source = std::fs::read_to_string(&allowlist)
         .map_err(|_| Error::module_refused(path, "module allowlist is unreadable"))?;
@@ -1188,23 +1218,16 @@ fn check_allowlist(path: &Path, file: std::fs::File) -> Result<()> {
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or("");
-    let expected = source.lines().find_map(|line| {
-        let line = line.split('#').next()?.trim();
-        if line.is_empty() || line.starts_with('[') {
-            return None;
-        }
-        let (key, value) = line.split_once('=')?;
-        let key = key.trim().trim_matches(['"', '\'']);
-        (key == file_name || key == file_stem)
-            .then(|| value.trim().trim_matches(['"', '\'']).to_ascii_lowercase())
-    });
+    let expected = crate::attest::parse_allowlist(&source)
+        .find(|(key, _)| key == file_name || key == file_stem)
+        .map(|(_, value)| value);
     let Some(expected) = expected else {
         return Err(Error::module_refused(
             path,
             "artifact is absent from the module allowlist",
         ));
     };
-    if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if !crate::attest::is_hex_sha256(&expected) {
         return Err(Error::module_refused(
             path,
             "module allowlist contains an invalid hash",
@@ -1218,7 +1241,7 @@ fn check_allowlist(path: &Path, file: std::fs::File) -> Result<()> {
             "artifact hash does not match the module allowlist",
         ));
     }
-    Ok(())
+    Ok(Some(actual))
 }
 
 fn has_library_extension(path: &Path) -> bool {

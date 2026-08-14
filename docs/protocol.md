@@ -55,6 +55,7 @@ omitted field and a `null` field identically.
 | `interface` | interface name | `method_call`, `signal` |
 | `member` | member name | `method_call`, `signal` |
 | `error_name` | dotted string | `error` |
+| `confidential` | bool, omitted when false | `method_call`, `method_return` |
 
 `body` is a positional JSON array for calls and signals, and a single JSON value
 for returns. `error` bodies are a string: the human-readable message, without
@@ -62,6 +63,40 @@ the error name, which travels in `error_name`.
 
 A peer **may** set `sender`; the broker overwrites it unconditionally. Nothing
 downstream may trust a `sender` that did not come from the broker.
+
+### `confidential`
+
+A peer **may** set `confidential`, and the broker does **not** overwrite it. The
+asymmetry with `sender` is deliberate: the flag can only cause more
+restrictions, so a peer that sets it restricts its own traffic and nobody
+else's.
+
+A broker that sees it **must**:
+
+- refuse a `signal` carrying it, and refuse any message carrying it without a
+  `destination`;
+- refuse a `method_call` carrying it unless the destination is a well-known name
+  owned by a recipient the host has attested, replying
+  `ai.tinyhumans.tinybus.Error.NotAttested`;
+- never deliver the message to a match-rule subscriber, and never log its body.
+
+A recipient is attested only by being an in-process module whose artifact the
+host hashed against its allowlist before loading it. A peer reached across a
+transport is never attested and so never receives a confidential message.
+
+The field is optional and defaults to false, so an older broker parses the
+message and routes it as an ordinary call. A sender that needs the guarantee
+must therefore confirm it first, by calling `GetAttestation` and requiring a
+non-null answer — a `null` answer, or an `UnknownMethod` error from a broker too
+old to have the method, both mean the guarantee is unavailable.
+
+`confidential` covers the body of the message carrying it, and a bulk stream is
+not that body. A stream's bytes travel as separate `Stream.Write` calls (see
+[Bulk streams](#bulk-streams)) which carry no `confidential` flag and are
+therefore routed without an attestation check — putting a `StreamRef` in a
+confidential call protects the handle, not the payload it names. There is
+currently no confidential stream; a secret that must be attested has to fit in
+the body of the call itself.
 
 ## Names
 
@@ -102,6 +137,7 @@ interface `ai.tinyhumans.tinybus.Bus`.
 | `GetManifest` | `[name]` | that peer's manifest, or `null` |
 | `ListPeers` | `[]` | unique names, owned names, and peer manifests |
 | `GetNameOwner` | `[name]` | the owner's unique name, or `null` |
+| `GetAttestation` | `[name]` | what the host verified about that owner, or `null` |
 | `AddMatch` | `[rule]` | `null` |
 | `RemoveMatch` | `[rule]` | `null` |
 | `ListModules` | `[]` | every module known to the embedded host |
