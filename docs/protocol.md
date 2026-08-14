@@ -94,9 +94,18 @@ old to have the method, both mean the guarantee is unavailable.
 not that body. A stream's bytes travel as separate `Stream.Write` calls (see
 [Bulk streams](#bulk-streams)) which carry no `confidential` flag and are
 therefore routed without an attestation check — putting a `StreamRef` in a
-confidential call protects the handle, not the payload it names. There is
-currently no confidential stream; a secret that must be attested has to fit in
-the body of the call itself.
+confidential call would protect the handle, not the payload it names.
+
+A sender **must** therefore refuse to send a confidential message whose body
+carries a stream handle, and tinybus does: the call fails locally, before the
+message leaves the process. This is a rule for *senders*, not for brokers. A
+broker cannot enforce it, because finding a handle means reading the body, and
+reading a confidential body is precisely what the flag forbids — so a broker
+never attempts it and never relies on peers having got it right.
+
+There is still no confidential stream; a secret that must be attested has to fit
+in the body of the call itself. What the refusal removes is the silent version
+of that gap, where a caller believed otherwise.
 
 ## Names
 

@@ -981,3 +981,44 @@ async fn a_receiver_does_not_reserve_memory_for_a_length_the_sender_merely_claim
         bytes.len()
     );
 }
+
+#[test]
+fn a_stream_handle_is_detected_wherever_it_sits_in_a_body() {
+    use crate::stream::body_contains_stream_ref;
+
+    let handle = serde_json::to_value(StreamRef {
+        id: "s1".to_string(),
+        content_type: Some("application/pdf".to_string()),
+        len: Some(1024),
+    })
+    .unwrap();
+
+    // Bare, nested in the positional argument array a call actually sends, and
+    // buried inside a struct — a caller can put it anywhere, so all of them
+    // have to be found.
+    assert!(body_contains_stream_ref(&handle));
+    assert!(body_contains_stream_ref(&serde_json::json!([handle])));
+    assert!(body_contains_stream_ref(&serde_json::json!([{
+        "attachment": handle,
+        "subject": "invoice"
+    }])));
+    assert!(body_contains_stream_ref(&serde_json::json!({
+        "id": "s7"
+    })));
+}
+
+#[test]
+fn an_ordinary_body_is_not_mistaken_for_a_stream_handle() {
+    use crate::stream::body_contains_stream_ref;
+
+    // An `id` alongside other fields is an ordinary record, not a handle;
+    // `deny_unknown_fields` is what keeps these out.
+    assert!(!body_contains_stream_ref(&serde_json::json!([{
+        "id": "account-1",
+        "balance": 10
+    }])));
+    assert!(!body_contains_stream_ref(&serde_json::json!(["s1"])));
+    assert!(!body_contains_stream_ref(&serde_json::json!([{ "id": 7 }])));
+    assert!(!body_contains_stream_ref(&serde_json::json!([])));
+    assert!(!body_contains_stream_ref(&serde_json::Value::Null));
+}

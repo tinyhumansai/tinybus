@@ -48,9 +48,34 @@ ineligible to receive them.
 
 A second thing it does not cover: **bulk streams**. A stream's bytes move as
 their own `Stream.Write` calls, which carry no `confidential` flag and so are
-routed without this check. Putting a `StreamRef` in a confidential call attests
-the recipient of the *handle*, not of the payload — so a secret large enough to
-want a stream currently has no attested way to travel. See
+routed without this check. Putting a `StreamRef` in a confidential call would
+attest the recipient of the *handle*, not of the payload.
+
+Rather than leave that as a trap, it is **refused**. A confidential call whose
+body carries a stream handle fails before it is sent:
+
+```text
+a confidential call cannot carry a stream handle: the stream's bytes travel as
+separate unattested writes, so the payload would not be confidential even
+though the handle was
+```
+
+The refusal happens in the **sending peer's own process**, not at the broker,
+and that placement is forced: spotting a handle means reading the body, and a
+broker that read a confidential body would be the very thing confidentiality
+exists to prevent. The sender already owns the body it just built, so it is the
+only party that can look without breaking the rule.
+
+Matching is structural — an object whose keys are exactly a `StreamRef`'s, with
+`id` present — and never looks inside `id`, which is documented as opaque. The
+cost is that a bare `{"id": "…"}` in a confidential body is refused even when it
+was never a handle. That is the direction to be wrong in: the failure is loud,
+local, and fixed by restructuring the call, whereas the alternative failure is a
+secret leaving unattested and nobody finding out.
+
+A secret large enough to want a stream therefore still has no attested way to
+travel. Confidential bulk transfer is its own piece of work; what this closes is
+the silent version of the gap. See
 [the protocol's `confidential` section](../../protocol.md#confidential).
 
 A third case worth naming explicitly: a module loaded from a GitHub release

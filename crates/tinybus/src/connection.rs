@@ -569,6 +569,19 @@ impl Connection {
         let serial = self.inner.serial.fetch_add(1, Ordering::Relaxed);
         message.header.serial = serial;
         message.validate()?;
+        // Refused here, in the sender's own process, rather than at the broker.
+        // A stream's bytes travel as their own unflagged `Write` calls, so a
+        // handle in a confidential body protects the handle and not the payload
+        // — and the broker cannot catch that for us, because seeing the handle
+        // would mean reading a confidential body. Checked only when the flag is
+        // set, so ordinary traffic pays nothing.
+        if message.header.confidential && crate::stream::body_contains_stream_ref(&message.body) {
+            return Err(Error::protocol(
+                "a confidential call cannot carry a stream handle: the stream's bytes \
+                 travel as separate unattested writes, so the payload would not be \
+                 confidential even though the handle was",
+            ));
+        }
         let member = message.member_or_unknown();
 
         let (tx, rx) = oneshot::channel();
