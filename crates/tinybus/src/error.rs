@@ -77,7 +77,11 @@ pub enum Error {
         /// The destination that failed attestation.
         name: BusName,
         /// Why the broker would not vouch for it.
-        reason: String,
+        ///
+        /// Fixed text, not caller-composed: this error travels back across
+        /// the bus, and a `String` here would be a standing invitation for a
+        /// future call site to interpolate something it shouldn't.
+        reason: &'static str,
     },
 
     /// `RequestName` lost: another peer already owns it and did not allow
