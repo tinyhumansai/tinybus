@@ -1188,14 +1188,19 @@ async fn one_refused_module_does_not_stop_the_others_in_the_directory_from_loadi
 /// ("Exercise the real loader (Windows)"), and gating this helper off would
 /// leave them referencing a function that does not exist there.
 fn staged_module(artifact: &Path, hash: &str) -> (tempfile::TempDir, PathBuf) {
-    // Staged inside the crate, not in `/tmp`: the loader refuses to load from a
-    // directory another user could write to, and `/tmp` is exactly that. The
-    // refusal is the admission check doing its job, so the test works with it
-    // rather than around it.
-    let dir = tempfile::Builder::new()
-        .prefix(".attestation-test-")
-        .tempdir_in(env!("CARGO_MANIFEST_DIR"))
-        .unwrap();
+    // Staged under the *current directory*, not `/tmp` and not
+    // `CARGO_MANIFEST_DIR`. Two separate constraints pin this down:
+    //
+    // `/tmp` is out because the loader refuses a directory another user could
+    // write to, which is the admission check doing its job.
+    //
+    // `CARGO_MANIFEST_DIR` is out because it is a compile-time absolute path,
+    // and on Windows CI a directory created under it is refused by that same
+    // check while one created under `current_dir()` is not. The other
+    // real-loader tests in this file already use `current_dir()` and pass on
+    // Windows, so this matches the idiom that is known to work rather than
+    // inventing a second one.
+    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
     let file_name = artifact.file_name().unwrap();
     let staged = dir.path().join(file_name);
     std::fs::copy(artifact, &staged).unwrap();
