@@ -71,7 +71,19 @@ pub struct Attestation {
     /// is whether the code answering to `…Wallet` is what the operator
     /// allowlisted for `…Wallet`.
     pub name: BusName,
-    /// Lowercase hex SHA-256 of the artifact the host read at load time.
+    /// Lowercase hex SHA-256 of the bytes the operator vouched for.
+    ///
+    /// For a module loaded from disk that is the library file itself, hashed
+    /// against a `modules.toml` beside it. For one loaded from a pinned GitHub
+    /// release it is the release *archive* the library was extracted from —
+    /// the artifact named by the digest the host compiled in, and the only
+    /// value in that path any operator ever asserted. Hashing the extracted
+    /// library instead would report a number nobody had vouched for, computed
+    /// by the same code that would then be trusting it.
+    ///
+    /// A sender that pinned the digest itself can therefore compare this
+    /// against its own copy before parting with a secret, rather than taking
+    /// the host's word that some check happened.
     pub sha256: String,
 }
 

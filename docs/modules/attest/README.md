@@ -78,12 +78,38 @@ travel. Confidential bulk transfer is its own piece of work; what this closes is
 the silent version of the gap. See
 [the protocol's `confidential` section](../../protocol.md#confidential).
 
-A third case worth naming explicitly: a module loaded from a GitHub release
-extracts into a fresh temporary directory that holds no `modules.toml`, so
-`allowlisted_hash` finds nothing to compare against and the module is never
-attested — this is the fail-closed default working as intended, not a bug, but
-it means a GitHub-loaded module can never be a confidential recipient until the
-operator also places its digest in the local allowlist beside it.
+## Two ways to vouch for an artifact
+
+An operator asserts "these bytes are the ones I meant" in one of two places, and
+attestation accepts either.
+
+**A digest on disk.** `modules.toml` beside the library, which the host re-reads
+at load time rather than carrying the value down from the admission gate, so an
+artifact that changed underneath the check no longer matches and does not become
+attested.
+
+**A digest compiled into the host**, passed as `expected_sha256` to
+`load_github_release`. Before extracting anything, `acquire` fetches the
+release's own `checksum.toml`, refuses a disagreement between it and the caller's
+value, downloads the archive, and hashes the bytes it actually received. Only
+then is the library extracted and loaded. The attestation records the digest of
+that **archive** — the artifact the operator named — not a hash of the extracted
+`.so`, which nobody vouched for and which the host would only be computing in
+order to trust itself for it.
+
+A pinned digest is the stronger of the two statements, because it cannot be
+edited on the machine that runs it.
+
+Omitting `expected_sha256` leaves the release's own checksum manifest as the only
+claim about the bytes, which is a publisher vouching for itself rather than an
+operator vouching for the publisher. Such a module loads and is refused secrets.
+Loading from a directory with no allowlist behaves the same way: admissible, and
+ineligible.
+
+> Earlier revisions of this document described the release path as never
+> attestable — correct when written, and the reason a host could pin a digest
+> with great care and still have every confidential call refused. The pin was
+> verified twice and then discarded. It is now carried through.
 
 ## Not a signature, yet
 
