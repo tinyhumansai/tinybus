@@ -1194,6 +1194,27 @@ mod tests {
         assert_eq!(error.wire_name(), Error::NOT_ATTESTED);
     }
 
+    #[tokio::test]
+    async fn a_confidential_call_to_the_bus_itself_is_refused_before_its_body_is_parsed() {
+        // The bus's own service is never a loaded, hash-verified module, so it
+        // can never be an attested recipient. Before the fix this dispatch
+        // reached `handle_bus_call` -> `bus_method` -> `parse_args`, which
+        // deserializes the body — breaking "the broker never parses a body"
+        // for exactly the messages that must never be parsed. An ordinary
+        // (non-confidential) bus call must keep working.
+        let (_bus, _service, client) = bus().await;
+        let bus_proxy = client
+            .proxy(crate::BUS_NAME, crate::BUS_PATH, crate::BUS_INTERFACE)
+            .unwrap();
+        let error = bus_proxy
+            .call_confidential::<String>("GetId", ())
+            .await
+            .unwrap_err();
+        assert_eq!(error.wire_name(), Error::NOT_ATTESTED);
+        let id: String = bus_proxy.call("GetId", ()).await.unwrap();
+        assert!(id.starts_with("tinybus-"), "{id}");
+    }
+
     #[cfg(feature = "modules")]
     #[tokio::test]
     async fn a_confidential_call_reaches_a_module_the_host_verified() {
