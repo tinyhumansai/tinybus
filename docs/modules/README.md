@@ -18,6 +18,7 @@ behaviours other modules rely on.
 | `proxy` | [proxy/README.md](proxy/README.md) |
 | `service` | [service/README.md](service/README.md) |
 | `stream` | [stream/README.md](stream/README.md) |
+| `secret` | [secret/README.md](secret/README.md) |
 | `events` | source rustdoc (bounded domain-event fan-out) |
 | `global` | source rustdoc (one-time process-wide bus) |
 | `native` | source rustdoc (typed in-process request registry) |
