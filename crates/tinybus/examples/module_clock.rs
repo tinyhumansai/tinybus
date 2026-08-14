@@ -47,7 +47,7 @@ tinybus_module::module_export! {
     signals = [],
     requires = [],
     optional = [],
-    lazy = false,
+    lazy = true,
 }
 
 #[cfg(test)]

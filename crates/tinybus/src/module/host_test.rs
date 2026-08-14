@@ -181,6 +181,69 @@ async fn a_lazy_module_initializes_on_the_first_call_and_two_racing_callers_init
 }
 
 #[tokio::test]
+async fn a_lazy_manifest_registers_an_unmapped_library_and_the_first_call_loads_it() {
+    let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let extension = if cfg!(windows) {
+        "dll"
+    } else if cfg!(target_os = "macos") {
+        "dylib"
+    } else {
+        "so"
+    };
+    let artifact = directory.path().join(format!("clock.{extension}"));
+    // These are deliberately not a dynamic library. Registration succeeding
+    // proves discovery did not ask the platform loader to map the artifact.
+    std::fs::write(&artifact, b"not loaded until the first call").unwrap();
+    let mut lazy_manifest = manifest();
+    lazy_manifest.lazy_init = true;
+    std::fs::write(
+        lazy_manifest_path(&artifact),
+        serde_json::to_vec(&lazy_manifest).unwrap(),
+    )
+    .unwrap();
+
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    let broker_task = broker.spawn(bus.clone());
+    let host = ModuleHost::new(broker);
+    #[cfg(not(windows))]
+    let info = {
+        let loaded = host.load_dir(directory.path()).unwrap();
+        assert_eq!(loaded.len(), 1);
+        loaded.into_iter().next().unwrap().unwrap()
+    };
+    #[cfg(windows)]
+    let info = {
+        // Windows module directories admit only their owner, LocalSystem, and
+        // Administrators. TempDir inherits a CI-runner ACE that is deliberately
+        // rejected before discovery, so exercise the same sidecar seam directly;
+        // the dedicated loader job covers a CI-provisioned private directory.
+        let discovered = read_lazy_manifest(&artifact).unwrap().unwrap();
+        host.register_lazy(&artifact, discovered, serde_json::json!({}))
+            .unwrap()
+    };
+    assert_eq!(info.state, ModuleState::Resolved);
+
+    let connection = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let proxy = connection
+        .proxy(
+            "ai.tinyhumans.module.Clock",
+            "/ai/tinyhumans/module/Clock",
+            "ai.tinyhumans.module.Clock",
+        )
+        .unwrap();
+    let error = proxy.call::<()>("Now", ()).await.unwrap_err();
+    assert_eq!(
+        error.wire_name(),
+        "ai.tinyhumans.tinybus.Error.ModuleUnavailable"
+    );
+    assert!(matches!(host.list()[0].state, ModuleState::Failed { .. }));
+    broker_task.abort();
+}
+
+#[tokio::test]
 async fn a_module_whose_init_fails_is_terminal_and_is_never_initialized_again() {
     FAILED_INIT_COUNT.store(0, Ordering::Release);
     let bus = MemoryBus::new();
