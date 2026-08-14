@@ -107,15 +107,25 @@ impl Secret {
 
 impl Drop for Secret {
     fn drop(&mut self) {
-        // Zeroize before unlocking and freeing: an unlocked-but-still-plaintext
-        // window, however brief, is exactly the exposure this type exists to
-        // shrink.
-        zeroize(&mut self.bytes);
+        // Zeroize the *whole allocation* — `capacity`, not `len` — before
+        // unlocking and freeing. A `Vec<u8>` handed to `Secret::new` after
+        // e.g. `key.truncate(32)` still has the truncated tail sitting in its
+        // spare capacity; `len` alone would free that tail in the clear.
+        //
+        // SAFETY: `self.bytes.as_mut_ptr()` is valid for `self.bytes.capacity()`
+        // bytes of writes — that is the definition of a `Vec`'s allocation —
+        // for as long as `self.bytes` has not been dropped, which it has not:
+        // `Vec`'s own `Drop` runs after this function returns. Bytes past
+        // `len` may be uninitialized; `zeroize_raw` only ever writes through
+        // the raw pointer and never reads or forms a `&mut [u8]` over that
+        // range, so the possible uninitialization is never observed.
+        unsafe { zeroize_raw(self.bytes.as_mut_ptr(), self.bytes.capacity()) };
         if self.locked {
             unlock_buffer(self.bytes.as_mut_ptr(), self.bytes.len());
         }
-        // `self.bytes` (now all zero) is freed by `Vec`'s own `Drop`, which
-        // runs immediately after this function returns.
+        // `self.bytes` (now all zero across its full allocation) is freed by
+        // `Vec`'s own `Drop`, which runs immediately after this function
+        // returns.
     }
 }
 
