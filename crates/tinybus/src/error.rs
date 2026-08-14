@@ -288,15 +288,12 @@ impl Error {
 
     /// Build an [`Error::NotAttested`] for `name`.
     ///
-    /// `reason` is chosen by the broker from a fixed set of phrases, never
-    /// composed from peer input: this error travels back to a caller that just
-    /// failed to send a secret, and it must not become a channel for describing
-    /// the recipient's filesystem.
-    pub fn not_attested(name: BusName, reason: impl Into<String>) -> Self {
-        Self::NotAttested {
-            name,
-            reason: reason.into(),
-        }
+    /// `reason` is a fixed `&'static str`, not `impl Into<String>`: this error
+    /// travels back to a caller that just failed to send a secret, and the
+    /// type itself is what stops a future call site from composing it out of
+    /// peer input.
+    pub fn not_attested(name: BusName, reason: &'static str) -> Self {
+        Self::NotAttested { name, reason }
     }
 
     /// Build an [`Error::Path`] for `path`.
