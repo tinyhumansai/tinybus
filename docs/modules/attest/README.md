@@ -119,3 +119,7 @@ cargo build --example module_clock --all-features
 TINYBUS_TEST_MODULE="$PWD/target/debug/examples/libmodule_clock.so" \
   cargo test --all-features -- --ignored
 ```
+
+The artifact name above is Linux's (`libmodule_clock.so`); on macOS Cargo
+builds `libmodule_clock.dylib` instead, so point `TINYBUS_TEST_MODULE` at that
+file when running the same command there.
