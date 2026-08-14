@@ -145,31 +145,15 @@ impl std::fmt::Display for Secret {
     }
 }
 
-/// Overwrites `bytes` with zero via a volatile write to every element,
-/// followed by a `SeqCst` compiler fence.
+/// Overwrites `len` bytes at `ptr` with zero via a volatile write to each
+/// byte, followed by a `SeqCst` compiler fence.
 ///
 /// A plain `bytes.fill(0)` immediately before the memory is freed is exactly
 /// the kind of store LLVM is permitted to prove dead and remove — nothing
 /// downstream ever reads it before the free. `write_volatile` forbids that
-/// optimization per-write, and the fence stops the compiler reordering *other*
-/// memory operations across the zeroization, so a caller that checks "is this
-/// zeroed yet" cannot observe the write out of order.
-///
-/// Takes an already-initialized `&mut [u8]`, so every byte in range is safe
-/// to address as a reference. [`zeroize_raw`] is the pointer-based sibling
-/// this delegates to, used directly wherever the range may include
-/// uninitialized bytes (a `Vec`'s spare capacity).
-fn zeroize(bytes: &mut [u8]) {
-    // SAFETY: `bytes.as_mut_ptr()` is valid for `bytes.len()` writes — the
-    // slice's own guarantee — and every one of those bytes is initialized,
-    // so nothing here relies on write-without-read soundness that `bytes`
-    // itself does not already provide.
-    unsafe { zeroize_raw(bytes.as_mut_ptr(), bytes.len()) };
-}
-
-/// Overwrites `len` bytes at `ptr` with zero via a volatile write to each
-/// byte, followed by a `SeqCst` compiler fence — see [`zeroize`] for why
-/// both of those matter.
+/// optimization per-write, and the fence stops the compiler reordering
+/// *other* memory operations across the zeroization, so a caller that
+/// checks "is this zeroed yet" cannot observe the write out of order.
 ///
 /// Deliberately takes a raw pointer rather than a `&mut [u8]`: the caller in
 /// [`Secret`]'s `Drop` needs to zero a `Vec`'s full `capacity`, and the bytes
