@@ -179,8 +179,7 @@ impl Broker {
                     .ok_or_else(|| Error::protocol("message has no destination"))?;
 
                 if destination.as_str() == crate::BUS_NAME {
-                    if message.header.confidential
-                        && message.header.kind == MessageKind::MethodCall
+                    if message.header.confidential && message.header.kind == MessageKind::MethodCall
                     {
                         // The bus's own service is not a loaded, hash-verified
                         // module and can never be an attested recipient.
