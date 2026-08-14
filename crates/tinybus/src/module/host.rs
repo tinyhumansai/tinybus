@@ -186,6 +186,9 @@ struct ModuleHostInner {
     rejected: Mutex<Vec<ModuleInfo>>,
     directories: Mutex<Vec<PathBuf>>,
     configs: Mutex<HashMap<String, serde_json::Value>>,
+    // Extracted release directories stay alive because a module may need to
+    // resolve sibling files for the lifetime of its mapped library.
+    artifacts: Mutex<Vec<tempfile::TempDir>>,
     warned: AtomicBool,
 }
 
@@ -197,6 +200,13 @@ pub(crate) trait ModuleControl: Send + Sync {
     fn load(
         self: Arc<Self>,
         path: PathBuf,
+        config: serde_json::Value,
+    ) -> Result<(ModuleInfo, Option<ModuleTransition>)>;
+    fn load_github(
+        self: Arc<Self>,
+        release_url: String,
+        asset_name: String,
+        sha256: String,
         config: serde_json::Value,
     ) -> Result<(ModuleInfo, Option<ModuleTransition>)>;
     async fn stop(&self, name: &str, deadline: Duration) -> Result<ModuleInfo>;
@@ -223,6 +233,7 @@ impl ModuleHost {
             rejected: Mutex::new(Vec::new()),
             directories: Mutex::new(Vec::new()),
             configs: Mutex::new(HashMap::new()),
+            artifacts: Mutex::new(Vec::new()),
             warned: AtomicBool::new(false),
         });
         let control: Arc<dyn ModuleControl> = inner.clone();
@@ -277,6 +288,34 @@ impl ModuleHost {
     /// Load one newly installed module.
     pub fn load_file(&self, path: impl AsRef<Path>) -> Result<ModuleInfo> {
         self.load_file_with_config(path, serde_json::json!({}))
+    }
+
+    /// Download and load one verified GitHub release asset.
+    ///
+    /// `release_url` must be a tag URL such as
+    /// `https://github.com/tinyhumansai/rust-template/releases/tag/v0.1.2`.
+    /// The release must publish a `checksum.toml` or `checksum.json` asset
+    /// containing the SHA-256 for `asset_name`. When supplied, the host's
+    /// expected digest must agree with the release manifest as well.
+    pub fn load_github_release(
+        &self,
+        release_url: impl AsRef<str>,
+        asset_name: impl AsRef<str>,
+        expected_sha256: Option<&str>,
+        config: serde_json::Value,
+    ) -> Result<ModuleInfo> {
+        let (directory, module) = crate::module::github::acquire(
+            release_url.as_ref(),
+            asset_name.as_ref(),
+            expected_sha256,
+        )?;
+        let info = self.load_file_with_config(&module, config)?;
+        self.inner
+            .artifacts
+            .lock()
+            .expect("module artifact lock")
+            .push(directory);
+        Ok(info)
     }
 
     /// Admit and initialize an already-resolved module without calling the
@@ -756,6 +795,25 @@ impl ModuleHost {
                 return Err(error);
             }
         };
+        // A module that matched `modules.toml` is an attested recipient: the
+        // host hashed its artifact against a list the operator installed, which
+        // is the same fact the trust store asserts about an out-of-process peer.
+        // Re-read rather than plumbed down from the gate, and fails closed —
+        // an artifact that changed underneath us no longer matches, so it does
+        // not become attested.
+        if let Ok(Some(sha256)) = std::fs::File::open(path)
+            .map_err(Error::from)
+            .and_then(|file| allowlisted_hash(path, file))
+        {
+            self.inner.broker.attest_module(
+                &unique,
+                crate::attest::Attestation {
+                    name: admitted.manifest.bus_name.clone(),
+                    sha256,
+                },
+            );
+        }
+
         let broker = self.inner.broker.clone();
         let ready_transport = transport.clone();
         let module_name = admitted.name.clone();
@@ -973,6 +1031,27 @@ impl ModuleControl for ModuleHostInner {
         config: serde_json::Value,
     ) -> Result<(ModuleInfo, Option<ModuleTransition>)> {
         let info = ModuleHost { inner: self }.load_file_with_config(path, config)?;
+        let transition = Some((
+            info.name.clone(),
+            ModuleState::Discovered,
+            info.state.clone(),
+        ));
+        Ok((info, transition))
+    }
+
+    fn load_github(
+        self: Arc<Self>,
+        release_url: String,
+        asset_name: String,
+        sha256: String,
+        config: serde_json::Value,
+    ) -> Result<(ModuleInfo, Option<ModuleTransition>)> {
+        let info = ModuleHost { inner: self }.load_github_release(
+            release_url,
+            asset_name,
+            Some(&sha256),
+            config,
+        )?;
         let transition = Some((
             info.name.clone(),
             ModuleState::Discovered,
@@ -1418,12 +1497,23 @@ fn check_file(path: &Path) -> Result<()> {
 }
 
 fn check_allowlist(path: &Path, file: std::fs::File) -> Result<()> {
+    allowlisted_hash(path, file).map(|_| ())
+}
+
+/// The artifact's verified SHA-256, or `None` where the directory carries no
+/// allowlist at all.
+///
+/// Splitting the value out of the gate is what lets a loaded module become an
+/// attested recipient: the hash the operator vouched for is exactly the fact a
+/// confidential sender needs, and recomputing it later from a file that may
+/// since have changed would attest something nobody checked.
+fn allowlisted_hash(path: &Path, file: std::fs::File) -> Result<Option<String>> {
     let Some(directory) = path.parent() else {
-        return Ok(());
+        return Ok(None);
     };
     let allowlist = directory.join("modules.toml");
     if !allowlist.exists() {
-        return Ok(());
+        return Ok(None);
     }
     let source = std::fs::read_to_string(&allowlist)
         .map_err(|_| Error::module_refused(path, "module allowlist is unreadable"))?;
@@ -1435,23 +1525,16 @@ fn check_allowlist(path: &Path, file: std::fs::File) -> Result<()> {
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or("");
-    let expected = source.lines().find_map(|line| {
-        let line = line.split('#').next()?.trim();
-        if line.is_empty() || line.starts_with('[') {
-            return None;
-        }
-        let (key, value) = line.split_once('=')?;
-        let key = key.trim().trim_matches(['"', '\'']);
-        (key == file_name || key == file_stem)
-            .then(|| value.trim().trim_matches(['"', '\'']).to_ascii_lowercase())
-    });
+    let expected = crate::attest::parse_allowlist(&source)
+        .find(|(key, _)| key == file_name || key == file_stem)
+        .map(|(_, value)| value);
     let Some(expected) = expected else {
         return Err(Error::module_refused(
             path,
             "artifact is absent from the module allowlist",
         ));
     };
-    if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if !crate::attest::is_hex_sha256(&expected) {
         return Err(Error::module_refused(
             path,
             "module allowlist contains an invalid hash",
@@ -1465,7 +1548,7 @@ fn check_allowlist(path: &Path, file: std::fs::File) -> Result<()> {
             "artifact hash does not match the module allowlist",
         ));
     }
-    Ok(())
+    Ok(Some(actual))
 }
 
 fn has_library_extension(path: &Path) -> bool {
@@ -1515,7 +1598,7 @@ fn check_directory(path: &Path) -> Result<()> {
 fn unix_directory_refusal(owner: u32, mode: u32, current_uid: u32) -> Option<&'static str> {
     if owner != current_uid && owner != 0 {
         Some("module directory is owned by another user")
-    } else if mode & 0o022 != 0 {
+    } else if mode & 0o022 != 0 && mode & 0o1000 == 0 {
         Some("module directory is writable by another user")
     } else {
         None

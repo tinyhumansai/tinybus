@@ -55,6 +55,7 @@ omitted field and a `null` field identically.
 | `interface` | interface name | `method_call`, `signal` |
 | `member` | member name | `method_call`, `signal` |
 | `error_name` | dotted string | `error` |
+| `confidential` | bool, omitted when false | `method_call`, `method_return` |
 
 `body` is a positional JSON array for calls and signals, and a single JSON value
 for returns. `error` bodies are a string: the human-readable message, without
@@ -62,6 +63,40 @@ the error name, which travels in `error_name`.
 
 A peer **may** set `sender`; the broker overwrites it unconditionally. Nothing
 downstream may trust a `sender` that did not come from the broker.
+
+### `confidential`
+
+A peer **may** set `confidential`, and the broker does **not** overwrite it. The
+asymmetry with `sender` is deliberate: the flag can only cause more
+restrictions, so a peer that sets it restricts its own traffic and nobody
+else's.
+
+A broker that sees it **must**:
+
+- refuse a `signal` carrying it, and refuse any message carrying it without a
+  `destination`;
+- refuse a `method_call` carrying it unless the destination is a well-known name
+  owned by a recipient the host has attested, replying
+  `ai.tinyhumans.tinybus.Error.NotAttested`;
+- never deliver the message to a match-rule subscriber, and never log its body.
+
+A recipient is attested only by being an in-process module whose artifact the
+host hashed against its allowlist before loading it. A peer reached across a
+transport is never attested and so never receives a confidential message.
+
+The field is optional and defaults to false, so an older broker parses the
+message and routes it as an ordinary call. A sender that needs the guarantee
+must therefore confirm it first, by calling `GetAttestation` and requiring a
+non-null answer — a `null` answer, or an `UnknownMethod` error from a broker too
+old to have the method, both mean the guarantee is unavailable.
+
+`confidential` covers the body of the message carrying it, and a bulk stream is
+not that body. A stream's bytes travel as separate `Stream.Write` calls (see
+[Bulk streams](#bulk-streams)) which carry no `confidential` flag and are
+therefore routed without an attestation check — putting a `StreamRef` in a
+confidential call protects the handle, not the payload it names. There is
+currently no confidential stream; a secret that must be attested has to fit in
+the body of the call itself.
 
 ## Names
 
@@ -102,6 +137,7 @@ interface `ai.tinyhumans.tinybus.Bus`.
 | `GetManifest` | `[name]` | that peer's manifest, or `null` |
 | `ListPeers` | `[]` | unique names, owned names, and peer manifests |
 | `GetNameOwner` | `[name]` | the owner's unique name, or `null` |
+| `GetAttestation` | `[name]` | what the host verified about that owner, or `null` |
 | `AddMatch` | `[rule]` | `null` |
 | `RemoveMatch` | `[rule]` | `null` |
 | `ListModules` | `[]` | every module known to the embedded host |
@@ -128,6 +164,51 @@ announced as `ModuleStateChanged` with body
 `[module, old_state, new_state, detail]`; `detail` is `null` unless the new
 state has a safe refusal or fault reason.
 Name ownership changes still announce when a module attaches or stops.
+
+## Bulk streams
+
+A payload larger than one frame does not travel in a body. The sender opens a
+stream on the *receiving peer* and writes it as chunks; the method call carries
+only a handle. The broker is not involved beyond routing — every member below is
+an ordinary method call addressed to the receiving peer.
+
+Path `/ai/tinyhumans/tinybus/Stream`, interface `ai.tinyhumans.tinybus.Stream`.
+Every peer answers it, whether or not it exported anything.
+
+| Member | Body | Returns |
+| --- | --- | --- |
+| `Open` | `[{"content_type"?, "total_len"?}]` | an opaque stream id |
+| `Write` | `[id, seq, base64]` | `null` once the chunk is accepted |
+| `Close` | `[id, total_len]` | `null`; `total_len` must equal what was written |
+| `Abort` | `[id]` | `null` |
+
+The handle that travels in a method body is
+`{"id": …, "content_type"?: …, "len"?: …}`.
+
+Rules a receiver enforces, and a sender must expect:
+
+- **Chunks are capped at 524 288 bytes** before base64 — a chunk plus its
+  encoding overhead must fit a frame with room to spare.
+- **`seq` starts at 0 and increments by exactly one.** A gap aborts the stream
+  rather than transposing it. Do not pipeline writes: two chunks in flight can
+  be dispatched into two tasks and land either way round.
+- **`Write` does not reply until the chunk has room** in the receiver's window.
+  That reply is the flow control; a sender is never more than a window ahead.
+  Like every call it has a deadline, so a receiver that stops reading surfaces
+  as an error rather than a hang.
+- **Only the peer that called `Open` may write to the stream.** Authorisation is
+  the broker-stamped `sender` and nothing else. Any other peer gets
+  `UnknownStream`, which is also what an id naming nothing returns — the two are
+  deliberately indistinguishable.
+- **`Close` declares the total.** A mismatch is an error and the payload is not
+  delivered as a short read.
+- **Limits belong to the receiver** and are not negotiated: a maximum stream
+  length, a maximum number of concurrent streams per peer, a window, and an idle
+  timeout after which an abandoned stream is reaped.
+
+Send the call carrying the handle *before* writing the payload. The window is a
+few megabytes, so a sender that writes everything up front stalls against a
+reader that has not been dispatched yet.
 
 ## Match rules
 
@@ -163,6 +244,10 @@ Bus-generated names:
 | `…Error.UnknownMethod` | the interface has no such member |
 | `…Error.BadArguments` | the body did not match the member's signature |
 | `…Error.Failed` | a method failed with no more specific mapping |
+| `…Error.UnknownStream` | no such stream, or not one this peer opened |
+| `…Error.StreamAborted` | the stream ended before it was complete |
+| `…Error.StreamTooLarge` | the stream exceeds what the receiver accepts |
+| `…Error.TooManyStreams` | this peer already holds its share of open streams |
 
 (`…` is `ai.tinyhumans.tinybus`.) A service should define its own dotted names
 under its own interface — `ai.tinyhumans.openhuman.Voice.Error.NoDevice` — for

@@ -103,6 +103,41 @@ impl Proxy {
             .await
     }
 
+    /// Call `member` with a body the bus must not show to anyone else.
+    ///
+    /// The call fails with [`crate::Error::NotAttested`] unless the broker has
+    /// itself verified the destination's artifact against the operator's trust
+    /// store. That refusal is the feature: handing a private key to whoever
+    /// happened to claim the name first is the outcome this exists to prevent,
+    /// and it is better to fail a deploy than to succeed at that.
+    ///
+    /// Use [`Proxy::attestation`] first if the caller wants to distinguish
+    /// "not installed" from "not trusted" before it assembles the secret.
+    pub async fn call_confidential<R: DeserializeOwned>(
+        &self,
+        member: &str,
+        args: impl Serialize,
+    ) -> Result<R> {
+        let message = crate::message::Message::confidential_call(
+            self.destination.clone(),
+            self.path.clone(),
+            self.interface.clone(),
+            MemberName::new(member)?,
+            crate::connection::to_body(&args)?,
+        );
+        let reply = self.connection.call_raw(message, self.timeout).await?;
+        Ok(serde_json::from_value(reply)?)
+    }
+
+    /// What the broker has verified about this proxy's destination, if
+    /// anything.
+    ///
+    /// `None` means no secret may be sent here — either nothing owns the name
+    /// or the operator never allowlisted an artifact for it.
+    pub async fn attestation(&self) -> Result<Option<crate::attest::Attestation>> {
+        self.connection.attestation(self.destination.clone()).await
+    }
+
     /// Whether a peer currently owns this proxy's destination.
     ///
     /// Worth checking before a first call in a startup path: the difference

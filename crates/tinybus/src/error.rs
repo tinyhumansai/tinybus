@@ -66,6 +66,24 @@ pub enum Error {
     #[error("no peer owns the name `{0}`")]
     NameHasNoOwner(BusName),
 
+    /// A confidential message was refused because the broker could not
+    /// establish what binary is behind the destination name.
+    ///
+    /// Carries the name and a fixed operator-facing reason, never the body it
+    /// was protecting — the whole point of the refusal is that the payload goes
+    /// nowhere, including into a log line.
+    #[error("`{name}` is not an attested recipient: {reason}")]
+    NotAttested {
+        /// The destination that failed attestation.
+        name: BusName,
+        /// Why the broker would not vouch for it.
+        ///
+        /// Fixed text, not caller-composed: this error travels back across
+        /// the bus, and a `String` here would be a standing invitation for a
+        /// future call site to interpolate something it shouldn't.
+        reason: &'static str,
+    },
+
     /// `RequestName` lost: another peer already owns it and did not allow
     /// replacement.
     #[error("`{name}` is already owned by {owner}")]
@@ -201,6 +219,42 @@ pub enum Error {
         detail: String,
     },
 
+    /// No such bulk stream, or not one this peer opened.
+    ///
+    /// The two cases are deliberately one error: distinguishing them would let
+    /// a peer probe for streams running between two others.
+    #[error("no stream `{id}`")]
+    UnknownStream {
+        /// The handle that was presented. Minted by this peer, so quoting it
+        /// leaks nothing.
+        id: String,
+    },
+
+    /// A bulk stream ended before it was complete.
+    #[error("stream aborted: {reason}")]
+    StreamAborted {
+        /// Why it ended. Always crate-generated — never a peer's string, which
+        /// would be a peer writing into this process's logs.
+        reason: String,
+    },
+
+    /// A bulk stream would exceed what the receiver accepts.
+    #[error("stream exceeds the {limit}-byte limit")]
+    StreamTooLarge {
+        /// The receiver's cap, in bytes.
+        limit: u64,
+    },
+
+    /// This peer already has as many streams open as the receiver allows.
+    ///
+    /// Per peer, so a peer that opens streams and never finishes them runs out
+    /// of its own slots rather than everyone's.
+    #[error("already at the limit of {limit} open streams")]
+    TooManyStreams {
+        /// The receiver's per-peer cap.
+        limit: usize,
+    },
+
     /// Filesystem or socket I/O failed.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
@@ -215,6 +269,12 @@ impl Error {
     pub const UNKNOWN_METHOD: &'static str = "ai.tinyhumans.tinybus.Error.UnknownMethod";
     /// The dotted error name a failing method body gets by default.
     pub const FAILED: &'static str = "ai.tinyhumans.tinybus.Error.Failed";
+    /// The dotted error name for a refused confidential delivery.
+    ///
+    /// Callers match on this to tell "the recipient is not trusted" from "the
+    /// call failed", which are different problems with different fixes: one is
+    /// an operator's trust store, the other is the service.
+    pub const NOT_ATTESTED: &'static str = "ai.tinyhumans.tinybus.Error.NotAttested";
 
     /// Build an [`Error::Protocol`] from anything displayable.
     pub fn protocol(message: impl std::fmt::Display) -> Self {
@@ -224,6 +284,16 @@ impl Error {
     /// Build an [`Error::Transport`] from anything displayable.
     pub fn transport(message: impl std::fmt::Display) -> Self {
         Self::Transport(message.to_string())
+    }
+
+    /// Build an [`Error::NotAttested`] for `name`.
+    ///
+    /// `reason` is a fixed `&'static str`, not `impl Into<String>`: this error
+    /// travels back to a caller that just failed to send a secret, and the
+    /// type itself is what stops a future call site from composing it out of
+    /// peer input.
+    pub fn not_attested(name: BusName, reason: &'static str) -> Self {
+        Self::NotAttested { name, reason }
     }
 
     /// Build an [`Error::Path`] for `path`.
@@ -311,6 +381,7 @@ impl Error {
             Self::ConnectionClosed => "ai.tinyhumans.tinybus.Error.ConnectionClosed",
             Self::Backpressure => "ai.tinyhumans.tinybus.Error.Backpressure",
             Self::NameHasNoOwner(_) => "ai.tinyhumans.tinybus.Error.NameHasNoOwner",
+            Self::NotAttested { .. } => Self::NOT_ATTESTED,
             Self::NameTaken { .. } => "ai.tinyhumans.tinybus.Error.NameTaken",
             Self::UnknownObject { .. } => "ai.tinyhumans.tinybus.Error.UnknownObject",
             Self::UnknownInterface { .. } => "ai.tinyhumans.tinybus.Error.UnknownInterface",
@@ -322,6 +393,10 @@ impl Error {
             Self::ModuleRefused { .. } => "ai.tinyhumans.tinybus.Error.ModuleRefused",
             Self::ModuleUnavailable { .. } => "ai.tinyhumans.tinybus.Error.ModuleUnavailable",
             Self::Path { .. } => "ai.tinyhumans.tinybus.Error.Path",
+            Self::UnknownStream { .. } => "ai.tinyhumans.tinybus.Error.UnknownStream",
+            Self::StreamAborted { .. } => "ai.tinyhumans.tinybus.Error.StreamAborted",
+            Self::StreamTooLarge { .. } => "ai.tinyhumans.tinybus.Error.StreamTooLarge",
+            Self::TooManyStreams { .. } => "ai.tinyhumans.tinybus.Error.TooManyStreams",
             Self::FeatureDisabled(_, _) => "ai.tinyhumans.tinybus.Error.FeatureDisabled",
             Self::Json(_) => "ai.tinyhumans.tinybus.Error.Json",
             Self::MethodFailed { name, .. } => name,
@@ -410,6 +485,9 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains("expected u64"), "{text}");
         assert!(!text.contains("0xdeadbeef"), "{text}");
+        // The double-quoted half is the one serde uses for a rejected *string*,
+        // which is the shape a token or a recovery phrase arrives in.
+        assert!(!text.contains("seed phrase here"), "{text}");
     }
 
     #[test]
@@ -417,7 +495,18 @@ mod tests {
         // A truncated message must not leak the tail just because its closing
         // backtick never arrived.
         assert_eq!(redact_values("bad token `abc"), "bad token `…");
+        assert_eq!(redact_values("bad token \"abc"), "bad token \"…");
         assert_eq!(redact_values("no quotes here"), "no quotes here");
+    }
+
+    #[test]
+    fn a_backtick_inside_a_quoted_value_does_not_end_the_redaction_early() {
+        // Otherwise a value chosen to contain a backtick would close the span
+        // and put its own tail back into the message.
+        assert_eq!(
+            redact_values("invalid: \"a`b`c\", expected u64"),
+            "invalid: \"…\", expected u64"
+        );
     }
 
     #[test]
@@ -505,7 +594,14 @@ mod tests {
             },
             Error::path("path", "bad"),
             Error::FeatureDisabled("thing", "uds"),
+            Error::UnknownStream { id: "s1".into() },
+            Error::StreamAborted {
+                reason: "aborted".into(),
+            },
+            Error::StreamTooLarge { limit: 1 },
+            Error::TooManyStreams { limit: 1 },
             Error::Json(serde_json::from_str::<serde_json::Value>("{").unwrap_err()),
+            Error::not_attested(BusName::new("ai.tinyhumans.Example").unwrap(), "bad"),
         ];
         for error in errors {
             assert!(error.wire_name().starts_with("ai.tinyhumans."));

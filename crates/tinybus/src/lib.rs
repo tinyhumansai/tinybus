@@ -65,6 +65,7 @@
 // likely to break silently, so it has to be covered here.
 extern crate self as tinybus;
 
+pub mod attest;
 pub mod broker;
 pub mod build_info;
 pub mod connection;
@@ -78,7 +79,9 @@ pub mod native;
 pub mod ports;
 pub mod proxy;
 pub mod router;
+pub mod secret;
 pub mod service;
+pub mod stream;
 pub mod transport;
 pub mod version;
 
@@ -86,6 +89,7 @@ pub mod version;
 #[path = "private.rs"]
 pub mod __private;
 
+pub use crate::attest::Attestation;
 pub use crate::connection::Connection;
 pub use crate::error::{Error, Result};
 pub use crate::events::{
@@ -98,7 +102,11 @@ pub use crate::native::{NativeRegistry, NativeRequestError};
 pub use crate::ports::{Listener, Transport};
 pub use crate::proxy::Proxy;
 pub use crate::router::MatchRule;
+pub use crate::secret::{Secret, harden_process};
 pub use crate::service::Interface;
+pub use crate::stream::{
+    MAX_CHUNK_LEN, StreamDescriptor, StreamLimits, StreamReader, StreamRef, StreamWriter,
+};
 pub use crate::version::{
     Compatibility, InterfaceVersion, PeerManifest, PeerRecord, Version, VersionRange,
 };

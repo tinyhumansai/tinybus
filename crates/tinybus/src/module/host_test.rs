@@ -819,6 +819,13 @@ fn a_world_writable_module_directory_is_refused_before_any_dlopen() {
 
 #[cfg(unix)]
 #[test]
+fn a_sticky_world_writable_module_directory_is_accepted() {
+    assert_eq!(unix_directory_refusal(0, 0o1777, 1_000), None);
+    assert_eq!(unix_directory_refusal(1_000, 0o1777, 1_000), None);
+}
+
+#[cfg(unix)]
+#[test]
 fn a_module_directory_owned_by_another_user_is_refused() {
     assert_eq!(
         unix_directory_refusal(1_001, 0o755, 1_000),
@@ -917,6 +924,21 @@ fn module_host_helpers_preserve_safe_names_states_and_allowlist_decisions() {
         "clock.so"
     });
     std::fs::write(&module, b"module bytes").unwrap();
+    let digest = crate::module::hash::file_hex(std::fs::File::open(&module).unwrap()).unwrap();
+    std::fs::write(
+        directory.path().join("modules.toml"),
+        format!(
+            "clock.{} = \"{digest}\"\n",
+            if cfg!(windows) {
+                "dll"
+            } else if cfg!(target_os = "macos") {
+                "dylib"
+            } else {
+                "so"
+            }
+        ),
+    )
+    .unwrap();
     assert!(check_file(&module).is_ok());
     let text = directory.path().join("clock.txt");
     std::fs::write(&text, b"module bytes").unwrap();
@@ -1204,4 +1226,84 @@ async fn one_refused_module_does_not_stop_the_others_in_the_directory_from_loadi
         outcomes.iter().filter(|outcome| outcome.is_err()).count(),
         1
     );
+}
+
+/// Copy `artifact` into a fresh directory beside a `modules.toml` listing
+/// `hash` for it, so a load can be driven against a real allowlist.
+///
+/// Unix-only, and the reason is the loader's own admission check rather than
+/// anything about the code under test. On Windows that check trusts exactly
+/// three SIDs on a module directory: its owner, `LocalSystem`, and
+/// `BUILTIN\Administrators`. A CI runner's account is an administrator, so a
+/// directory a *test* creates is owned by `BUILTIN\Administrators` while the
+/// ACE it inherits names the user SID — neither the owner nor well-known
+/// trusted — and the load is refused. That is why the Windows workflow calls
+/// `SetOwner` on the directories it provisions; a test cannot do the same
+/// without Win32 calls of its own.
+///
+/// Gating here costs little: what these two tests exercise is the hash
+/// comparison and the attestation record it produces, which is identical on
+/// every platform. The Windows-specific directory policy is covered by the
+/// existing loader tests that run against the CI-provisioned directories.
+#[cfg(unix)]
+fn staged_module(artifact: &Path, hash: &str) -> (tempfile::TempDir, PathBuf) {
+    // Staged beside the artifact rather than in `/tmp`: the loader refuses a
+    // directory another user could write to, and `/tmp` is exactly that. The
+    // artifact's own directory is user-owned (CI builds into
+    // `target/debug/examples`), so it already satisfies the check that `/tmp`
+    // fails — which is the admission check doing its job, not an obstacle to
+    // route around.
+    let root = artifact.parent().expect("artifact has a parent directory");
+    let dir = tempfile::tempdir_in(root).unwrap();
+    let file_name = artifact.file_name().unwrap();
+    let staged = dir.path().join(file_name);
+    std::fs::copy(artifact, &staged).unwrap();
+    std::fs::write(
+        dir.path().join("modules.toml"),
+        format!("{:?} = {hash:?}\n", file_name.to_str().unwrap()),
+    )
+    .unwrap();
+    (dir, staged)
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "requires TINYBUS_TEST_MODULE to point at the built cdylib"]
+async fn a_module_loaded_from_an_allowlisted_artifact_becomes_an_attested_recipient() {
+    // The one seam the in-memory fixtures cannot reach: a real artifact, hashed
+    // off the disk by the host, becoming eligible to receive a secret.
+    let artifact = PathBuf::from(std::env::var_os("TINYBUS_TEST_MODULE").unwrap());
+    let hash = crate::module::hash::file_hex(std::fs::File::open(&artifact).unwrap()).unwrap();
+    let (_dir, staged) = staged_module(&artifact, &hash);
+
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    broker.spawn(bus.clone());
+    let host = ModuleHost::new(broker.clone());
+    let info = host.load_file(&staged).unwrap();
+
+    let client = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let attestation = client
+        .attestation(info.manifest.bus_name.clone())
+        .await
+        .unwrap()
+        .expect("an allowlisted module is attested");
+    assert_eq!(attestation.sha256, hash);
+    assert_eq!(attestation.name, info.manifest.bus_name);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "requires TINYBUS_TEST_MODULE to point at the built cdylib"]
+async fn a_module_whose_artifact_does_not_match_the_allowlist_never_loads_at_all() {
+    // The refusal happens before `dlopen`, so the question of attestation never
+    // arises: unverified code is not admitted, let alone handed a secret.
+    let artifact = PathBuf::from(std::env::var_os("TINYBUS_TEST_MODULE").unwrap());
+    let (_dir, staged) = staged_module(&artifact, &"a".repeat(64));
+
+    let host = ModuleHost::new(Broker::new());
+    let error = host.load_file(&staged).unwrap_err();
+    assert!(error.to_string().contains("allowlist"), "{error}");
 }

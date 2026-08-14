@@ -136,6 +136,19 @@ impl Broker {
             .request_name_for_unique(unique, name)
     }
 
+    /// Record that a loaded module's artifact matched the module allowlist.
+    ///
+    /// This is the *only* way a peer becomes eligible to receive a confidential
+    /// message: the artifact was hashed against `modules.toml` before `dlopen`,
+    /// and nothing reached across a transport to establish it.
+    #[cfg(feature = "modules")]
+    pub(crate) fn attest_module(&self, unique: &BusName, attestation: crate::attest::Attestation) {
+        self.router
+            .lock()
+            .expect("router lock")
+            .set_attestation_for_unique(unique, attestation);
+    }
+
     /// Route one inbound message from peer `id`.
     async fn route(&self, from: u64, from_name: &BusName, mut message: Message) -> Result<()> {
         message.validate()?;
@@ -166,16 +179,61 @@ impl Broker {
                     .ok_or_else(|| Error::protocol("message has no destination"))?;
 
                 if destination.as_str() == crate::BUS_NAME {
+                    if message.header.confidential && message.header.kind == MessageKind::MethodCall
+                    {
+                        // The bus's own service is not a loaded, hash-verified
+                        // module and can never be an attested recipient.
+                        // `handle_bus_call` ends in `bus_method`, which
+                        // deserializes the body — reaching that with a
+                        // confidential payload would both break "the broker
+                        // never parses a body" and risk a `BadArguments` built
+                        // from secret material. Refuse before dispatch, not
+                        // after.
+                        return Err(Error::not_attested(
+                            destination.clone(),
+                            "the bus itself is never an attested recipient",
+                        ));
+                    }
                     return self.handle_bus_call(from, from_name, message).await;
                 }
 
-                let target = self
-                    .router
-                    .lock()
-                    .expect("router lock")
-                    .resolve(&destination);
+                // A confidential *call* may only go to a well-known name the
+                // broker has verified an artifact for. A confidential *reply*
+                // goes back to the unique name the broker itself minted for the
+                // peer that made the call — that peer already chose to take
+                // part in the exchange, and unique names are never reused, so
+                // there is no one else the reply could reach.
+                let confidential_call =
+                    message.header.confidential && message.header.kind == MessageKind::MethodCall;
+                let target = if confidential_call {
+                    if destination.is_unique() {
+                        // The broker knows *which connection* a unique name is,
+                        // but not what binary is behind it. A sender that needs
+                        // that answer has to address the well-known name.
+                        Err(Error::not_attested(
+                            destination.clone(),
+                            "a confidential call must address a well-known name",
+                        ))
+                    } else {
+                        self.router
+                            .lock()
+                            .expect("router lock")
+                            .resolve_attested(&destination)
+                    }
+                } else {
+                    self.router
+                        .lock()
+                        .expect("router lock")
+                        .resolve(&destination)
+                };
                 #[cfg(feature = "modules")]
                 let target = target.map_err(|error| {
+                    // A refused attestation is the more specific answer and
+                    // must survive: rewriting it as "the module is unavailable"
+                    // would send an operator to fix the wrong thing.
+                    if matches!(error, Error::NotAttested { .. }) {
+                        return error;
+                    }
                     let control = self
                         .modules
                         .lock()
@@ -289,6 +347,16 @@ impl Broker {
                     Ok(serde_json::to_value(router.manifest_of(&name))?)
                 }
                 "ListPeers" => Ok(serde_json::to_value(router.peer_records())?),
+                // What the broker verified about a prospective recipient, so a
+                // sender can find out *before* it builds a message around a
+                // secret rather than after the refusal. Returns null for an
+                // unattested name; the answer is deliberately not a bare bool,
+                // because an operator debugging this needs the hash that
+                // matched.
+                "GetAttestation" => {
+                    let (name,): (BusName,) = parse_args(member, body)?;
+                    Ok(serde_json::to_value(router.attestation_of(&name))?)
+                }
                 "GetNameOwner" => {
                     let (name,): (BusName,) = parse_args(member, body)?;
                     Ok(serde_json::to_value(router.owner_of(&name))?)
@@ -328,6 +396,7 @@ impl Broker {
             Get,
             GetManifest,
             Load,
+            LoadGithub,
             Stop,
             Enable,
             Rescan,
@@ -337,6 +406,7 @@ impl Broker {
             "GetModule" => ModuleMember::Get,
             "GetModuleManifest" => ModuleMember::GetManifest,
             "LoadModule" => ModuleMember::Load,
+            "LoadGithubModule" => ModuleMember::LoadGithub,
             "StopModule" => ModuleMember::Stop,
             "EnableModule" => ModuleMember::Enable,
             "RescanModules" => ModuleMember::Rescan,
@@ -416,6 +486,15 @@ impl Broker {
                         ));
                     }
                     let (info, transition) = control.load(PathBuf::from(path), config)?;
+                    Ok((
+                        serde_json::to_value(info)?,
+                        module_state_body(transition).into_iter().collect(),
+                    ))
+                }
+                ModuleMember::LoadGithub => {
+                    let (url, asset, sha256, config): (String, String, String, Value) =
+                        parse_args(member, body)?;
+                    let (info, transition) = control.load_github(url, asset, sha256, config)?;
                     Ok((
                         serde_json::to_value(info)?,
                         module_state_body(transition).into_iter().collect(),
@@ -503,6 +582,8 @@ impl Broker {
                 ),
                 member: Some(MemberName::new(member).expect("literal is a valid member")),
                 error_name: None,
+                // The bus's own announcements are broadcasts by construction.
+                confidential: false,
             },
             body,
         };
@@ -1038,5 +1119,218 @@ mod tests {
             .with_timeout(Duration::from_secs(5));
         let transcript: String = voice.call("Transcribe", ("/tmp/clip.wav",)).await.unwrap();
         assert_eq!(transcript, "transcript of /tmp/clip.wav");
+    }
+
+    /// A bus with a service that the host has attested, as a module load would.
+    ///
+    /// `attest_module` is the same call the module host makes after hashing an
+    /// artifact against `modules.toml`; driving it directly keeps the test on
+    /// the in-memory transport instead of requiring a built `cdylib` on disk.
+    #[cfg(feature = "modules")]
+    async fn attested_bus() -> (MemoryBus, Broker, Connection, Connection) {
+        let bus = MemoryBus::new();
+        let broker = Broker::new();
+        broker.spawn(bus.clone());
+
+        let service = Connection::connect(bus.connect().await.unwrap())
+            .await
+            .unwrap();
+        service
+            .serve_at(ObjectPath::new(VOICE_PATH).unwrap(), Voice)
+            .await
+            .unwrap();
+        service.request_name(VOICE_NAME).await.unwrap();
+        broker.attest_module(
+            &service.unique_name().unwrap(),
+            crate::attest::Attestation {
+                name: BusName::new(VOICE_NAME).unwrap(),
+                sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                    .to_string(),
+            },
+        );
+
+        let client = Connection::connect(bus.connect().await.unwrap())
+            .await
+            .unwrap();
+        (bus, broker, service, client)
+    }
+
+    #[tokio::test]
+    async fn a_confidential_call_to_an_unattested_recipient_is_refused() {
+        // The default bus has no trust store, so nothing is attested — and the
+        // service is reachable by an ordinary call, which is what makes the
+        // refusal meaningful rather than incidental.
+        let (_bus, _service, client) = bus().await;
+        let voice = client.proxy(VOICE_NAME, VOICE_PATH, VOICE_NAME).unwrap();
+        assert!(
+            voice
+                .call::<String>("Transcribe", ("/tmp/a.wav",))
+                .await
+                .is_ok()
+        );
+
+        let error = voice
+            .call_confidential::<String>("Transcribe", ("/tmp/secret.wav",))
+            .await
+            .unwrap_err();
+        assert_eq!(error.wire_name(), Error::NOT_ATTESTED);
+        assert_eq!(voice.attestation().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_confidential_call_may_not_address_a_unique_name() {
+        // The broker knows which connection `:1.n` is, but not what binary is
+        // behind it, so it cannot answer the question the sender is asking.
+        let (_bus, service, client) = bus().await;
+        let unique = service.unique_name().unwrap();
+        let proxy = client
+            .proxy(unique.as_str(), VOICE_PATH, VOICE_NAME)
+            .unwrap();
+        let error = proxy
+            .call_confidential::<String>("Transcribe", ("/tmp/secret.wav",))
+            .await
+            .unwrap_err();
+        assert_eq!(error.wire_name(), Error::NOT_ATTESTED);
+    }
+
+    #[tokio::test]
+    async fn a_confidential_call_to_the_bus_itself_is_refused_before_its_body_is_parsed() {
+        // The bus's own service is never a loaded, hash-verified module, so it
+        // can never be an attested recipient. Before the fix this dispatch
+        // reached `handle_bus_call` -> `bus_method` -> `parse_args`, which
+        // deserializes the body — breaking "the broker never parses a body"
+        // for exactly the messages that must never be parsed. An ordinary
+        // (non-confidential) bus call must keep working.
+        let (_bus, _service, client) = bus().await;
+        let bus_proxy = client
+            .proxy(crate::BUS_NAME, crate::BUS_PATH, crate::BUS_INTERFACE)
+            .unwrap();
+        let error = bus_proxy
+            .call_confidential::<String>("GetId", ())
+            .await
+            .unwrap_err();
+        assert_eq!(error.wire_name(), Error::NOT_ATTESTED);
+        let id: String = bus_proxy.call("GetId", ()).await.unwrap();
+        assert!(id.starts_with("tinybus-"), "{id}");
+    }
+
+    #[cfg(feature = "modules")]
+    #[tokio::test]
+    async fn a_confidential_call_reaches_a_module_the_host_verified() {
+        let (_bus, _broker, _service, client) = attested_bus().await;
+        let voice = client.proxy(VOICE_NAME, VOICE_PATH, VOICE_NAME).unwrap();
+
+        let attestation = voice.attestation().await.unwrap().expect("attested");
+        assert_eq!(attestation.name.as_str(), VOICE_NAME);
+
+        let transcript: String = voice
+            .call_confidential("Transcribe", ("/tmp/secret.wav",))
+            .await
+            .unwrap();
+        assert_eq!(transcript, "transcript of /tmp/secret.wav");
+    }
+
+    #[cfg(feature = "modules")]
+    #[tokio::test]
+    async fn a_name_handed_on_to_another_peer_does_not_hand_on_its_attestation() {
+        // The property under test is whether trust is attached to the *name* or
+        // to the *peer*. If it were the name, any process that grabbed it after
+        // the real module released it would inherit the right to be handed
+        // secrets without a single byte having been hashed.
+        let (bus, _broker, service, client) = attested_bus().await;
+        let voice = client.proxy(VOICE_NAME, VOICE_PATH, VOICE_NAME).unwrap();
+        assert!(voice.attestation().await.unwrap().is_some());
+
+        service.release_name(VOICE_NAME).await.unwrap();
+        let impostor = Connection::connect(bus.connect().await.unwrap())
+            .await
+            .unwrap();
+        impostor
+            .serve_at(ObjectPath::new(VOICE_PATH).unwrap(), Voice)
+            .await
+            .unwrap();
+        impostor.request_name(VOICE_NAME).await.unwrap();
+
+        // The impostor owns the name and answers ordinary calls...
+        assert!(
+            voice
+                .call::<String>("Transcribe", ("/tmp/a.wav",))
+                .await
+                .is_ok()
+        );
+        // ...and is refused the secret, because nothing verified its artifact.
+        assert_eq!(voice.attestation().await.unwrap(), None);
+        let error = voice
+            .call_confidential::<String>("Transcribe", ("/tmp/secret.wav",))
+            .await
+            .unwrap_err();
+        assert_eq!(error.wire_name(), Error::NOT_ATTESTED);
+    }
+
+    #[tokio::test]
+    async fn a_confidential_body_is_never_fanned_out_to_a_monitor() {
+        let (_bus, _service, client) = bus().await;
+        let watcher = Connection::connect(_bus.connect().await.unwrap())
+            .await
+            .unwrap();
+        // The broadest possible subscription: if anything could see a secret,
+        // this would.
+        let mut seen = watcher.add_match(MatchRule::new()).await.unwrap();
+
+        let voice = client.proxy(VOICE_NAME, VOICE_PATH, VOICE_NAME).unwrap();
+        let _ = voice
+            .call_confidential::<String>("Transcribe", ("/tmp/secret.wav",))
+            .await;
+
+        // Nothing arrives at all, rather than something arriving redacted.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), seen.recv())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn get_attestation_answers_for_a_name_nobody_owns() {
+        let (_bus, _service, client) = bus().await;
+        let missing = BusName::new("ai.tinyhumans.openhuman.Absent").unwrap();
+        assert_eq!(client.attestation(missing).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn the_stream_interface_gets_no_exemption_from_attestation() {
+        // Bulk payloads travel as `Stream.Write` calls rather than in a body,
+        // which makes the stream interface the one place a second delivery path
+        // could have grown. It did not: a chunk is an ordinary method call and
+        // `route` reaches it through the same check as everything else. Pinned
+        // as a test because the cost of the stream path ever being special-cased
+        // is every secret on the bus, and nothing else would notice.
+        let (_bus, service, client) = bus().await;
+        let stream = client
+            .proxy(
+                VOICE_NAME,
+                crate::stream::STREAM_PATH,
+                crate::stream::STREAM_INTERFACE,
+            )
+            .unwrap();
+
+        // The peer is reachable on the stream interface by an ordinary call —
+        // it answers `UnknownStream`, not `NotAttested` — so the refusal below
+        // is the attestation check firing and not the name failing to resolve.
+        let ordinary = stream
+            .call::<Value>("Abort", ("no-such-stream",))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            ordinary.wire_name(),
+            "ai.tinyhumans.tinybus.Error.UnknownStream"
+        );
+
+        let refused = stream
+            .call_confidential::<Value>("Abort", ("no-such-stream",))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.wire_name(), Error::NOT_ATTESTED);
+        drop(service);
     }
 }

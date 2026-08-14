@@ -53,6 +53,10 @@ enum Command {
         /// Positional arguments as a JSON array. Defaults to `[]`.
         #[arg(default_value = "[]")]
         args: String,
+        /// Send the body confidentially: the bus refuses to deliver it unless
+        /// it has verified the destination's artifact itself.
+        #[arg(long)]
+        confidential: bool,
     },
 
     /// Emit a signal.
@@ -123,6 +127,27 @@ enum ModulesCommand {
         /// JSON object passed to the module's setup function.
         #[arg(long, default_value = "{}")]
         config: String,
+    },
+    /// Download, verify, extract, and load a GitHub release module.
+    LoadGithub {
+        /// GitHub release tag URL.
+        release_url: String,
+        /// Release archive asset name, usually ending in `.tar.gz`.
+        asset: String,
+        /// Expected SHA-256 for the release archive.
+        sha256: String,
+        /// JSON object passed to the module's setup function.
+        #[arg(long, default_value = "{}")]
+        config: String,
+    },
+    /// Generate a checksum.toml for release assets.
+    Checksum {
+        /// Release assets to hash. Repeat this option for multiple assets.
+        #[arg(long = "path", required = true)]
+        paths: Vec<PathBuf>,
+        /// Write the manifest to a file instead of stdout.
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
     /// Stop a loaded module without unloading its library.
     Stop {
@@ -201,13 +226,18 @@ async fn run(cli: Cli) -> Result<()> {
             interface,
             member,
             args,
+            confidential,
         } => {
             let connection = connect(&address).await?;
             let args: serde_json::Value = serde_json::from_str(&args)?;
             let proxy = connection
                 .proxy(&destination, &path, &interface)?
                 .with_timeout(timeout);
-            let reply: serde_json::Value = proxy.call(&member, args).await?;
+            let reply: serde_json::Value = if confidential {
+                proxy.call_confidential(&member, args).await?
+            } else {
+                proxy.call(&member, args).await?
+            };
             println!("{}", serde_json::to_string_pretty(&reply)?);
             Ok(())
         }
@@ -284,6 +314,13 @@ async fn run(cli: Cli) -> Result<()> {
 }
 
 async fn run_modules(address: &Path, timeout: Duration, command: ModulesCommand) -> Result<()> {
+    if let ModulesCommand::Checksum {
+        ref paths,
+        ref output,
+    } = command
+    {
+        return write_checksum_manifest(paths, output.as_deref());
+    }
     let connection = connect(address).await?;
     let bus = connection
         .proxy(tinybus::BUS_NAME, tinybus::BUS_PATH, tinybus::BUS_INTERFACE)?
@@ -345,6 +382,22 @@ async fn run_modules(address: &Path, timeout: Duration, command: ModulesCommand)
             println!("{}", serde_json::to_string_pretty(&module)?);
             Ok(())
         }
+        ModulesCommand::LoadGithub {
+            release_url,
+            asset,
+            sha256,
+            config,
+        } => {
+            let config: serde_json::Value = serde_json::from_str(&config)?;
+            let module: serde_json::Value = bus
+                .call("LoadGithubModule", (release_url, asset, sha256, config))
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&module)?);
+            Ok(())
+        }
+        ModulesCommand::Checksum { paths, output } => {
+            write_checksum_manifest(&paths, output.as_deref())
+        }
         ModulesCommand::Stop { name, deadline_ms } => {
             if Duration::from_millis(deadline_ms) >= timeout {
                 return Err(Error::failed(
@@ -385,6 +438,24 @@ async fn run_modules(address: &Path, timeout: Duration, command: ModulesCommand)
             Ok(())
         }
     }
+}
+
+fn write_checksum_manifest(paths: &[PathBuf], output: Option<&Path>) -> Result<()> {
+    let mut manifest = String::from("[sha256]\n");
+    for path in paths {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| Error::failed("checksum path has no safe filename"))?;
+        let digest = tinybus::module::sha256_file(path)?;
+        manifest.push_str(&format!("{name:?} = \"{digest}\"\n"));
+    }
+    if let Some(output) = output {
+        std::fs::write(output, manifest)?;
+    } else {
+        print!("{manifest}");
+    }
+    Ok(())
 }
 
 async fn connect(address: &Path) -> Result<Connection> {
@@ -437,10 +508,16 @@ fn render(message: &tinybus::Message) -> String {
         .map(|i| i.to_string())
         .unwrap_or_default();
     let member = h.member.as_ref().map(|m| m.to_string()).unwrap_or_default();
-    format!(
-        "{kind:<6} {sender:<10} {path} {interface}.{member} {}",
-        message.body
-    )
+    // The monitor is a terminal, a scrollback buffer and often a pasted bug
+    // report. A confidential body must not reach any of them, and the routing
+    // rules mean one should never arrive here in the first place — so this is
+    // the second lock on a door that is already shut.
+    let body = if h.confidential {
+        "<confidential>".to_string()
+    } else {
+        message.body.to_string()
+    };
+    format!("{kind:<6} {sender:<10} {path} {interface}.{member} {body}")
 }
 
 #[cfg(test)]
@@ -589,6 +666,7 @@ mod tests {
             address: Some(address.clone()),
             timeout: 1,
             command: Command::Call {
+                confidential: false,
                 destination: DESTINATION.into(),
                 path: PATH.into(),
                 interface: INTERFACE.into(),
@@ -643,6 +721,12 @@ mod tests {
                 path: PathBuf::from("/not/a/module"),
                 config: "{}".into(),
             },
+            ModulesCommand::LoadGithub {
+                release_url: "https://example.com/not-github".into(),
+                asset: "module.tar.gz".into(),
+                sha256: "0".repeat(64),
+                config: "{}".into(),
+            },
             ModulesCommand::Stop {
                 name: "missing".into(),
                 deadline_ms: 1_000,
@@ -672,6 +756,25 @@ mod tests {
         )
         .await
         .unwrap();
+
+        let asset = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(asset.path(), b"release asset").unwrap();
+        let manifest = tempfile::NamedTempFile::new().unwrap();
+        run_modules(
+            &address,
+            Duration::from_secs(2),
+            ModulesCommand::Checksum {
+                paths: vec![asset.path().to_path_buf()],
+                output: Some(manifest.path().to_path_buf()),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            std::fs::read_to_string(manifest.path())
+                .unwrap()
+                .contains("[sha256]")
+        );
         run_modules(&address, Duration::from_secs(2), ModulesCommand::Doctor)
             .await
             .unwrap();
@@ -694,6 +797,7 @@ mod tests {
                 interface: INTERFACE.into(),
                 member: "Echo".into(),
                 args: "not json".into(),
+                confidential: false,
             },
             Command::Emit {
                 path: PATH.into(),
