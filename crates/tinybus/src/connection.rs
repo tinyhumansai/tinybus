@@ -1063,6 +1063,8 @@ mod tests {
         assert_eq!(connection.peers().await.unwrap().len(), 1);
     }
 
+    // The module-management methods they call exist only when the `modules`
+    // feature is compiled in; the portability jobs build without it.
     #[cfg(feature = "modules")]
     #[tokio::test]
     async fn module_management_helpers_forward_their_requests_to_the_broker() {

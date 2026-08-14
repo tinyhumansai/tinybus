@@ -271,22 +271,22 @@ mod tests {
     #[test]
     fn unix_loader_refuses_missing_and_nul_containing_paths() {
         let missing = Path::new("/definitely/not/a/tinybus-module.so");
+        let missing_error = match load(missing, false) {
+            Ok(_) => panic!("missing module unexpectedly loaded"),
+            Err(error) => error,
+        };
         assert!(
-            match load(missing, false) {
-                Err(error) => error,
-                Ok(_) => panic!("missing module unexpectedly loaded"),
-            }
-            .to_string()
-            .contains("dynamic loader rejected the artifact")
+            missing_error
+                .to_string()
+                .contains("dynamic loader rejected the artifact")
         );
 
         use std::os::unix::ffi::OsStrExt;
         let nul_path = Path::new(std::ffi::OsStr::from_bytes(b"module\0name"));
-        assert!(
-            platform::open(nul_path)
-                .unwrap_err()
-                .to_string()
-                .contains("artifact path is invalid")
-        );
+        let nul_error = match platform::open(nul_path) {
+            Ok(_) => panic!("NUL-containing module path unexpectedly loaded"),
+            Err(error) => error,
+        };
+        assert!(nul_error.to_string().contains("artifact path is invalid"));
     }
 }

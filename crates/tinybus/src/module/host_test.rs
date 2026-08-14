@@ -894,6 +894,12 @@ fn module_host_helpers_preserve_safe_names_states_and_allowlist_decisions() {
     })));
     assert!(!has_library_extension(Path::new("clock.txt")));
 
+    #[cfg(windows)]
+    let _local_app_data = {
+        let directory = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("LOCALAPPDATA", directory.path()) };
+        directory
+    };
     let search_paths = ModuleHost::search_paths();
     assert!(
         search_paths

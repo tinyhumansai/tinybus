@@ -308,7 +308,21 @@ mod tests {
         assert!(expanded.contains("impl :: tinybus :: service :: Interface for Example"));
         assert!(expanded.contains("Ping"));
         assert!(expanded.contains("Zero"));
-        assert!(!expanded.contains("# [ tinybus"));
+        let parsed: syn::File = syn::parse_str(&expanded).unwrap();
+        assert!(parsed.items.iter().all(|item| {
+            let syn::Item::Impl(item) = item else {
+                return true;
+            };
+            item.items.iter().all(|item| {
+                let syn::ImplItem::Fn(method) = item else {
+                    return true;
+                };
+                method
+                    .attrs
+                    .iter()
+                    .all(|attr| !attr.path().is_ident("tinybus"))
+            })
+        }));
     }
 
     #[test]
