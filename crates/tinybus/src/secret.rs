@@ -429,6 +429,44 @@ mod tests {
     }
 
     #[test]
+    fn zeroizing_covers_the_full_capacity_not_just_the_initialized_length() {
+        // Reproduces the shape a caller's `Vec` is left in by
+        // `key.truncate(32)`: `len` shrinks, `capacity` does not, and the
+        // truncated tail is still sitting in the allocation. `Secret`'s
+        // `Drop` must clear that tail too, not just the first `len` bytes.
+        let mut bytes: Vec<u8> = Vec::with_capacity(16);
+        // SAFETY: `bytes` has capacity for 16 bytes; every one of them is
+        // written before `set_len` claims it is initialized, so this upholds
+        // `Vec`'s invariant rather than violating it.
+        unsafe {
+            for i in 0..16 {
+                std::ptr::write(bytes.as_mut_ptr().add(i), 0xAB);
+            }
+            bytes.set_len(16);
+        }
+        bytes.truncate(4); // len 4, capacity unchanged; bytes[4..16] still 0xAB.
+        let cap = bytes.capacity();
+        assert!(cap >= 16, "capacity should not shrink on truncate");
+
+        // SAFETY: `bytes.as_mut_ptr()` is valid for `cap` bytes of writes —
+        // it is the pointer to `bytes`'s own live allocation, sized exactly
+        // `cap`, and `bytes` is not touched by anything else during this call.
+        unsafe { zeroize_raw(bytes.as_mut_ptr(), cap) };
+
+        // Peek at the whole allocation, including the part past `len`, to
+        // confirm the spare capacity was zeroized too. This is a read of
+        // memory `bytes` still owns and has not freed — unlike reading a
+        // `Secret` after `Drop`, this is not use-after-free.
+        // SAFETY: bytes 0..cap were all explicitly initialized above (first
+        // to 0xAB, then zeroized), so claiming the full capacity as
+        // initialized here is accurate.
+        unsafe {
+            bytes.set_len(cap);
+        }
+        assert_eq!(bytes, vec![0u8; cap]);
+    }
+
+    #[test]
     fn harden_and_unlock_round_trip_without_panicking_on_a_live_allocation() {
         // Exercises the lock/unlock pair directly on a buffer this test
         // still owns and frees itself, independent of `Secret`'s `Drop`.
