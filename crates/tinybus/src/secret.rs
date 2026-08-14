@@ -60,6 +60,25 @@ impl Secret {
     /// be a worse outcome than one that holds it unlocked; failures are
     /// logged at `debug` and construction proceeds with a still-correct,
     /// just less hardened, `Secret`.
+    ///
+    /// The lock/no-dump hardening is scoped to `bytes.len()` at the moment of
+    /// construction — deliberately, not `capacity()`: `mlock`/`madvise`
+    /// operate at page granularity anyway, so locking the unused tail of the
+    /// allocation buys nothing, and it would spend more of the caller's
+    /// (often small) `RLIMIT_MEMLOCK` budget on bytes that were never
+    /// populated. `Drop`'s zeroization does *not* make the same choice — it
+    /// covers the full allocation, because a `Vec` built by, say, reading
+    /// key material and then `truncate`-ing it can leave real secret bytes
+    /// sitting in the spare capacity, and those still get freed by this
+    /// call whether or not they were ever "in use".
+    ///
+    /// Even with that fixed, `Secret::new` cannot protect intermediate
+    /// buffers the caller's own `Vec` already reallocated away while it was
+    /// being built — e.g. the old, smaller allocations left behind by
+    /// repeated `push` calls that grew the vector's capacity. Only the
+    /// allocation handed to this constructor is hardened; construct the
+    /// buffer inside a `Secret`-owned allocation (or with `Vec::with_capacity`
+    /// sized up front) if that gap matters.
     pub fn new(bytes: Vec<u8>) -> Self {
         let mut bytes = bytes;
         let locked = harden_buffer(bytes.as_mut_ptr(), bytes.len());
