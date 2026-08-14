@@ -179,6 +179,22 @@ impl Broker {
                     .ok_or_else(|| Error::protocol("message has no destination"))?;
 
                 if destination.as_str() == crate::BUS_NAME {
+                    if message.header.confidential
+                        && message.header.kind == MessageKind::MethodCall
+                    {
+                        // The bus's own service is not a loaded, hash-verified
+                        // module and can never be an attested recipient.
+                        // `handle_bus_call` ends in `bus_method`, which
+                        // deserializes the body — reaching that with a
+                        // confidential payload would both break "the broker
+                        // never parses a body" and risk a `BadArguments` built
+                        // from secret material. Refuse before dispatch, not
+                        // after.
+                        return Err(Error::not_attested(
+                            destination.clone(),
+                            "the bus itself is never an attested recipient",
+                        ));
+                    }
                     return self.handle_bus_call(from, from_name, message).await;
                 }
 
