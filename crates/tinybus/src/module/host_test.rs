@@ -1181,7 +1181,12 @@ async fn one_refused_module_does_not_stop_the_others_in_the_directory_from_loadi
 
 /// Copy `artifact` into a fresh directory beside a `modules.toml` listing
 /// `hash` for it, so a load can be driven against a real allowlist.
-#[cfg(unix)]
+///
+/// Portable: it derives the filename from `artifact.file_name()` rather than
+/// assuming an extension, so it works for a `.dll` staged artifact as-is. Not
+/// `#[cfg(unix)]` — the two `#[ignore]`d callers below run on Windows CI too
+/// ("Exercise the real loader (Windows)"), and gating this helper off would
+/// leave them referencing a function that does not exist there.
 fn staged_module(artifact: &Path, hash: &str) -> (tempfile::TempDir, PathBuf) {
     // Staged inside the crate, not in `/tmp`: the loader refuses to load from a
     // directory another user could write to, and `/tmp` is exactly that. The
