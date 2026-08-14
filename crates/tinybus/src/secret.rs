@@ -154,11 +154,44 @@ impl std::fmt::Display for Secret {
 /// optimization per-write, and the fence stops the compiler reordering *other*
 /// memory operations across the zeroization, so a caller that checks "is this
 /// zeroed yet" cannot observe the write out of order.
+///
+/// Takes an already-initialized `&mut [u8]`, so every byte in range is safe
+/// to address as a reference. [`zeroize_raw`] is the pointer-based sibling
+/// this delegates to, used directly wherever the range may include
+/// uninitialized bytes (a `Vec`'s spare capacity).
 fn zeroize(bytes: &mut [u8]) {
-    for byte in bytes.iter_mut() {
-        // SAFETY: `byte` is a valid, aligned `&mut u8` for the duration of
-        // this call, borrowed from the slice for exactly this write.
-        unsafe { std::ptr::write_volatile(byte, 0) };
+    // SAFETY: `bytes.as_mut_ptr()` is valid for `bytes.len()` writes — the
+    // slice's own guarantee — and every one of those bytes is initialized,
+    // so nothing here relies on write-without-read soundness that `bytes`
+    // itself does not already provide.
+    unsafe { zeroize_raw(bytes.as_mut_ptr(), bytes.len()) };
+}
+
+/// Overwrites `len` bytes at `ptr` with zero via a volatile write to each
+/// byte, followed by a `SeqCst` compiler fence — see [`zeroize`] for why
+/// both of those matter.
+///
+/// Deliberately takes a raw pointer rather than a `&mut [u8]`: the caller in
+/// [`Secret`]'s `Drop` needs to zero a `Vec`'s full `capacity`, and the bytes
+/// between `len` and `capacity` are typically uninitialized. Forming a
+/// `&mut [u8]` over uninitialized memory is its own footgun (references are
+/// expected to point at initialized values); going through a raw pointer and
+/// only ever *writing*, never reading, sidesteps that entirely — writing an
+/// arbitrary bit pattern to memory of a type with no invalid bit patterns
+/// (`u8`) is sound regardless of what was there before.
+///
+/// # Safety
+///
+/// `ptr` must be valid for `len` bytes of writes for the duration of this
+/// call (i.e. non-null, non-dangling, and not aliased by a live reference
+/// elsewhere). The memory does not need to be initialized.
+unsafe fn zeroize_raw(ptr: *mut u8, len: usize) {
+    for offset in 0..len {
+        // SAFETY: `ptr.add(offset)` is in-bounds for `len` bytes per this
+        // function's own contract; `write_volatile` writes without ever
+        // reading the destination, so its prior initialization state does
+        // not matter.
+        unsafe { std::ptr::write_volatile(ptr.add(offset), 0) };
     }
     compiler_fence(Ordering::SeqCst);
 }
