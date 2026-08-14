@@ -22,9 +22,22 @@ What it defeats:
 - **Lingering plaintext.** Zeroizing on `Drop` shrinks the window during
   which freed-but-not-yet-reused memory holds a readable copy, and stops a
   later heap reuse (or a *future* core dump of a *different* crash) from
-  turning up bytes that should already be gone.
+  turning up bytes that should already be gone. This zeroizes the buffer's
+  full `capacity`, not just its `len` — a `Vec<u8>` that was built and then
+  shrunk (`v.truncate(..)`) still has the shrunk-away bytes sitting in its
+  spare capacity, and those get freed in the clear unless the whole
+  allocation is cleared.
 
 What it does **not** defend against, and cannot:
+
+- **Intermediate buffers `Secret::new` never saw.** `Secret::new` takes
+  ownership of an already-built `Vec<u8>` and hardens *that* allocation. It
+  cannot reach back and clear allocations the `Vec` already reallocated away
+  while the caller was constructing it — e.g. the smaller, now-freed buffers
+  left behind by growth reallocations during a loop of `push` calls. If that
+  gap matters, build the buffer with its final capacity reserved up front
+  (`Vec::with_capacity`), so there is only ever one allocation for `Secret`
+  to harden.
 
 - A debugger or `ptrace` attached to the process. `Secret`'s bytes are, by
   necessity, plaintext in normal memory while in use — that is what makes
