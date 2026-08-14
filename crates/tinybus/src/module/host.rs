@@ -112,6 +112,14 @@ struct Activation {
     lazy_init: bool,
     lazy_load: bool,
     descriptor_info: Option<DescriptorInfo>,
+    /// The digest a caller pinned for this artifact, where the artifact did not
+    /// come from a directory carrying a `modules.toml`.
+    ///
+    /// Set only by the release path, which has already checked these bytes
+    /// twice — against the release's own checksum manifest and against the
+    /// value the caller compiled in. `None` everywhere else, which leaves the
+    /// on-disk allowlist as the sole source of attestation exactly as before.
+    pinned_sha256: Option<String>,
 }
 
 impl PendingModule {
@@ -298,6 +306,16 @@ impl ModuleHost {
     /// The release must publish a `checksum.toml` or `checksum.json` asset
     /// containing the SHA-256 for `asset_name`. When supplied, the host's
     /// expected digest must agree with the release manifest as well.
+    ///
+    /// Supplying `expected_sha256` is what makes the module an **attested
+    /// recipient**, eligible to be sent a confidential message. A host that
+    /// compiles a digest in has made the same statement an operator makes by
+    /// writing one into `modules.toml`, and it is a stronger one: the value
+    /// cannot be edited on the machine running it. Omitting the argument
+    /// leaves the release's own checksum manifest as the only claim about
+    /// these bytes — which is the publisher vouching for itself, not an
+    /// operator vouching for the publisher — so the module loads and is
+    /// refused secrets.
     pub fn load_github_release(
         &self,
         release_url: impl AsRef<str>,
@@ -310,7 +328,11 @@ impl ModuleHost {
             asset_name.as_ref(),
             expected_sha256,
         )?;
-        let info = self.load_file_with_config(&module, config)?;
+        let info = self.load_file_pinned(
+            &module,
+            config,
+            expected_sha256.map(str::to_ascii_lowercase),
+        )?;
         self.inner
             .artifacts
             .lock()
@@ -361,7 +383,10 @@ impl ModuleHost {
             manifest,
             init,
         };
-        self.activate(file.as_ref(), artifact, config)
+        // No pin: the caller handed over an already-resolved artifact rather
+        // than bytes this host read and hashed, so there is nothing to vouch
+        // for. Attestation, if any, comes from an allowlist beside the file.
+        self.activate(file.as_ref(), artifact, config, None)
     }
 
     /// Load one module and pass JSON configuration to its setup function.
@@ -372,6 +397,26 @@ impl ModuleHost {
         &self,
         path: impl AsRef<Path>,
         config: serde_json::Value,
+    ) -> Result<ModuleInfo> {
+        self.load_file_pinned(path, config, None)
+    }
+
+    /// [`ModuleHost::load_file_with_config`], carrying a digest the caller has
+    /// already verified for an artifact that has no `modules.toml` beside it.
+    ///
+    /// `pinned_sha256` is recorded as the attestation without being re-checked
+    /// here, because there is nothing left on disk to re-check it against — the
+    /// bytes it names are the archive, which was verified and then extracted.
+    /// The verification therefore lives entirely in the caller, and this stays
+    /// private for that reason: exposing it would let a caller declare an
+    /// artifact attested without anyone having hashed anything. The only
+    /// caller is [`ModuleHost::load_github_release`]; keep it that way, or move
+    /// the check down here first.
+    fn load_file_pinned(
+        &self,
+        path: impl AsRef<Path>,
+        config: serde_json::Value,
+        pinned_sha256: Option<String>,
     ) -> Result<ModuleInfo> {
         let path = path.as_ref();
         let result = (|| {
@@ -385,7 +430,7 @@ impl ModuleHost {
             check_file(path)?;
             if let Some(manifest) = read_lazy_manifest(path)? {
                 self.ensure_dependencies(&manifest, path)?;
-                return self.register_lazy(path, manifest, config);
+                return self.register_lazy(path, manifest, config, pinned_sha256.clone());
             }
             let artifact = loader::load(path, self.inner.strict.load(Ordering::Acquire))?;
             let rejected_manifest = artifact.manifest.clone();
@@ -393,7 +438,7 @@ impl ModuleHost {
                 self.record_manifest_rejection(&error, rejected_manifest, RefusalClass::Unresolved);
                 return Err(error);
             }
-            self.activate(path, artifact, config)
+            self.activate(path, artifact, config, pinned_sha256)
         })();
         if let Err(error) = &result {
             self.record_rejection(error);
@@ -431,7 +476,9 @@ impl ModuleHost {
         }
         check_file(path)?;
         self.ensure_dependencies(&manifest, path)?;
-        self.register_lazy(path, manifest, config)
+        // No pin: a caller naming a path on disk vouches for it with the
+        // `modules.toml` beside it, if at all.
+        self.register_lazy(path, manifest, config, None)
     }
 
     /// Discover and load every platform library in a private directory.
@@ -517,9 +564,15 @@ impl ModuleHost {
                         RefusalClass::Unresolved,
                     );
                 })
+                // No pin: these came from scanning a directory, so the
+                // `modules.toml` in it is the operator's statement about them.
                 .and_then(|()| match module {
-                    PendingModule::Loaded(artifact) => self.activate(&path, *artifact, config),
-                    PendingModule::Lazy(manifest) => self.register_lazy(&path, *manifest, config),
+                    PendingModule::Loaded(artifact) => {
+                        self.activate(&path, *artifact, config, None)
+                    }
+                    PendingModule::Lazy(manifest) => {
+                        self.register_lazy(&path, *manifest, config, None)
+                    }
                 });
             outcomes.push(result);
         }
@@ -642,6 +695,7 @@ impl ModuleHost {
         path: &Path,
         artifact: LoadedArtifact,
         config: serde_json::Value,
+        pinned_sha256: Option<String>,
     ) -> Result<ModuleInfo> {
         let _admission = self.inner.admission.lock().expect("module admission lock");
         let manifest = artifact.manifest.clone();
@@ -698,6 +752,7 @@ impl ModuleHost {
                 lazy_init: artifact.manifest.lazy_init,
                 lazy_load: false,
                 descriptor_info: None,
+                pinned_sha256,
             },
         )
     }
@@ -707,6 +762,7 @@ impl ModuleHost {
         path: &Path,
         manifest: ModuleManifest,
         config: serde_json::Value,
+        pinned_sha256: Option<String>,
     ) -> Result<ModuleInfo> {
         let _admission = self.inner.admission.lock().expect("module admission lock");
         let admitted = provisional_info(path, &manifest).inspect_err(|error| {
@@ -774,6 +830,7 @@ impl ModuleHost {
                 lazy_init: true,
                 lazy_load: true,
                 descriptor_info: Some(descriptor_info),
+                pinned_sha256,
             },
         )
     }
@@ -801,16 +858,31 @@ impl ModuleHost {
                 return Err(error);
             }
         };
-        // A module that matched `modules.toml` is an attested recipient: the
-        // host hashed its artifact against a list the operator installed, which
-        // is the same fact the trust store asserts about an out-of-process peer.
-        // Re-read rather than plumbed down from the gate, and fails closed —
-        // an artifact that changed underneath us no longer matches, so it does
-        // not become attested.
-        if let Ok(Some(sha256)) = std::fs::File::open(path)
-            .map_err(Error::from)
-            .and_then(|file| allowlisted_hash(path, file))
-        {
+        // A module whose bytes an operator vouched for is an attested
+        // recipient. There are two ways to vouch, and they differ only in where
+        // the operator wrote the digest down.
+        //
+        // On disk, it is `modules.toml` beside the artifact, re-read here
+        // rather than plumbed down from the gate so that an artifact which
+        // changed underneath us no longer matches and does not become attested.
+        //
+        // From a pinned release, it is the digest the caller compiled in, which
+        // `acquire` checked against the release's own checksum manifest and
+        // against the downloaded bytes before extracting anything. There is no
+        // `modules.toml` to re-read in that case — the artifact lives in a
+        // private temporary directory this host created moments ago — so the
+        // value is carried down instead. Both paths fail closed: no allowlist
+        // and no pin means no attestation, and a slim build that cannot load a
+        // module at all reaches neither.
+        let vouched = match activation.pinned_sha256 {
+            Some(pinned) => Some(pinned),
+            None => std::fs::File::open(path)
+                .map_err(Error::from)
+                .and_then(|file| allowlisted_hash(path, file))
+                .ok()
+                .flatten(),
+        };
+        if let Some(sha256) = vouched {
             self.inner.broker.attest_module(
                 &unique,
                 crate::attest::Attestation {

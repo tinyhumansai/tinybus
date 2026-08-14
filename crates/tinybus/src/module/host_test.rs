@@ -219,7 +219,9 @@ async fn a_lazy_manifest_registers_an_unmapped_library_and_the_first_call_loads_
         // rejected before discovery, so exercise the same sidecar seam directly;
         // the dedicated loader job covers a CI-provisioned private directory.
         let discovered = read_lazy_manifest(&artifact).unwrap().unwrap();
-        host.register_lazy(&artifact, discovered, serde_json::json!({}))
+        // No pin: this stands in for a directory scan, which vouches for an
+        // artifact with the `modules.toml` beside it or not at all.
+        host.register_lazy(&artifact, discovered, serde_json::json!({}), None)
             .unwrap()
     };
     assert_eq!(info.state, ModuleState::Resolved);
@@ -1358,4 +1360,91 @@ async fn a_module_whose_artifact_does_not_match_the_allowlist_never_loads_at_all
     let host = ModuleHost::new(Broker::new());
     let error = host.load_file(&staged).unwrap_err();
     assert!(error.to_string().contains("allowlist"), "{error}");
+}
+
+/// Copy `artifact` into a fresh directory carrying no allowlist at all.
+///
+/// This is the shape of a release download: the host extracted the archive
+/// into a private directory it just created, so there is no `modules.toml`
+/// beside the library and nothing on disk to re-read a digest from.
+#[cfg(unix)]
+fn staged_module_without_allowlist(artifact: &Path) -> (tempfile::TempDir, PathBuf) {
+    let root = artifact.parent().expect("artifact has a parent directory");
+    let dir = tempfile::tempdir_in(root).unwrap();
+    let staged = dir.path().join(artifact.file_name().unwrap());
+    std::fs::copy(artifact, &staged).unwrap();
+    (dir, staged)
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "requires TINYBUS_TEST_MODULE to point at the built cdylib"]
+async fn a_module_from_a_pinned_release_becomes_an_attested_recipient_without_an_allowlist_file() {
+    // The seam a host that loads from a release actually travels. `acquire`
+    // has already checked the archive against the release manifest and against
+    // the caller's compiled-in digest; what is proven here is that the fact
+    // survives into an `Attestation` instead of being dropped on the floor
+    // because no `modules.toml` happened to sit beside the extracted library.
+    let artifact = PathBuf::from(std::env::var_os("TINYBUS_TEST_MODULE").unwrap());
+    let (_dir, staged) = staged_module_without_allowlist(&artifact);
+    let pinned = "b".repeat(64);
+
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    broker.spawn(bus.clone());
+    let host = ModuleHost::new(broker.clone());
+    let info = host
+        .load_file_pinned(&staged, serde_json::json!({}), Some(pinned.clone()))
+        .unwrap();
+
+    let client = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let attestation = client
+        .attestation(info.manifest.bus_name.clone())
+        .await
+        .unwrap()
+        .expect("a module loaded against a pinned digest is attested");
+    assert_eq!(attestation.name, info.manifest.bus_name);
+
+    // Recorded verbatim, and deliberately *not* the hash of the library file.
+    // The pin names the release archive the library was extracted from, which
+    // is the only artifact any operator asserted anything about. Re-hashing
+    // the extracted file here would replace a checked fact with a number this
+    // code computed and then trusted itself for, so the two must differ.
+    assert_eq!(attestation.sha256, pinned);
+    let library_hash =
+        crate::module::hash::file_hex(std::fs::File::open(&staged).unwrap()).unwrap();
+    assert_ne!(attestation.sha256, library_hash);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "requires TINYBUS_TEST_MODULE to point at the built cdylib"]
+async fn a_module_with_neither_a_pin_nor_an_allowlist_is_loaded_but_never_attested() {
+    // The regression this change exists to fix, asserted from the other side:
+    // before it, every release-loaded module looked exactly like this, so a
+    // confidential call to one was refused no matter how carefully the host
+    // had pinned the digest. Loading must still succeed — an unattested module
+    // is ineligible for secrets, not inadmissible.
+    let artifact = PathBuf::from(std::env::var_os("TINYBUS_TEST_MODULE").unwrap());
+    let (_dir, staged) = staged_module_without_allowlist(&artifact);
+
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    broker.spawn(bus.clone());
+    let host = ModuleHost::new(broker.clone());
+    let info = host.load_file(&staged).unwrap();
+
+    let client = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    assert!(
+        client
+            .attestation(info.manifest.bus_name.clone())
+            .await
+            .unwrap()
+            .is_none(),
+        "a module nobody vouched for must not be eligible to receive a secret"
+    );
 }
