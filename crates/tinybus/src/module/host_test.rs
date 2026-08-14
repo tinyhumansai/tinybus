@@ -219,7 +219,9 @@ async fn a_lazy_manifest_registers_an_unmapped_library_and_the_first_call_loads_
         // rejected before discovery, so exercise the same sidecar seam directly;
         // the dedicated loader job covers a CI-provisioned private directory.
         let discovered = read_lazy_manifest(&artifact).unwrap().unwrap();
-        host.register_lazy(&artifact, discovered, serde_json::json!({}))
+        // No pin: this stands in for a directory scan, which vouches for an
+        // artifact with the `modules.toml` beside it or not at all.
+        host.register_lazy(&artifact, discovered, serde_json::json!({}), None)
             .unwrap()
     };
     assert_eq!(info.state, ModuleState::Resolved);
