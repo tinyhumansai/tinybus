@@ -1188,19 +1188,22 @@ async fn one_refused_module_does_not_stop_the_others_in_the_directory_from_loadi
 /// ("Exercise the real loader (Windows)"), and gating this helper off would
 /// leave them referencing a function that does not exist there.
 fn staged_module(artifact: &Path, hash: &str) -> (tempfile::TempDir, PathBuf) {
-    // Staged under the *current directory*, not `/tmp` and not
-    // `CARGO_MANIFEST_DIR`. Two separate constraints pin this down:
+    // Staged beside the artifact, because that is the one directory known to
+    // satisfy the loader's own admission check on every platform CI runs.
     //
-    // `/tmp` is out because the loader refuses a directory another user could
-    // write to, which is the admission check doing its job.
+    // The check refuses any directory another user could write to, and no
+    // fixed location satisfies it everywhere: `/tmp` is world-writable on
+    // Unix, while on Windows the checkout tree carries permissive inherited
+    // ACLs. CI works around this per-platform — on Unix the artifacts sit in
+    // the user-owned `target/debug/examples`, and on Windows the workflow
+    // builds `target/private-module-tests` with an owner-only ACL, copies the
+    // DLLs in, and redirects `TEMP`/`TMP` there.
     //
-    // `CARGO_MANIFEST_DIR` is out because it is a compile-time absolute path,
-    // and on Windows CI a directory created under it is refused by that same
-    // check while one created under `current_dir()` is not. The other
-    // real-loader tests in this file already use `current_dir()` and pass on
-    // Windows, so this matches the idiom that is known to work rather than
-    // inventing a second one.
-    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    // Deriving the staging root from the artifact rather than from a constant
+    // inherits whichever of those CI already arranged: on Windows the ACL is
+    // set with `ContainerInherit`, so a directory created here picks it up.
+    let root = artifact.parent().expect("artifact has a parent directory");
+    let dir = tempfile::tempdir_in(root).unwrap();
     let file_name = artifact.file_name().unwrap();
     let staged = dir.path().join(file_name);
     std::fs::copy(artifact, &staged).unwrap();
