@@ -1182,11 +1182,21 @@ async fn one_refused_module_does_not_stop_the_others_in_the_directory_from_loadi
 /// Copy `artifact` into a fresh directory beside a `modules.toml` listing
 /// `hash` for it, so a load can be driven against a real allowlist.
 ///
-/// Portable: it derives the filename from `artifact.file_name()` rather than
-/// assuming an extension, so it works for a `.dll` staged artifact as-is. Not
-/// `#[cfg(unix)]` — the two `#[ignore]`d callers below run on Windows CI too
-/// ("Exercise the real loader (Windows)"), and gating this helper off would
-/// leave them referencing a function that does not exist there.
+/// Unix-only, and the reason is the loader's own admission check rather than
+/// anything about the code under test. On Windows that check trusts exactly
+/// three SIDs on a module directory: its owner, `LocalSystem`, and
+/// `BUILTIN\Administrators`. A CI runner's account is an administrator, so a
+/// directory a *test* creates is owned by `BUILTIN\Administrators` while the
+/// ACE it inherits names the user SID — neither the owner nor well-known
+/// trusted — and the load is refused. That is why the Windows workflow calls
+/// `SetOwner` on the directories it provisions; a test cannot do the same
+/// without Win32 calls of its own.
+///
+/// Gating here costs little: what these two tests exercise is the hash
+/// comparison and the attestation record it produces, which is identical on
+/// every platform. The Windows-specific directory policy is covered by the
+/// existing loader tests that run against the CI-provisioned directories.
+#[cfg(unix)]
 fn staged_module(artifact: &Path, hash: &str) -> (tempfile::TempDir, PathBuf) {
     // Staged beside the artifact, because that is the one directory known to
     // satisfy the loader's own admission check on every platform CI runs.
@@ -1215,6 +1225,7 @@ fn staged_module(artifact: &Path, hash: &str) -> (tempfile::TempDir, PathBuf) {
     (dir, staged)
 }
 
+#[cfg(unix)]
 #[tokio::test]
 #[ignore = "requires TINYBUS_TEST_MODULE to point at the built cdylib"]
 async fn a_module_loaded_from_an_allowlisted_artifact_becomes_an_attested_recipient() {
@@ -1242,6 +1253,7 @@ async fn a_module_loaded_from_an_allowlisted_artifact_becomes_an_attested_recipi
     assert_eq!(attestation.name, info.manifest.bus_name);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 #[ignore = "requires TINYBUS_TEST_MODULE to point at the built cdylib"]
 async fn a_module_whose_artifact_does_not_match_the_allowlist_never_loads_at_all() {
