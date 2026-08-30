@@ -32,7 +32,7 @@ tinybus-macros = { workspace = true, optional = true }
 
 # --- optional: the CLI ---
 clap = { version = "4", features = ["derive", "env"], optional = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt"], optional = true }
 ureq = { version = "3.3", optional = true }
 flate2 = { version = "1", optional = true }
 tar = { version = "0.4", optional = true }
@@ -43,10 +43,9 @@ toml = { version = "0.8", optional = true }
 [features]
 # `uds` and `macros` are on by default because a bus you cannot connect to over
 # a socket, and an interface you have to hand-dispatch, are not what anyone is
-# installing. The features exist so the *kernel* can take
-# `--no-default-features` and get the protocol plus the in-process transport and
-# nothing else — no `tokio/net`, no proc-macro build step.
-default = ["uds", "macros", "cli"]
+# installing. The CLI is opt-in: embedding the library should not pull in
+# command parsing, log formatting, signal handling, or a multi-thread runtime.
+default = ["uds", "macros"]
 
 # Length-prefixed JSON over a Unix domain socket (Windows: named pipe, not yet
 # implemented — see ROADMAP.md). This is the production transport.
@@ -57,7 +56,8 @@ uds = ["tokio/net", "tokio/io-util"]
 macros = ["dep:tinybus-macros"]
 
 # The `tinybus` binary: `serve`, `call`, `emit`, `list`, `monitor`, `doctor`.
-# The library never asks for a multi-threaded runtime — only the binary does.
+# This is deliberately opt-in; the library never asks for a multi-threaded
+# runtime or a log sink.
 cli = [
     "dep:clap",
     "dep:tracing-subscriber",

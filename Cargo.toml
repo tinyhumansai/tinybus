@@ -30,3 +30,9 @@ tracing = "0.1"
 
 [profile.release]
 lto = "thin"
+# Distribution binaries favor size over release-build throughput.  Symbols are
+# not needed for ordinary CLI operation, while the module host retains unwind
+# support so it can contain panicking module callbacks.
+strip = "symbols"
+opt-level = "z"
+codegen-units = 1
