@@ -91,13 +91,8 @@ pub struct Header {
     /// An older broker that does not know this field routes the message
     /// normally, which is why a sender must not assume the guarantee holds
     /// without checking `GetAttestation` first. See [`crate::attest`].
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub confidential: bool,
-}
-
-/// `skip_serializing_if` needs a path, and `bool::not` takes `self` by value.
-fn is_false(value: &bool) -> bool {
-    !*value
 }
 
 /// A framed message: header plus a JSON body.
