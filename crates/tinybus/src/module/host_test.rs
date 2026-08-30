@@ -790,8 +790,15 @@ fn a_module_built_against_an_incompatible_tinybus_is_refused_and_names_both_vers
         .validate(Path::new("clock.so"), &descriptor, &manifest())
         .unwrap_err();
     let text = error.to_string();
+    let module_version = format!(
+        "99.{}",
+        crate::VERSION
+            .split_once('.')
+            .expect("crate versions have a minor component")
+            .1
+    );
     assert!(text.contains(crate::VERSION), "{text}");
-    assert!(text.contains("99.1.0"), "{text}");
+    assert!(text.contains(&module_version), "{text}");
 }
 
 #[test]
