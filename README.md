@@ -70,7 +70,7 @@ subscribe to with match rules.
 ## Quick start
 
 ```sh
-cargo run --bin tinybus -- serve                        # terminal 1: the broker
+cargo run --features cli --bin tinybus -- serve         # terminal 1: the broker
 cargo run --example voice_service --all-features        # terminal 2: a service
 cargo run --example kernel_client --all-features        # terminal 3: the kernel side
 
@@ -115,7 +115,7 @@ docs/modules/            one document per module
 | --- | --- | --- |
 | `uds` | yes | Unix-socket transport — the production one |
 | `macros` | yes | `#[tinybus::interface]` |
-| `cli` | yes | the `tinybus` binary |
+| `cli` | no | the `tinybus` binary, CLI log formatting, and signal handling |
 | `modules` | no | trusted in-process `cdylib` discovery and loading |
 
 `--no-default-features` leaves the protocol, the router, the broker and the
