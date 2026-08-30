@@ -55,10 +55,10 @@ pub(crate) fn file_hex(mut reader: impl Read) -> io::Result<String> {
     Ok(state.iter().map(|word| format!("{word:08x}")).collect())
 }
 
-fn compress(state: &mut [u32; 8], block: &[u8]) {
+fn compress(state: &mut [u32; 8], block: &[u8; 64]) {
     let mut words = [0u32; 64];
-    for (index, chunk) in block.chunks_exact(4).enumerate() {
-        words[index] = u32::from_be_bytes(chunk.try_into().expect("four-byte chunk"));
+    for (index, chunk) in block.as_chunks::<4>().0.iter().enumerate() {
+        words[index] = u32::from_be_bytes(*chunk);
     }
     for index in 16..64 {
         let s0 = words[index - 15].rotate_right(7)
