@@ -13,6 +13,7 @@ use crate::broker::Broker;
 use crate::build_info;
 use crate::error::{Error, Result, sanitize_untrusted};
 use crate::module::abi::{TB_OK, TbAbiDescriptor, TbModuleInit, TbModuleVtable, field_bytes};
+use crate::module::github::CachedRelease;
 use crate::module::loader::{self, LoadedArtifact};
 use crate::module::manifest::{MANIFEST_SCHEMA, ModuleIdentity, ModuleManifest, PanicPolicy};
 use crate::module::transport::ModuleTransport;
@@ -341,6 +342,37 @@ impl ModuleHost {
         Ok(info)
     }
 
+    /// [`ModuleHost::load_github_release`] through a persistent, verified cache.
+    ///
+    /// The first load of a release downloads it into `release.cache_dir` —
+    /// the archive, its extraction, and the digest the release manifest
+    /// published — after the same two-sided check as the uncached path. Every
+    /// later load re-hashes the archive on disk against the host's pin and
+    /// maps the library without touching the network, which is what makes a
+    /// module cheap to load at every launch rather than once per process.
+    ///
+    /// Attestation is the same digest the uncached path records: the archive's,
+    /// checked against the pin before anything is mapped. The extracted library
+    /// is held to the release's own `modules.toml` by the ordinary allowlist
+    /// gate on every load.
+    ///
+    /// Nothing is retained here. The directory outlives the process by design,
+    /// so the sibling files a mapped library may resolve stay where they are.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the release cannot be acquired — see
+    /// [`CachedRelease`] for when a miss is a refusal — or if the artifact is not
+    /// admitted.
+    pub fn load_github_release_cached(
+        &self,
+        release: &CachedRelease<'_>,
+        config: serde_json::Value,
+    ) -> Result<ModuleInfo> {
+        let (module, sha256) = crate::module::github::acquire_cached(release)?;
+        self.load_file_pinned(&module, config, Some(sha256))
+    }
+
     /// Admit and initialize an already-resolved module without calling the
     /// platform loader.
     ///
@@ -410,8 +442,10 @@ impl ModuleHost {
     /// The verification therefore lives entirely in the caller, and this stays
     /// private for that reason: exposing it would let a caller declare an
     /// artifact attested without anyone having hashed anything. The only
-    /// caller is [`ModuleHost::load_github_release`]; keep it that way, or move
-    /// the check down here first.
+    /// callers are [`ModuleHost::load_github_release`] and
+    /// [`ModuleHost::load_github_release_cached`], both of which hash the
+    /// archive against the pin first; keep it that way, or move the check down
+    /// here first.
     fn load_file_pinned(
         &self,
         path: impl AsRef<Path>,

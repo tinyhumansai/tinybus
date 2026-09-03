@@ -108,6 +108,26 @@ tinybus modules checksum \
   --output checksum.toml
 ```
 
+## Release cache
+
+`ModuleHost::load_github_release_cached` is `load_github_release` with a
+directory that outlives the process. The host names it — one per module
+version — and the first load downloads into a staging directory beside it,
+verifies the archive against the release's `checksum.toml` and the host's pin,
+extracts, records the manifest digest beside the archive, and commits with one
+rename. Every later load re-hashes the archive on disk against the pin, checks
+the extracted library against the release's own `modules.toml`, and maps it
+without touching the network. A directory that fails either check is a miss,
+not a refusal: the next download replaces it.
+
+Asset URLs are built from the tag rather than looked up through the REST API,
+whose unauthenticated budget is shared by everyone behind one address; the API
+is only the fallback for a release whose direct path answers 404. Every
+request carries resolve, connect and response budgets, so an address that
+drops packets costs seconds rather than the operating system's SYN timeout.
+Set `allow_download` to `false` to make a miss a refusal, for a host whose
+operator has disabled downloads.
+
 Refusing one artifact does not prevent the host from admitting other artifacts
 in the same directory. The refused artifact's error contains only a sanitized
 basename and fixed reason.

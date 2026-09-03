@@ -6,6 +6,8 @@
 
 pub mod abi;
 #[cfg(feature = "modules")]
+mod cache;
+#[cfg(feature = "modules")]
 mod github;
 mod hash;
 pub mod manifest;
@@ -19,6 +21,8 @@ mod resolve;
 #[cfg(feature = "modules")]
 mod transport;
 
+#[cfg(feature = "modules")]
+pub use github::CachedRelease;
 #[cfg(feature = "modules")]
 pub use host::{ModuleHost, ModuleInfo, ModuleState};
 
