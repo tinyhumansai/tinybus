@@ -1004,4 +1004,96 @@ mod tests {
         assert_eq!(unsafe { (out.shutdown)(out.module_ctx, 10) }, TB_OK);
         assert_eq!(unsafe { (out.shutdown)(out.module_ctx, 10) }, TB_CLOSED);
     }
+
+    /// Startup refuses a host vtable it cannot trust, before it builds anything.
+    ///
+    /// Every branch here returns before a runtime, a panic hook or a transport
+    /// exists, which is the property worth pinning: this is the first code a
+    /// `dlopen`ed module runs, it is handed a raw pointer by the host, and the
+    /// refusals are what stand between a malformed descriptor and a
+    /// dereference. A regression would not fail loudly — it would read off the
+    /// end of a struct the host never filled in.
+    ///
+    /// Deliberately takes no host-state guard: none of these paths touches the
+    /// shared statics or the module's process-global runtime capture, because
+    /// none of them gets far enough to.
+    #[test]
+    fn configured_startup_refuses_a_host_vtable_it_cannot_trust() {
+        fn attempt(host: *const TbHostVtable) -> i32 {
+            let mut out = TbModuleVtable::default();
+            unsafe {
+                start_module_with_config::<serde_json::Value, _, _>(
+                    host,
+                    &mut out,
+                    1,
+                    true,
+                    // Never runs: every case below is refused before setup.
+                    |_, _| async { Ok(()) },
+                )
+            }
+        }
+
+        assert_eq!(
+            attempt(std::ptr::null()),
+            TB_BAD_ARGUMENT,
+            "a null host vtable is refused rather than dereferenced"
+        );
+
+        // A host built against an older, smaller descriptor. Reading our
+        // fields out of it would run off the end of what it allocated.
+        let mut truncated = host(b"{}");
+        truncated.size = (size_of::<TbHostVtable>() - 1) as u32;
+        assert_eq!(
+            attempt(&truncated),
+            TB_BAD_ARGUMENT,
+            "a vtable shorter than this ABI's is refused"
+        );
+
+        // A length with no buffer behind it.
+        let mut dangling = host(b"{}");
+        dangling.config.ptr = std::ptr::null();
+        dangling.config.len = 8;
+        assert_eq!(
+            attempt(&dangling),
+            TB_BAD_ARGUMENT,
+            "a config length with a null pointer is refused"
+        );
+
+        // Past the 1 MiB config cap. The pointer is valid; only the claimed
+        // length is not, so this asserts the cap and not the null check.
+        let real = b"{}";
+        let mut oversized = host(real);
+        oversized.config.len = 1024 * 1024 + 1;
+        assert_eq!(
+            attempt(&oversized),
+            TB_BAD_ARGUMENT,
+            "a config past the size cap is refused"
+        );
+
+        // Well-formed descriptor, unparseable config for the declared type.
+        let malformed = host(b"not json");
+        assert_eq!(
+            attempt(&malformed),
+            TB_BAD_ARGUMENT,
+            "a config that does not deserialize is refused"
+        );
+
+        // A config the module cannot deserialize into its own type is the same
+        // refusal, which is what stops a type mismatch reaching `setup`.
+        let wrong_shape = host(br#"{"answer":42}"#);
+        let mut out = TbModuleVtable::default();
+        assert_eq!(
+            unsafe {
+                start_module_with_config::<Vec<String>, _, _>(
+                    &wrong_shape,
+                    &mut out,
+                    1,
+                    true,
+                    |_, _| async { Ok(()) },
+                )
+            },
+            TB_BAD_ARGUMENT,
+            "an object is not a Vec<String>, and that is caught before setup"
+        );
+    }
 }
