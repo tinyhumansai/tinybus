@@ -55,6 +55,23 @@ mod configured {
     }
 }
 
+mod optional {
+    async fn setup(_: tinybus::Connection) -> tinybus::Result<()> {
+        Ok(())
+    }
+
+    crate::module_export_optional_static! {
+        setup = setup,
+        worker_threads = 1,
+        provides = ["ai.tinyhumans.tinybus.OptionalStatic"],
+        methods = [],
+        signals = [],
+        requires = [],
+        optional = [],
+        lazy = false,
+    }
+}
+
 #[test]
 fn linked_modules_retain_distinct_manifests() {
     fn manifest(slice: tinybus::module::abi::TbSlice) -> tinybus::module::manifest::ModuleManifest {
@@ -77,6 +94,12 @@ fn linked_modules_retain_distinct_manifests() {
         configured_manifest.bus_name.as_str(),
         "ai.tinyhumans.tinybus.StaticConfigured"
     );
+    assert_eq!(first::linked_module().unwrap().manifest, first_manifest);
+    assert_eq!(second::linked_module().unwrap().manifest, second_manifest);
+    assert_eq!(
+        configured::linked_module().unwrap().manifest,
+        configured_manifest
+    );
     let _entries = (
         &first::TINYBUS_MODULE_ABI_V1,
         first::tinybus_module_init_v1 as tinybus::module::abi::TbModuleInit,
@@ -84,6 +107,12 @@ fn linked_modules_retain_distinct_manifests() {
         second::tinybus_module_init_v1 as tinybus::module::abi::TbModuleInit,
         &configured::TINYBUS_MODULE_ABI_V1,
         configured::tinybus_module_init_v1 as tinybus::module::abi::TbModuleInit,
+    );
+    assert!(!optional::tinybus_module_manifest_v1().ptr.is_null());
+    #[cfg(feature = "static-link")]
+    assert_eq!(
+        optional::linked_module().unwrap().manifest.module.name,
+        "tinybus-module"
     );
 }
 
@@ -107,6 +136,22 @@ fn invalid_linked_manifest_never_exposes_partial_bytes() {
     assert!(slice.ptr.is_null());
     assert_eq!(slice.len, 0);
     assert!(BYTES.get().is_none());
+}
+
+#[test]
+fn linked_helper_refuses_an_invalid_descriptor() {
+    let mut descriptor = first::TINYBUS_MODULE_ABI_V1;
+    descriptor.magic = 0;
+    let error = unsafe {
+        tinybus::module::LinkedModule::from_exports(
+            &descriptor,
+            first::tinybus_module_manifest_v1,
+            first::tinybus_module_init_v1,
+        )
+    }
+    .err()
+    .expect("invalid descriptor must be rejected");
+    assert!(error.to_string().contains("ABI magic does not match"));
 }
 
 #[tokio::test]

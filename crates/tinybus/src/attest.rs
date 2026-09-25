@@ -5,7 +5,7 @@
 //! Some payloads are the kind whose disclosure *is* the failure: a private key,
 //! a recovery phrase, a bearer token. The recipient of one of those is a
 //! **module loaded into the host's address space**, whose artifact the host
-//! hashed against the operator's `modules.toml` before `dlopen` ever ran. A
+//! verified before `dlopen`, or whose code was linked into the host. A
 //! secret handed to such a module never crosses a transport, never reaches a
 //! separate process, and never touches a socket.
 //!
@@ -71,7 +71,7 @@ pub struct Attestation {
     /// is whether the code answering to `…Wallet` is what the operator
     /// allowlisted for `…Wallet`.
     pub name: BusName,
-    /// Lowercase hex SHA-256 of the bytes the operator vouched for.
+    /// Lowercase hex SHA-256 of the loaded artifact or linked host executable.
     ///
     /// For a module loaded from disk that is the library file itself, hashed
     /// against a `modules.toml` beside it. For one loaded from a pinned GitHub
@@ -81,9 +81,9 @@ pub struct Attestation {
     /// library instead would report a number nobody had vouched for, computed
     /// by the same code that would then be trusting it.
     ///
-    /// A sender that pinned the digest itself can therefore compare this
-    /// against its own copy before parting with a secret, rather than taking
-    /// the host's word that some check happened.
+    /// A linked module reports the SHA-256 of the host executable containing
+    /// its code, not a release archive pin. A sender of a secret must recognize
+    /// linked registration explicitly before accepting that digest.
     pub sha256: String,
 }
 

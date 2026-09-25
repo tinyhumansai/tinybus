@@ -762,6 +762,21 @@ where
 /// ```
 #[macro_export]
 macro_rules! module_export {
+    (@linked) => {
+        /// Entry points and parsed manifest for a host that links this module.
+        ///
+        /// # Errors
+        /// Returns an error if the generated manifest is invalid.
+        pub fn linked_module() -> ::tinybus::Result<::tinybus::module::LinkedModule> {
+            unsafe {
+                ::tinybus::module::LinkedModule::from_exports(
+                    &TINYBUS_MODULE_ABI_V1,
+                    tinybus_module_manifest_v1,
+                    tinybus_module_init_v1,
+                )
+            }
+        }
+    };
     (@common
         export = {$($export:tt)*},
         worker_threads = $threads:expr,
@@ -917,6 +932,7 @@ macro_rules! module_export_static {
             config = $config,
             $($rest)*
         }
+        $crate::module_export! { @linked }
     };
     (setup = $setup:path, $($rest:tt)*) => {
         $crate::module_export! {
@@ -925,6 +941,22 @@ macro_rules! module_export_static {
             setup = $setup,
             $($rest)*
         }
+        $crate::module_export! { @linked }
+    };
+}
+
+/// Select the dynamic or linked export from one declaration.
+///
+/// The consuming crate declares a `static-link` feature. Its default build
+/// retains the C exports, while the linked build uses Rust-addressable entry
+/// points and the linked runtime mode.
+#[macro_export]
+macro_rules! module_export_optional_static {
+    ($($declaration:tt)*) => {
+        #[cfg(not(feature = "static-link"))]
+        $crate::module_export! { $($declaration)* }
+        #[cfg(feature = "static-link")]
+        $crate::module_export_static! { $($declaration)* }
     };
 }
 

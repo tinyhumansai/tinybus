@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::broker::Broker;
 use crate::build_info;
 use crate::error::{Error, Result, sanitize_untrusted};
+use crate::module::LinkedModule;
 use crate::module::abi::{TB_OK, TbAbiDescriptor, TbModuleInit, TbModuleVtable, field_bytes};
 use crate::module::github::CachedRelease;
 use crate::module::loader::{self, LoadedArtifact};
@@ -117,10 +118,9 @@ struct Activation {
     /// The digest a caller pinned for this artifact, where the artifact did not
     /// come from a directory carrying a `modules.toml`.
     ///
-    /// Set only by the release path, which has already checked these bytes
-    /// twice — against the release's own checksum manifest and against the
-    /// value the caller compiled in. `None` everywhere else, which leaves the
-    /// on-disk allowlist as the sole source of attestation exactly as before.
+    /// Set by the verified release path or linked-code path. The release path
+    /// records the pinned archive digest; linked code records the host
+    /// executable digest. `None` for raw attachments and ordinary local files.
     pinned_sha256: Option<String>,
 }
 
@@ -492,6 +492,47 @@ impl ModuleHost {
         // than bytes this host read and hashed, so there is nothing to vouch
         // for. Attestation, if any, comes from an allowlist beside the file.
         self.activate(file.as_ref(), artifact, config, None)
+    }
+
+    /// Admit a module whose code is linked into the host executable.
+    ///
+    /// The executable's digest identifies the admitted code in the ordinary
+    /// attestation response. This is host trust, not a digest of a separate
+    /// library or a claim made by the module itself.
+    ///
+    /// # Errors
+    /// Returns an error if the host executable cannot be hashed or the module
+    /// fails the normal descriptor, manifest, dependency, or init checks.
+    pub fn attach_linked_with_config(
+        &self,
+        module: LinkedModule,
+        config: serde_json::Value,
+    ) -> Result<ModuleInfo> {
+        static EXECUTABLE_DIGEST: OnceLock<String> = OnceLock::new();
+        let digest = match EXECUTABLE_DIGEST.get() {
+            Some(digest) => digest.clone(),
+            None => {
+                let executable = std::env::current_exe()
+                    .map_err(|_| Error::failed("linked module host executable is unavailable"))?;
+                let digest = crate::module::sha256_file(executable)
+                    .map_err(|_| Error::failed("linked module host executable cannot be hashed"))?;
+                let _ = EXECUTABLE_DIGEST.set(digest.clone());
+                digest
+            }
+        };
+        let name = sanitize_untrusted(&module.manifest.module.name);
+        let path = PathBuf::from(format!("linked-{name}"));
+        self.ensure_dependencies(&module.manifest, &path)?;
+        self.activate(
+            &path,
+            LoadedArtifact {
+                descriptor: module.descriptor,
+                manifest: module.manifest,
+                init: module.init,
+            },
+            config,
+            Some(digest),
+        )
     }
 
     /// Load one module and pass JSON configuration to its setup function.
@@ -958,9 +999,9 @@ impl ModuleHost {
                 return Err(error);
             }
         };
-        // A module whose bytes an operator vouched for is an attested
-        // recipient. There are two ways to vouch, and they differ only in where
-        // the operator wrote the digest down.
+        // A verified release, an allowlisted local file, or linked code can
+        // become an attested recipient. The linked case identifies the
+        // executable containing its code, not a separate release artifact.
         //
         // On disk, it is `modules.toml` beside the artifact, re-read here
         // rather than plumbed down from the gate so that an artifact which
@@ -971,9 +1012,9 @@ impl ModuleHost {
         // against the downloaded bytes before extracting anything. There is no
         // `modules.toml` to re-read in that case — the artifact lives in a
         // private temporary directory this host created moments ago — so the
-        // value is carried down instead. Both paths fail closed: no allowlist
-        // and no pin means no attestation, and a slim build that cannot load a
-        // module at all reaches neither.
+        // value is carried down instead. Linked code carries the executable
+        // digest through the same field. Without one of these sources there is
+        // no attestation.
         let vouched = match activation.pinned_sha256 {
             Some(pinned) => Some(pinned),
             None => std::fs::File::open(path)
