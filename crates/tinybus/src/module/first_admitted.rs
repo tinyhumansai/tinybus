@@ -11,12 +11,14 @@
 //! extraction.
 //!
 //! An installer-shipped bundle is consulted first and is authoritative: if any
-//! candidate archive is present there, the release cache is never touched, and a
+//! candidate archive — or the archive's digest marker, which an installer may
+//! ship in its place (see [`super::cache::find_marked`]) — is present there, the release cache is never touched, and a
 //! bundle that fails admission is reported instead of silently replaced by a
 //! download.
 
 use std::path::Path;
 
+use super::cache::digest_marker_path;
 use super::{CachedRelease, ModuleHost, ModuleInfo, artifact_dir};
 
 /// One published artifact of a release and the digest that makes it legitimate.
@@ -79,18 +81,32 @@ pub fn load_first_admitted(
             else {
                 continue;
             };
-            if !cache_dir.join(asset.archive).is_file() {
+            // An installer may ship the archive, or — where the archive's own
+            // contents cannot ship, as in a notarized macOS app — the archive's
+            // digest marker in its place. The archive decides when present.
+            let has_archive = cache_dir.join(asset.archive).is_file();
+            if !has_archive && !digest_marker_path(&cache_dir, asset.archive).is_file() {
                 continue;
             }
             found_bundled = true;
-            let release = CachedRelease {
-                release_url: plan.release_url,
-                asset_name: asset.archive,
-                expected_sha256: Some(asset.sha256),
-                cache_dir: &cache_dir,
-                allow_download: false,
+            let loaded = if has_archive {
+                let release = CachedRelease {
+                    release_url: plan.release_url,
+                    asset_name: asset.archive,
+                    expected_sha256: Some(asset.sha256),
+                    cache_dir: &cache_dir,
+                    allow_download: false,
+                };
+                host.load_github_release_cached(&release, module_config.clone())
+            } else {
+                host.load_bundled_marked(
+                    &cache_dir,
+                    asset.archive,
+                    asset.sha256,
+                    module_config.clone(),
+                )
             };
-            match host.load_github_release_cached(&release, module_config.clone()) {
+            match loaded {
                 Ok(info) => {
                     tracing::info!("[modules] loaded '{id}' from the installer bundle");
                     return Ok(info);

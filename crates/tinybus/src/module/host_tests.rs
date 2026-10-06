@@ -571,6 +571,138 @@ async fn a_lazy_manifest_registers_an_unmapped_library_and_the_first_call_loads_
     broker_task.abort();
 }
 
+/// The installer-bundle marker path end to end: no archive, a marker equal to
+/// the pin, and an extraction the host admits. A lazy sidecar stands in for a
+/// real library, as above, so admission runs without mapping anything.
+#[cfg(not(windows))]
+#[tokio::test]
+async fn a_bundle_marker_equal_to_the_pin_admits_the_extraction_without_its_archive() {
+    use crate::module::{ReleaseAsset, ReleasePlan, artifact_dir, load_first_admitted};
+
+    let bundled = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let user_cache = tempfile::tempdir().unwrap();
+    let asset = ReleaseAsset {
+        host_key: "macos-15-arm64",
+        archive: "clock-macos-15-arm64.tar.gz",
+        sha256: "abababababababababababababababababababababababababababababababab",
+    };
+    let dir = artifact_dir(bundled.path(), "clock", "0.1.0", asset.host_key).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    let artifact = dir.join(format!(
+        "clock.{}",
+        crate::module::cache::library_extension()
+    ));
+    std::fs::write(&artifact, b"not loaded until the first call").unwrap();
+    let mut lazy_manifest = manifest();
+    lazy_manifest.lazy_init = true;
+    std::fs::write(
+        lazy_manifest_path(&artifact),
+        serde_json::to_vec(&lazy_manifest).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        crate::module::cache::digest_marker_path(&dir, asset.archive),
+        format!("{}\n", asset.sha256),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("modules.toml"),
+        format!(
+            "{:?} = {:?}\n",
+            artifact.file_name().unwrap().to_str().unwrap(),
+            crate::module::sha256_file(&artifact).unwrap()
+        ),
+    )
+    .unwrap();
+
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    let broker_task = broker.spawn(bus.clone());
+    let host = ModuleHost::new(broker);
+    let assets = [asset];
+    let plan = ReleasePlan {
+        id: "clock",
+        version: "0.1.0",
+        release_url: "https://github.com/tinyhumansai/clock/releases/tag/v0.1.0",
+        assets: &assets,
+        install_root: user_cache.path(),
+        bundled_root: Some(bundled.path()),
+        allow_download: false,
+    };
+    let info = load_first_admitted(&host, &plan, &serde_json::json!({})).unwrap();
+    assert_eq!(info.state, ModuleState::Resolved);
+    assert!(!dir.join(asset.archive).exists());
+
+    // Only an allowlist hashed against the mapped file attests; the marker's
+    // claim about an archive nobody hashed does not.
+    let connection = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let attestation = connection
+        .attestation(info.manifest.bus_name.clone())
+        .await
+        .unwrap()
+        .expect("the allowlisted extraction is attested");
+    assert_eq!(
+        attestation.sha256,
+        crate::module::sha256_file(&artifact).unwrap()
+    );
+    assert_ne!(attestation.sha256, asset.sha256);
+    broker_task.abort();
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn a_bundle_marker_without_an_allowlist_is_refused_rather_than_loaded_unhashed() {
+    use crate::module::{ReleaseAsset, ReleasePlan, artifact_dir, load_first_admitted};
+
+    let bundled = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let user_cache = tempfile::tempdir().unwrap();
+    let asset = ReleaseAsset {
+        host_key: "macos-15-arm64",
+        archive: "clock-macos-15-arm64.tar.gz",
+        sha256: "abababababababababababababababababababababababababababababababab",
+    };
+    let dir = artifact_dir(bundled.path(), "clock", "0.1.0", asset.host_key).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    let artifact = dir.join(format!(
+        "clock.{}",
+        crate::module::cache::library_extension()
+    ));
+    std::fs::write(&artifact, b"not loaded until the first call").unwrap();
+    let mut lazy_manifest = manifest();
+    lazy_manifest.lazy_init = true;
+    std::fs::write(
+        lazy_manifest_path(&artifact),
+        serde_json::to_vec(&lazy_manifest).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        crate::module::cache::digest_marker_path(&dir, asset.archive),
+        format!("{}\n", asset.sha256),
+    )
+    .unwrap();
+
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    let broker_task = broker.spawn(bus.clone());
+    let host = ModuleHost::new(broker);
+    let assets = [asset];
+    let plan = ReleasePlan {
+        id: "clock",
+        version: "0.1.0",
+        release_url: "https://github.com/tinyhumansai/clock/releases/tag/v0.1.0",
+        assets: &assets,
+        install_root: user_cache.path(),
+        bundled_root: Some(bundled.path()),
+        allow_download: false,
+    };
+    let error = load_first_admitted(&host, &plan, &serde_json::json!({})).unwrap_err();
+    assert!(error.contains("installer bundle"), "{error}");
+    assert!(host.list().is_empty(), "nothing was registered");
+    broker_task.abort();
+}
+
 #[test]
 fn an_invalid_lazy_sidecar_refuses_the_artifact_instead_of_loading_it_eagerly() {
     let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();

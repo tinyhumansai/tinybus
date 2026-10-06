@@ -149,6 +149,45 @@ drops packets costs seconds rather than the operating system's SYN timeout.
 Set `allow_download` to `false` to make a miss a refusal, for a host whose
 operator has disabled downloads.
 
+## Installer bundle
+
+`load_first_admitted` consults a read-only, installer-shipped directory
+(`ReleasePlan::bundled_root`) before the release cache, with the same
+`<id>/<version>/<host_key>/` layout. A bundle entry is the archive plus its
+extraction, checked exactly like a cache hit, or, where the archive cannot
+ship, the extraction plus `<archive>.sha256` holding the host's pin. A
+notarized macOS app is that case: Apple's notary service unpacks nested
+archives and rejects the unsigned Mach-O inside, and signing it would change
+the pinned bytes.
+
+A marker entry is admitted only when the archive is absent, the marker equals
+the compiled pin, and a `modules.toml` beside the extraction names the
+library with its current hash. That allowlist is required on this path,
+because nothing else on it hashes the file that is mapped. On either path,
+the library must resolve inside its own directory: a symlink to a file
+elsewhere is refused.
+The marker is a claim made by the installer, which verified the archive
+against the same pin at build time. Integrity of the extraction then rests on
+the installer's own protection; on macOS that is the app's code-signature
+seal. The marker is honoured only from the bundle, never from the
+user-writable release cache, where a text file vouching for itself would void
+the pin.
+
+The extracted library, the file that is actually mapped, is still held to the
+release's `modules.toml` on the lookup and again at the allowlist gate on
+every load, the same as when the archive is present. An installer that
+rewrites the library must re-pin its `modules.toml` entry under the same seal,
+or the bundle is refused. The macOS signer does this, because codesigning
+changes the file.
+
+A marker entry is never attested with the pin, because nothing on that path
+hashed bytes matching it. Its attestation, and so its eligibility for
+confidential messages, comes only from the required `modules.toml`, which
+activation re-hashes against the mapped file.
+
+A bundle with any candidate entry is authoritative. A refused entry is
+reported, not replaced by a download.
+
 Refusing one artifact does not prevent the host from admitting other artifacts
 in the same directory. The refused artifact's error contains only a sanitized
 basename and fixed reason.

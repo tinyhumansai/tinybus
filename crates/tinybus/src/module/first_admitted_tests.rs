@@ -125,3 +125,54 @@ fn a_terminal_failure_with_downloads_enabled_says_to_restart() {
     assert!(error.contains("could not be loaded"), "{error}");
     assert!(error.contains("restart the app"), "{error}");
 }
+
+#[test]
+fn a_bundle_marker_that_does_not_match_the_pin_is_refused_without_falling_back() {
+    let host = ModuleHost::new(Broker::new());
+    let bundled = tempfile::tempdir().unwrap();
+    let user_cache = tempfile::tempdir().unwrap();
+    let dir = artifact_dir(bundled.path(), "demo", "1.0.0", ASSET.host_key).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join(format!("{}.sha256", ASSET.archive)),
+        format!("{}\n", "f".repeat(64)),
+    )
+    .unwrap();
+
+    let assets = [ASSET];
+    let error = load_first_admitted(
+        &host,
+        &plan(&assets, user_cache.path(), Some(bundled.path())),
+        &serde_json::json!({}),
+    )
+    .unwrap_err();
+
+    assert!(error.contains("installer bundle"), "{error}");
+    assert!(error.contains("does not match the pin"), "{error}");
+    assert!(!user_cache.path().join("demo").exists());
+}
+
+#[test]
+fn a_bundle_marker_is_never_honoured_from_the_download_cache() {
+    let host = ModuleHost::new(Broker::new());
+    let user_cache = tempfile::tempdir().unwrap();
+    let dir = artifact_dir(user_cache.path(), "demo", "1.0.0", ASSET.host_key).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join(format!("{}.sha256", ASSET.archive)),
+        format!("{}\n", ASSET.sha256),
+    )
+    .unwrap();
+    std::fs::write(dir.join("libdemo_module.so"), b"").unwrap();
+    std::fs::write(dir.join("libdemo_module.dylib"), b"").unwrap();
+    std::fs::write(dir.join("demo_module.dll"), b"").unwrap();
+
+    let assets = [ASSET];
+    let error = load_first_admitted(
+        &host,
+        &plan(&assets, user_cache.path(), None),
+        &serde_json::json!({}),
+    )
+    .unwrap_err();
+    assert!(error.contains("downloads are disabled"), "{error}");
+}

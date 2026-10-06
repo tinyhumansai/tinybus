@@ -446,6 +446,36 @@ impl ModuleHost {
         self.load_file_pinned(&module, config, Some(sha256))
     }
 
+    /// Load an installer-bundle entry whose archive was replaced by its digest
+    /// marker. See [`crate::module::cache::find_marked`] for the trust model;
+    /// crate-private so the only caller stays [`super::load_first_admitted`],
+    /// which reaches it for the installer-shipped directory alone.
+    ///
+    /// The pin is *not* recorded as the attestation: nothing on this path
+    /// hashed bytes that match it, only a marker that claims so. Attestation
+    /// comes from the `modules.toml` beside the library, which this path
+    /// requires and activation re-hashes against the mapped file.
+    ///
+    /// # Errors
+    ///
+    /// Returns a refusal if the marker is missing, malformed or not equal to
+    /// `pin`, or the extraction is unusable; otherwise any admission error.
+    pub(crate) fn load_bundled_marked(
+        &self,
+        dir: &Path,
+        asset_name: &str,
+        pin: &str,
+        config: serde_json::Value,
+    ) -> Result<ModuleInfo> {
+        let hit = crate::module::cache::find_marked(dir, asset_name, pin).ok_or_else(|| {
+            Error::module_refused(
+                dir,
+                "bundled digest marker does not match the pin, or the extraction is unusable",
+            )
+        })?;
+        self.load_file_pinned(&hit.module, config, None)
+    }
+
     /// Admit and initialize an already-resolved module without calling the
     /// platform loader.
     ///
@@ -559,7 +589,7 @@ impl ModuleHost {
     /// callers are [`ModuleHost::load_github_release`] and
     /// [`ModuleHost::load_github_release_cached`], both of which hash the
     /// archive against the pin first; keep it that way, or move the check down
-    /// here first.
+    /// here first. ([`ModuleHost::load_bundled_marked`] calls it with `None`.)
     fn load_file_pinned(
         &self,
         path: impl AsRef<Path>,

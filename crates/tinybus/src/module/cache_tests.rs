@@ -320,3 +320,118 @@ fn a_version_directory_that_cannot_be_listed_is_treated_as_being_staged() {
     let root = tempfile::tempdir().unwrap();
     assert!(contains_staging_directory(&root.path().join("missing")));
 }
+
+/// An installer-bundle directory: the extraction, its allowlist, and the
+/// archive's digest marker, with the archive itself removed.
+fn marked(root: &Path, pin: &str) -> PathBuf {
+    let dir = root.join("demo").join("1.0.0");
+    write(&dir.join(module_name()), b"library bytes");
+    let sha = crate::module::sha256_file(dir.join(module_name())).unwrap();
+    write(
+        &dir.join("modules.toml"),
+        format!("\"{}\" = \"{sha}\"\n", module_name()).as_bytes(),
+    );
+    write_digest_marker(&dir, ASSET, pin).unwrap();
+    dir
+}
+
+#[test]
+fn a_marker_equal_to_the_pin_without_its_archive_is_a_bundle_hit() {
+    let root = tempfile::tempdir().unwrap();
+    let pin = "c".repeat(64);
+    let dir = marked(root.path(), &pin);
+    let hit = find_marked(&dir, ASSET, &pin.to_ascii_uppercase()).expect("hit");
+    assert_eq!(hit.sha256, pin);
+    assert_eq!(
+        hit.module,
+        std::fs::canonicalize(dir.join(module_name())).unwrap()
+    );
+}
+
+#[test]
+fn a_marker_that_does_not_match_the_pin_is_not_a_bundle_hit() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = marked(root.path(), &"c".repeat(64));
+    assert_eq!(find_marked(&dir, ASSET, &"d".repeat(64)), None);
+}
+
+#[test]
+fn without_a_marker_or_an_archive_there_is_no_bundle_hit() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("demo").join("1.0.0");
+    write(&dir.join(module_name()), b"library bytes");
+    assert_eq!(find_marked(&dir, ASSET, &"c".repeat(64)), None);
+}
+
+#[test]
+fn a_present_archive_is_never_bypassed_by_its_marker() {
+    let root = tempfile::tempdir().unwrap();
+    let (dir, sha) = populated(root.path());
+    write_digest_marker(&dir, ASSET, &sha).unwrap();
+    assert_eq!(
+        find_marked(&dir, ASSET, &sha),
+        None,
+        "with the archive on disk, only hashing it may decide"
+    );
+    // Tampered archive, matching marker: the hashing path still refuses it.
+    write(&dir.join(ASSET), b"tampered");
+    assert_eq!(find_verified(&dir, ASSET, Some(&sha)), None);
+}
+
+#[test]
+fn a_bundle_marker_beside_a_mismatched_allowlist_is_not_a_hit() {
+    let root = tempfile::tempdir().unwrap();
+    let pin = "c".repeat(64);
+    let dir = marked(root.path(), &pin);
+    write(
+        &dir.join("modules.toml"),
+        format!("\"{}\" = \"{}\"\n", module_name(), "e".repeat(64)).as_bytes(),
+    );
+    assert_eq!(find_marked(&dir, ASSET, &pin), None);
+}
+
+#[test]
+fn a_bundle_marker_without_an_allowlist_is_not_a_hit() {
+    let root = tempfile::tempdir().unwrap();
+    let pin = "c".repeat(64);
+    let dir = marked(root.path(), &pin);
+    std::fs::remove_file(dir.join("modules.toml")).unwrap();
+    assert_eq!(
+        find_marked(&dir, ASSET, &pin),
+        None,
+        "nothing on the marker path would hash the mapped library"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_module_symlinked_outside_its_directory_is_never_a_hit() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join(module_name());
+    write(&target, b"library bytes");
+    let sha = crate::module::sha256_file(&target).unwrap();
+
+    // Marker path: allowlist and marker would both pass for the target.
+    let pin = "c".repeat(64);
+    let dir = marked(root.path(), &pin);
+    std::fs::remove_file(dir.join(module_name())).unwrap();
+    std::os::unix::fs::symlink(&target, dir.join(module_name())).unwrap();
+    write(
+        &dir.join("modules.toml"),
+        format!("\"{}\" = \"{sha}\"\n", module_name()).as_bytes(),
+    );
+    assert_eq!(find_marked(&dir, ASSET, &pin), None);
+
+    // Archive path: an intact archive does not vouch for an escaping module.
+    let (cache, archive_sha) = populated(&root.path().join("cache"));
+    std::fs::remove_file(cache.join(module_name())).unwrap();
+    std::os::unix::fs::symlink(&target, cache.join(module_name())).unwrap();
+    assert_eq!(find_verified(&cache, ASSET, Some(&archive_sha)), None);
+
+    // A symlink that stays inside the directory is still accepted.
+    let (inside, inside_sha) = populated(&root.path().join("inside"));
+    std::fs::rename(inside.join(module_name()), inside.join("real.bin")).unwrap();
+    std::os::unix::fs::symlink(inside.join("real.bin"), inside.join(module_name())).unwrap();
+    assert!(find_verified(&inside, ASSET, Some(&inside_sha)).is_some());
+}
