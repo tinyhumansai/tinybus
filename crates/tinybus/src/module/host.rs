@@ -1967,6 +1967,18 @@ fn unix_directory_refusal(
     }
 }
 
+#[cfg(unix)]
+fn is_user_private_group(
+    user_name: &str,
+    user_gid: u32,
+    group_name: &str,
+    group_gid: u32,
+    members: &[&str],
+) -> bool {
+    let _ = (user_name, user_gid, group_name, group_gid, members);
+    false
+}
+
 /// Whether group write on a root-owned directory grants nothing beyond root.
 ///
 /// macOS only. It ships `/Applications` as `root:admin 0775`, and refusing it
