@@ -2008,6 +2008,30 @@ fn check_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// `S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464`
+/// (NT SERVICE\TrustedInstaller) in binary SID form.
+#[cfg(windows)]
+fn trusted_installer_sid() -> Vec<u32> {
+    const SUB_AUTHORITIES: [u32; 6] = [
+        80,
+        956_008_885,
+        3_418_522_649,
+        1_831_038_044,
+        1_853_292_631,
+        2_271_478_464,
+    ];
+    // Revision 1, six sub-authorities, NT authority (5) big-endian.
+    let mut bytes = vec![1u8, SUB_AUTHORITIES.len() as u8, 0, 0, 0, 0, 0, 5];
+    for value in SUB_AUTHORITIES {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    // Held in `u32`s so the SID is aligned the way the API expects.
+    bytes
+        .chunks_exact(4)
+        .map(|chunk| u32::from_ne_bytes(chunk.try_into().unwrap()))
+        .collect()
+}
+
 #[cfg(windows)]
 fn windows_path_grants_untrusted_write(path: &Path) -> Result<bool> {
     use std::ffi::c_void;
@@ -2079,6 +2103,7 @@ fn windows_path_grants_untrusted_write(path: &Path) -> Result<bool> {
     const OWNER_SECURITY_INFORMATION: u32 = 0x1;
     const DACL_SECURITY_INFORMATION: u32 = 0x4;
     const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+    const INHERIT_ONLY_ACE: u8 = 0x08;
     const WIN_CREATOR_OWNER_SID: u32 = 3;
     const WIN_LOCAL_SYSTEM_SID: u32 = 22;
     const WIN_BUILTIN_ADMINISTRATORS_SID: u32 = 26;
@@ -2185,9 +2210,17 @@ fn windows_path_grants_untrusted_write(path: &Path) -> Result<bool> {
         // An owner can rewrite the DACL even without an explicit write ACE.
         // Module files may inherit CREATOR OWNER from their parent, so their
         // actual owner must be trusted before that placeholder can be accepted.
+        // NT SERVICE\TrustedInstaller, the OS servicing identity. Every folder
+        // under `C:\Program Files` inherits Full Control for it, so a
+        // per-machine (MSI) install was refused for it. It is no more another
+        // user than SYSTEM is. A service SID has no `CreateWellKnownSid` kind,
+        // so it is built from its fixed value.
+        let trusted_installer_sid = trusted_installer_sid();
+        let trusted_installer = trusted_installer_sid.as_ptr().cast::<c_void>();
         let trusted_owner = unsafe { EqualSid(owner, user_sid) } != 0
             || unsafe { EqualSid(owner, admin_sid.as_ptr().cast()) } != 0
-            || unsafe { EqualSid(owner, system_sid.as_ptr().cast()) } != 0;
+            || unsafe { EqualSid(owner, system_sid.as_ptr().cast()) } != 0
+            || unsafe { EqualSid(owner, trusted_installer) } != 0;
         if !trusted_owner {
             return true;
         }
@@ -2198,7 +2231,11 @@ fn windows_path_grants_untrusted_write(path: &Path) -> Result<bool> {
                 return true;
             }
             let ace = ace.cast::<AccessAllowedAce>();
+            // An inherit-only ACE grants nothing on this object; it only
+            // seeds the ACL of children created later, and every module file
+            // is checked against its own ACL before it is loaded.
             if unsafe { (*ace).header.ace_type } != ACCESS_ALLOWED_ACE_TYPE
+                || unsafe { (*ace).header.ace_flags } & INHERIT_ONLY_ACE != 0
                 || unsafe { (*ace).mask } & WRITE_MASK == 0
             {
                 continue;
@@ -2207,6 +2244,7 @@ fn windows_path_grants_untrusted_write(path: &Path) -> Result<bool> {
             let trusted = unsafe { EqualSid(sid, user_sid) } != 0
                 || unsafe { EqualSid(sid, admin_sid.as_ptr().cast()) } != 0
                 || unsafe { EqualSid(sid, system_sid.as_ptr().cast()) } != 0
+                || unsafe { EqualSid(sid, trusted_installer) } != 0
                 // CREATOR OWNER is an inheritable placeholder for the owner
                 // of each child. Check each module file's actual owner and
                 // ACL too, before accepting this ACE on its parent directory.
