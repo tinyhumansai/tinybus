@@ -1659,6 +1659,57 @@ fn a_directory_refusal_names_the_ancestor_that_failed() {
 
 #[cfg(unix)]
 #[test]
+fn a_refused_ancestor_is_named_without_leaking_a_path() {
+    let module_dir = Path::new("/opt/app/bundled-modules/x86_64");
+    assert_eq!(ancestor_label(Path::new("/"), module_dir), "the filesystem root");
+    assert_eq!(ancestor_label(module_dir, module_dir), "the directory itself");
+    assert_eq!(ancestor_label(Path::new("/opt/app"), module_dir), "app");
+}
+
+/// The lookup agrees with `id`: an account whose primary group is not named
+/// after it has no private group, and one that does resolves to that gid
+/// unless the group lists another member.
+#[cfg(unix)]
+#[test]
+fn the_current_users_private_group_matches_the_account_database() {
+    fn id(flag: &str) -> String {
+        let output = std::process::Command::new("id").arg(flag).output().unwrap();
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+    let uid = unsafe { libc::getuid() };
+    let private = current_user_private_gid(uid);
+    if id("-un") == id("-gn") {
+        if let Some(gid) = private {
+            assert_eq!(gid.to_string(), id("-g"));
+        }
+    } else {
+        assert_eq!(private, None);
+    }
+    // No account database entry, no private group.
+    assert_eq!(current_user_private_gid(u32::MAX - 7), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_reentrant_lookup_grows_its_buffer_until_the_entry_fits() {
+    let mut buffer = Vec::new();
+    let found = with_growing_buffer(&mut buffer, |buffer| {
+        if buffer.len() < 8 * 1024 {
+            (libc::ERANGE, false)
+        } else {
+            (0, true)
+        }
+    });
+    assert!(found);
+    assert_eq!(buffer.len(), 8 * 1024);
+    // An entry that never fits is given up on rather than grown forever.
+    assert!(!with_growing_buffer(&mut Vec::new(), |_| (libc::ERANGE, false)));
+    // Any other error is a failed lookup.
+    assert!(!with_growing_buffer(&mut Vec::new(), |_| (libc::EIO, false)));
+}
+
+#[cfg(unix)]
+#[test]
 fn world_write_without_sticky_is_refused_even_for_root_groups() {
     assert_eq!(
         unix_directory_refusal(0, 0, 0o777, 1_000, None),
