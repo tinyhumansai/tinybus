@@ -2218,3 +2218,7 @@ fn windows_path_grants_untrusted_write(path: &Path) -> Result<bool> {
 #[cfg(test)]
 #[path = "host_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "host_admission_tests.rs"]
+mod admission_tests;

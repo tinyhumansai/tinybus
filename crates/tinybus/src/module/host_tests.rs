@@ -166,7 +166,7 @@ unsafe extern "C" fn init_that_must_not_run(
     TB_OK
 }
 
-fn manifest() -> ModuleManifest {
+pub(super) fn manifest() -> ModuleManifest {
     named_manifest("clock", "Clock")
 }
 
