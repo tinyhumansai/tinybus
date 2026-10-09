@@ -1980,6 +1980,14 @@ fn ancestor_label(component: &Path, module_directory: &Path) -> String {
     if std::env::var_os("HOME").is_some_and(|home| Path::new(&home) == component) {
         return "the home directory".to_string();
     }
+    // Another account's home (or ours, when `$HOME` is unset or spelled
+    // differently) is named after that account, so it is not reported.
+    if component
+        .parent()
+        .is_some_and(|parent| HOME_ROOTS.iter().any(|root| parent == Path::new(root)))
+    {
+        return "a home directory".to_string();
+    }
     component
         .file_name()
         .and_then(|name| name.to_str())
