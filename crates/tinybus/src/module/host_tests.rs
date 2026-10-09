@@ -1418,6 +1418,43 @@ fn a_directory_writable_by_everyone_is_refused() {
 }
 
 #[cfg(windows)]
+fn icacls_grant(path: &Path, grant: &str) {
+    let output = std::process::Command::new("icacls")
+        .arg(path)
+        .args(["/grant", grant])
+        .output()
+        .expect("icacls is installed on Windows");
+    assert!(output.status.success(), "icacls failed: {output:?}");
+}
+
+/// Every folder under `C:\Program Files` inherits Full Control for
+/// TrustedInstaller, so a per-machine (MSI) install carries this ACE.
+#[cfg(windows)]
+#[test]
+fn a_directory_trusted_installer_can_write_is_accepted() {
+    let directory = tempfile::tempdir().unwrap();
+    icacls_grant(
+        directory.path(),
+        "*S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464:(OI)(CI)(F)",
+    );
+    assert!(!windows_path_grants_untrusted_write(directory.path()).unwrap());
+}
+
+/// An inherit-only grant gives Everyone nothing on the directory itself; the
+/// file it seeds is what carries the write, and that file is refused.
+#[cfg(windows)]
+#[test]
+fn an_inherit_only_grant_is_judged_on_the_files_it_seeds() {
+    let directory = tempfile::tempdir().unwrap();
+    icacls_grant(directory.path(), "*S-1-1-0:(OI)(CI)(IO)(M)");
+    assert!(!windows_path_grants_untrusted_write(directory.path()).unwrap());
+
+    let file = directory.path().join("module.dll");
+    std::fs::write(&file, b"seeded").unwrap();
+    assert!(windows_path_grants_untrusted_write(&file).unwrap());
+}
+
+#[cfg(windows)]
 #[test]
 fn a_cache_directory_writable_by_the_current_user_is_accepted() {
     let directory = tempfile::tempdir().unwrap();

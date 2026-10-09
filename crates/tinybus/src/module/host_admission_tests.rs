@@ -181,3 +181,25 @@ fn release_cache_directories_are_private_under_a_permissive_umask() {
     }
     check_directory(version).unwrap();
 }
+
+/// A per-machine (MSI) install lands under `C:\Program Files`, which grants
+/// TrustedInstaller Full Control to every folder beneath it. Needs an
+/// administrator, which CI's Windows runner is.
+#[cfg(windows)]
+#[ignore = "writes under Program Files; run by CI's modules job on Windows"]
+#[test]
+fn a_directory_under_the_real_program_files_is_admitted() {
+    let program_files = PathBuf::from(std::env::var_os("ProgramFiles").unwrap());
+    let directory = tempfile::Builder::new()
+        .prefix("tinybus-admission-")
+        .tempdir_in(program_files)
+        .unwrap();
+    let nested = directory.path().join("bundled-modules").join("clock");
+    std::fs::create_dir_all(&nested).unwrap();
+    let acl = std::process::Command::new("icacls")
+        .arg(&nested)
+        .output()
+        .unwrap();
+    check_directory(&nested)
+        .unwrap_or_else(|error| panic!("{error}; ACL: {}", String::from_utf8_lossy(&acl.stdout)));
+}

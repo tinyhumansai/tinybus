@@ -2013,7 +2013,12 @@ fn check_directory(path: &Path) -> Result<()> {
 #[cfg(windows)]
 fn trusted_installer_sid() -> Vec<u32> {
     const SUB_AUTHORITIES: [u32; 6] = [
-        80, 956_008_885, 3_418_522_649, 1_831_038_044, 1_853_292_631, 2_271_478_464,
+        80,
+        956_008_885,
+        3_418_522_649,
+        1_831_038_044,
+        1_853_292_631,
+        2_271_478_464,
     ];
     // Revision 1, six sub-authorities, NT authority (5) big-endian.
     let mut bytes = vec![1u8, SUB_AUTHORITIES.len() as u8, 0, 0, 0, 0, 0, 5];
