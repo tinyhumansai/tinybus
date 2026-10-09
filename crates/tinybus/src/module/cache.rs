@@ -458,8 +458,25 @@ fn tighten_owned_directory(directory: &Path) {
     {
         return;
     }
+    // Change the mode through a handle, never the path: between the check above
+    // and a path-based chmod, a writer of the parent could swap the directory for
+    // a symlink and have the mode applied to its target. `open` follows a swapped
+    // symlink, so the handle is accepted only if it is still the inode `lstat`
+    // judged; `fchmod` then reaches that inode however the path changes.
+    let Ok(handle) = std::fs::File::open(directory) else {
+        return;
+    };
+    let Ok(opened) = handle.metadata() else {
+        return;
+    };
+    if opened.dev() != metadata.dev() || opened.ino() != metadata.ino() {
+        tracing::debug!(
+            "[modules] release cache directory changed while tightening it; left as is"
+        );
+        return;
+    }
     let tightened = mode & 0o7777 & !0o022;
-    match std::fs::set_permissions(directory, std::fs::Permissions::from_mode(tightened)) {
+    match handle.set_permissions(std::fs::Permissions::from_mode(tightened)) {
         Ok(()) => tracing::info!(
             "[modules] removed group/other write from a release cache directory ({:o} -> {:o})",
             mode & 0o7777,
