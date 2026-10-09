@@ -1970,6 +1970,9 @@ fn check_directory(path: &Path) -> Result<()> {
 /// a path, and never the home directory's name, which is usually the account
 /// name.
 #[cfg(unix)]
+const HOME_ROOTS: [&str; 3] = ["/home", "/Users", "/var/home"];
+
+#[cfg(unix)]
 fn ancestor_label(component: &Path, module_directory: &Path) -> String {
     if component.parent().is_none() {
         return "the filesystem root".to_string();
