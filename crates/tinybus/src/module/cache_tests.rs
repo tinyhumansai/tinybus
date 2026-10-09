@@ -435,3 +435,37 @@ fn a_module_symlinked_outside_its_directory_is_never_a_hit() {
     std::os::unix::fs::symlink(inside.join("real.bin"), inside.join(module_name())).unwrap();
     assert!(find_verified(&inside, ASSET, Some(&inside_sha)).is_some());
 }
+
+#[cfg(unix)]
+#[test]
+fn a_group_writable_cache_directory_loses_group_and_other_write() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("clock");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+
+    tighten_owned_directory(&dir);
+
+    let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(mode, 0o755);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_in_place_of_a_cache_directory_leaves_its_target_alone() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("elsewhere");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let link = root.path().join("clock");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    tighten_owned_directory(&link);
+
+    let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(mode, 0o777, "a symlink's target is never re-moded");
+}
