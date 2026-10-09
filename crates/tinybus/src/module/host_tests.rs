@@ -1668,6 +1668,10 @@ fn a_refused_ancestor_is_named_without_leaking_a_path() {
         "the directory itself"
     );
     assert_eq!(label("/opt/app"), "app");
+    // A home directory other than `$HOME` is still named after an account.
+    assert_eq!(label("/home/someone-else"), "a home directory");
+    assert_eq!(label("/Users/someone-else"), "a home directory");
+    assert_eq!(label("/var/home/someone-else"), "a home directory");
 }
 
 /// The lookup agrees with `id`: an account whose primary group is not named
