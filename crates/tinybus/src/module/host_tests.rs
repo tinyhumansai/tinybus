@@ -1663,7 +1663,10 @@ fn a_refused_ancestor_is_named_without_leaking_a_path() {
     let module = Path::new("/opt/app/bundled-modules/x86_64");
     let label = |ancestor: &str| ancestor_label(Path::new(ancestor), module);
     assert_eq!(label("/"), "the filesystem root");
-    assert_eq!(label("/opt/app/bundled-modules/x86_64"), "the directory itself");
+    assert_eq!(
+        label("/opt/app/bundled-modules/x86_64"),
+        "the directory itself"
+    );
     assert_eq!(label("/opt/app"), "app");
 }
 
