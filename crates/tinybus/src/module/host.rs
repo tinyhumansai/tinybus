@@ -2033,7 +2033,7 @@ fn trusted_installer_sid() -> Vec<u32> {
 }
 
 #[cfg(windows)]
-fn windows_path_grants_untrusted_write(path: &Path) -> Result<bool> {
+pub(super) fn windows_path_grants_untrusted_write(path: &Path) -> Result<bool> {
     use std::ffi::c_void;
     use std::os::windows::ffi::OsStrExt;
 
@@ -2102,15 +2102,11 @@ fn windows_path_grants_untrusted_write(path: &Path) -> Result<bool> {
     const SE_FILE_OBJECT: u32 = 1;
     const OWNER_SECURITY_INFORMATION: u32 = 0x1;
     const DACL_SECURITY_INFORMATION: u32 = 0x4;
-    const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
-    const INHERIT_ONLY_ACE: u8 = 0x08;
     const WIN_CREATOR_OWNER_SID: u32 = 3;
     const WIN_LOCAL_SYSTEM_SID: u32 = 22;
     const WIN_BUILTIN_ADMINISTRATORS_SID: u32 = 26;
     const TOKEN_QUERY: u32 = 0x8;
     const TOKEN_USER: u32 = 1;
-    const WRITE_MASK: u32 =
-        0x2 | 0x4 | 0x10 | 0x100 | 0x1_0000 | 0x4_0000 | 0x8_0000 | 0x1000_0000 | 0x4000_0000;
 
     let mut wide = path
         .as_os_str()
@@ -2231,17 +2227,15 @@ fn windows_path_grants_untrusted_write(path: &Path) -> Result<bool> {
                 return true;
             }
             let ace = ace.cast::<AccessAllowedAce>();
-            // An inherit-only ACE grants nothing on this object; it only
-            // seeds the ACL of children created later, and every module file
-            // is checked against its own ACL before it is loaded.
-            if unsafe { (*ace).header.ace_type } != ACCESS_ALLOWED_ACE_TYPE
-                || unsafe { (*ace).header.ace_flags } & INHERIT_ONLY_ACE != 0
-                || unsafe { (*ace).mask } & WRITE_MASK == 0
-            {
-                continue;
-            }
+            let ace_type = unsafe { (*ace).header.ace_type };
+            let ace_flags = unsafe { (*ace).header.ace_flags };
+            let mask = unsafe { (*ace).mask };
+            // Whether an ACE counts is `windows_acl::ace_grants_untrusted_write`:
+            // inherit-only entries seed children (each module file is checked
+            // against its own ACL), and entries without a write right or that
+            // are not allow-ACEs grant nothing here.
             let sid = unsafe { std::ptr::addr_of!((*ace).sid_start) }.cast();
-            let trusted = unsafe { EqualSid(sid, user_sid) } != 0
+            let principal_trusted = unsafe { EqualSid(sid, user_sid) } != 0
                 || unsafe { EqualSid(sid, admin_sid.as_ptr().cast()) } != 0
                 || unsafe { EqualSid(sid, system_sid.as_ptr().cast()) } != 0
                 || unsafe { EqualSid(sid, trusted_installer) } != 0
@@ -2249,7 +2243,12 @@ fn windows_path_grants_untrusted_write(path: &Path) -> Result<bool> {
                 // of each child. Check each module file's actual owner and
                 // ACL too, before accepting this ACE on its parent directory.
                 || unsafe { EqualSid(sid, creator_owner_sid.as_ptr().cast()) } != 0;
-            if !trusted {
+            if super::windows_acl::ace_grants_untrusted_write(
+                ace_type,
+                ace_flags,
+                mask,
+                principal_trusted,
+            ) {
                 return true;
             }
         }

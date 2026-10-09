@@ -403,7 +403,9 @@ fn create_private_dir_all(path: &Path) -> std::io::Result<()> {
     }
     #[cfg(not(unix))]
     {
-        std::fs::create_dir_all(path)
+        // Windows: an owner-only, inheritance-protected DACL; elsewhere a
+        // plain `create_dir_all`.
+        super::windows_acl::create_private_dir_all(path)
     }
 }
 
@@ -433,7 +435,7 @@ pub(crate) fn secure_release_cache(install_root: &Path, dir: &Path) {
     }
     #[cfg(not(unix))]
     {
-        let _ = (install_root, dir);
+        super::windows_acl::secure_release_cache(install_root, dir);
     }
 }
 
