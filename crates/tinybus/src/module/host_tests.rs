@@ -1377,7 +1377,8 @@ fn a_world_writable_module_directory_is_refused_before_any_dlopen() {
             metadata.uid(),
             metadata.gid(),
             metadata.permissions().mode(),
-            metadata.uid()
+            metadata.uid(),
+            None
         ),
         Some("module directory is writable by another user")
     );
@@ -1484,25 +1485,25 @@ fn a_module_file_writable_by_everyone_is_refused() {
 #[cfg(unix)]
 #[test]
 fn a_sticky_world_writable_module_directory_is_accepted() {
-    assert_eq!(unix_directory_refusal(0, 0, 0o1777, 1_000), None);
-    assert_eq!(unix_directory_refusal(1_000, 1_000, 0o1777, 1_000), None);
+    assert_eq!(unix_directory_refusal(0, 0, 0o1777, 1_000, None), None);
+    assert_eq!(unix_directory_refusal(1_000, 1_000, 0o1777, 1_000, None), None);
 }
 
 #[cfg(unix)]
 #[test]
 fn a_module_directory_owned_by_another_user_is_refused() {
     assert_eq!(
-        unix_directory_refusal(1_001, 1_001, 0o755, 1_000),
+        unix_directory_refusal(1_001, 1_001, 0o755, 1_000, None),
         Some("module directory is owned by another user")
     );
-    assert_eq!(unix_directory_refusal(0, 0, 0o755, 1_000), None);
+    assert_eq!(unix_directory_refusal(0, 0, 0o755, 1_000, None), None);
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 fn a_root_owned_directory_writable_by_wheel_is_accepted_on_macos() {
     // `wheel` holds only root on macOS.
-    assert_eq!(unix_directory_refusal(0, 0, 0o775, 501), None);
+    assert_eq!(unix_directory_refusal(0, 0, 0o775, 501, None), None);
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -1510,7 +1511,7 @@ fn a_root_owned_directory_writable_by_wheel_is_accepted_on_macos() {
 fn group_write_by_gid_zero_is_refused_off_macos() {
     // gid 0 is not guaranteed to be root-only outside macOS.
     assert_eq!(
-        unix_directory_refusal(0, 0, 0o775, 1_000),
+        unix_directory_refusal(0, 0, 0o775, 1_000, None),
         Some("module directory is writable by another user")
     );
 }
@@ -1519,7 +1520,7 @@ fn group_write_by_gid_zero_is_refused_off_macos() {
 #[test]
 fn the_macos_applications_directory_is_accepted() {
     // /Applications ships as `root:admin 0775`.
-    assert_eq!(unix_directory_refusal(0, 80, 0o40775, 501), None);
+    assert_eq!(unix_directory_refusal(0, 80, 0o40775, 501, None), None);
 }
 
 #[cfg(unix)]
@@ -1527,19 +1528,19 @@ fn the_macos_applications_directory_is_accepted() {
 fn group_write_by_an_ordinary_group_is_still_refused() {
     let refused = Some("module directory is writable by another user");
     // A root-owned directory writable by a non-root group.
-    assert_eq!(unix_directory_refusal(0, 20, 0o775, 501), refused);
+    assert_eq!(unix_directory_refusal(0, 20, 0o775, 501, None), refused);
     // The user's own directory writable by a group: the gid alone cannot
     // show the group is private to them.
-    assert_eq!(unix_directory_refusal(1_000, 1_000, 0o775, 1_000), refused);
+    assert_eq!(unix_directory_refusal(1_000, 1_000, 0o775, 1_000, None), refused);
     #[cfg(not(target_os = "macos"))]
-    assert_eq!(unix_directory_refusal(0, 80, 0o775, 1_000), refused);
+    assert_eq!(unix_directory_refusal(0, 80, 0o775, 1_000, None), refused);
 }
 
 #[cfg(unix)]
 #[test]
 fn world_write_without_sticky_is_refused_even_for_root_groups() {
     assert_eq!(
-        unix_directory_refusal(0, 0, 0o777, 1_000),
+        unix_directory_refusal(0, 0, 0o777, 1_000, None),
         Some("module directory is writable by another user")
     );
 }

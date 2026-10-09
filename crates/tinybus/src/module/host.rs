@@ -1936,7 +1936,7 @@ fn check_directory(path: &Path) -> Result<()> {
             ));
         }
         if let Some(reason) =
-            unix_directory_refusal(metadata.uid(), metadata.gid(), metadata.mode(), uid)
+            unix_directory_refusal(metadata.uid(), metadata.gid(), metadata.mode(), uid, None)
         {
             return Err(Error::module_refused(path, reason));
         }
@@ -1950,7 +1950,9 @@ fn unix_directory_refusal(
     group: u32,
     mode: u32,
     current_uid: u32,
+    private_gid: Option<u32>,
 ) -> Option<&'static str> {
+    let _ = private_gid;
     let world_writable = mode & 0o002 != 0;
     let group_writable = mode & 0o020 != 0;
     let sticky = mode & 0o1000 != 0;
