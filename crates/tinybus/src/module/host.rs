@@ -1828,6 +1828,22 @@ fn check_file(path: &Path) -> Result<()> {
     check_allowlist(path, file)
 }
 
+/// Refusal reasons about where an artifact sits, not what it is.
+///
+/// These say nothing about the bytes: the digest and allowlist gates have not
+/// been asked. A loader that has another, independently verified copy of the
+/// same pinned release may therefore try that copy instead.
+const PLACEMENT_REFUSALS: &[&str] = &[
+    "module directory is writable by another user",
+    "module directory is owned by another user",
+    "artifact is writable by another user",
+];
+
+/// Whether `error` refused an artifact for its location rather than its content.
+pub(crate) fn is_placement_refusal(error: &Error) -> bool {
+    matches!(error, Error::ModuleRefused { reason, .. } if PLACEMENT_REFUSALS.contains(&reason.as_str()))
+}
+
 fn check_allowlist(path: &Path, file: std::fs::File) -> Result<()> {
     allowlisted_hash(path, file).map(|_| ())
 }

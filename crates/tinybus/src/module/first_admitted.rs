@@ -14,11 +14,15 @@
 //! candidate archive — or the archive's digest marker, which an installer may
 //! ship in its place (see [`super::cache::find_marked`]) — is present there, the release cache is never touched, and a
 //! bundle that fails admission is reported instead of silently replaced by a
-//! download.
+//! download. The one exception is a bundle refused only for where it sits —
+//! its directory is writable or owned by another account — which says nothing
+//! about its bytes. The release cache then gets the same pinned release, held
+//! to the same digest, in a directory this user owns.
 
 use std::path::Path;
 
-use super::cache::digest_marker_path;
+use super::cache::{digest_marker_path, secure_release_cache};
+use super::host::is_placement_refusal;
 use super::{CachedRelease, ModuleHost, ModuleInfo, artifact_dir};
 
 /// One published artifact of a release and the digest that makes it legitimate.
@@ -75,6 +79,7 @@ pub fn load_first_admitted(
 
     let mut last_error = String::new();
     let mut found_bundled = false;
+    let mut bundle_refused_for_placement_only = true;
     if let Some(bundled_root) = plan.bundled_root {
         for asset in plan.assets {
             let Some(cache_dir) = artifact_dir(bundled_root, id, plan.version, asset.host_key)
@@ -112,6 +117,7 @@ pub fn load_first_admitted(
                     return Ok(info);
                 }
                 Err(err) => {
+                    bundle_refused_for_placement_only &= is_placement_refusal(&err);
                     last_error = err.to_string();
                     tracing::warn!(
                         "[modules] bundled '{id}' artifact for {} was not admitted: {last_error}",
@@ -121,7 +127,12 @@ pub fn load_first_admitted(
             }
         }
     }
-    if found_bundled {
+    if found_bundled && bundle_refused_for_placement_only {
+        tracing::warn!(
+            "[modules] bundled '{id}' was refused for its location only; \
+             trying the release cache"
+        );
+    } else if found_bundled {
         return Err(format!(
             "module '{id}' could not be loaded from the installer bundle: {last_error}. \
              Restart the app after repairing the installation"
@@ -135,6 +146,7 @@ pub fn load_first_admitted(
                 "the module's cache path could not be built from its registry entry".to_string();
             continue;
         };
+        secure_release_cache(plan.install_root, &cache_dir);
         let release = CachedRelease {
             release_url: plan.release_url,
             asset_name: asset.archive,
