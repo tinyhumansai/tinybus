@@ -1536,6 +1536,82 @@ fn group_write_by_an_ordinary_group_is_still_refused() {
     assert_eq!(unix_directory_refusal(0, 80, 0o775, 1_000, None), refused);
 }
 
+/// Ubuntu's user-private-group scheme (umask 002) leaves `$HOME` and
+/// `~/.cache` as `user:user 0775`. Group write there grants nobody but the
+/// user, so the per-user release cache beneath them must stay admissible.
+#[cfg(unix)]
+#[test]
+fn group_write_by_the_users_private_group_is_admitted() {
+    // The user's own directory, group-writable by their private group.
+    assert_eq!(unix_directory_refusal(1_000, 1_000, 0o775, 1_000, Some(1_000)), None);
+    assert_eq!(unix_directory_refusal(1_000, 1_000, 0o40770, 1_000, Some(1_000)), None);
+    // A root-owned directory whose group is the user's private group.
+    assert_eq!(unix_directory_refusal(0, 1_000, 0o775, 1_000, Some(1_000)), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn group_write_by_a_shared_group_is_refused_even_with_a_private_group() {
+    let refused = Some("module directory is writable by another user");
+    // `users` (gid 100) is shared, whoever owns the directory.
+    assert_eq!(unix_directory_refusal(1_000, 100, 0o775, 1_000, Some(1_000)), refused);
+    assert_eq!(unix_directory_refusal(0, 100, 0o775, 1_000, Some(1_000)), refused);
+    // Another user's private group is not this user's.
+    assert_eq!(unix_directory_refusal(1_000, 1_001, 0o775, 1_000, Some(1_000)), refused);
+    // A private group never excuses world write.
+    assert_eq!(unix_directory_refusal(1_000, 1_000, 0o777, 1_000, Some(1_000)), refused);
+    // Nor ownership by another account.
+    assert_eq!(
+        unix_directory_refusal(1_001, 1_000, 0o775, 1_000, Some(1_000)),
+        Some("module directory is owned by another user")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_user_private_group_rule_needs_a_matching_name_and_no_other_members() {
+    // Ubuntu/Fedora `useradd` default: group named after the user, no members.
+    assert!(is_user_private_group("alice", 1_000, "alice", 1_000, &[]));
+    // Some tools list the user as an explicit member of their own group.
+    assert!(is_user_private_group("alice", 1_000, "alice", 1_000, &["alice"]));
+    // Another member can write through the group.
+    assert!(!is_user_private_group("alice", 1_000, "alice", 1_000, &["alice", "bob"]));
+    assert!(!is_user_private_group("alice", 1_000, "alice", 1_000, &["bob"]));
+    // A primary group not named after the user is a shared group (`users`).
+    assert!(!is_user_private_group("alice", 100, "users", 100, &[]));
+    // The group must be the user's primary group.
+    assert!(!is_user_private_group("alice", 1_000, "alice", 1_001, &[]));
+}
+
+/// A refusal names the ancestor that failed: walking to `/` means the culprit
+/// is rarely the module directory itself, and the bare phrase left users
+/// guessing which of a dozen directories to fix.
+#[cfg(unix)]
+#[test]
+fn a_directory_refusal_names_the_ancestor_that_failed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(directory.path()).unwrap();
+    let shared = root.join("shared-parent");
+    let module_dir = shared.join("ubuntu-22.04-x86_64");
+    std::fs::create_dir_all(&module_dir).unwrap();
+    std::fs::set_permissions(&module_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+
+    let refusal = check_directory(&module_dir).unwrap_err();
+    let Error::ModuleRefused { file, reason } = &refusal else {
+        panic!("unexpected error {refusal}");
+    };
+    assert_eq!(file, "ubuntu-22.04-x86_64");
+    assert!(
+        reason.starts_with("module directory is writable by another user"),
+        "{reason}"
+    );
+    assert!(reason.contains("shared-parent"), "{reason}");
+    assert!(is_placement_refusal(&refusal), "{refusal}");
+}
+
 #[cfg(unix)]
 #[test]
 fn world_write_without_sticky_is_refused_even_for_root_groups() {
