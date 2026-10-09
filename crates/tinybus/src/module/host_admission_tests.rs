@@ -31,9 +31,9 @@ fn open_to_other_accounts(directory: &Path) {
 
 /// Write a lazy library (admitted without being mapped) into `dir`, with the
 /// allowlist that pins it.
-fn write_lazy_library(dir: &Path) -> PathBuf {
+fn write_lazy_library(dir: &Path, stem: &str) -> PathBuf {
     let artifact = dir.join(format!(
-        "clock.{}",
+        "{stem}.{}",
         crate::module::cache::library_extension()
     ));
     std::fs::write(&artifact, b"not loaded until the first call").unwrap();
@@ -82,7 +82,7 @@ fn a_bundle_others_can_write_falls_back_to_the_verified_release_cache() {
     // a directory the gate must refuse for its location alone.
     let bundle_dir = artifact_dir(bundled.path(), "clock", "0.1.0", asset.host_key).unwrap();
     std::fs::create_dir_all(&bundle_dir).unwrap();
-    write_lazy_library(&bundle_dir);
+    write_lazy_library(&bundle_dir, "bundled_clock");
     std::fs::write(
         crate::module::cache::digest_marker_path(&bundle_dir, asset.archive),
         format!("{pin}\n"),
@@ -96,7 +96,7 @@ fn a_bundle_others_can_write_falls_back_to_the_verified_release_cache() {
     let cache_dir = artifact_dir(user_cache.path(), "clock", "0.1.0", asset.host_key).unwrap();
     std::fs::create_dir_all(&cache_dir).unwrap();
     std::fs::write(cache_dir.join(asset.archive), archive_bytes).unwrap();
-    let cached = write_lazy_library(&cache_dir);
+    let cached = write_lazy_library(&cache_dir, "cached_clock");
 
     let host = ModuleHost::new(crate::broker::Broker::new());
     let assets = [asset];
@@ -124,7 +124,11 @@ fn a_bundle_others_can_write_falls_back_to_the_verified_release_cache() {
 #[test]
 fn a_private_directory_this_user_created_is_admitted() {
     let directory = tempfile::tempdir().unwrap();
-    let nested = directory.path().join("clock").join("0.1.0").join("test-host");
+    let nested = directory
+        .path()
+        .join("clock")
+        .join("0.1.0")
+        .join("test-host");
     std::fs::create_dir_all(&nested).unwrap();
     crate::module::cache::secure_release_cache(directory.path(), &nested);
     check_directory(&nested).unwrap();
