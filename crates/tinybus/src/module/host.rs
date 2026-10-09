@@ -1919,7 +1919,9 @@ fn check_directory(path: &Path) -> Result<()> {
                 "module search path contains a non-directory component",
             ));
         }
-        if let Some(reason) = unix_directory_refusal(metadata.uid(), metadata.mode(), uid) {
+        if let Some(reason) =
+            unix_directory_refusal(metadata.uid(), metadata.gid(), metadata.mode(), uid)
+        {
             return Err(Error::module_refused(path, reason));
         }
     }
@@ -1927,14 +1929,42 @@ fn check_directory(path: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn unix_directory_refusal(owner: u32, mode: u32, current_uid: u32) -> Option<&'static str> {
+fn unix_directory_refusal(
+    owner: u32,
+    group: u32,
+    mode: u32,
+    current_uid: u32,
+) -> Option<&'static str> {
+    let world_writable = mode & 0o002 != 0;
+    let group_writable = mode & 0o020 != 0;
+    let sticky = mode & 0o1000 != 0;
     if owner != current_uid && owner != 0 {
         Some("module directory is owned by another user")
-    } else if mode & 0o022 != 0 && mode & 0o1000 == 0 {
+    } else if sticky {
+        None
+    } else if world_writable || (group_writable && !root_equivalent_group(owner, group)) {
         Some("module directory is writable by another user")
     } else {
         None
     }
+}
+
+/// Whether group write on a root-owned directory grants nothing beyond root.
+///
+/// Members of these groups can already act as root, so their write access is
+/// not "another user" in the sense this gate guards against. macOS ships
+/// `/Applications` as `root:admin 0775`; refusing it refused every module
+/// bundled in an app installed the normal way.
+#[cfg(unix)]
+fn root_equivalent_group(owner: u32, group: u32) -> bool {
+    /// `wheel` on macOS and the BSDs, `root` on Linux.
+    const ROOT_GID: u32 = 0;
+    /// macOS `admin`: the sudoers group of every administrator account.
+    #[cfg(target_os = "macos")]
+    const ADMIN_GID: Option<u32> = Some(80);
+    #[cfg(not(target_os = "macos"))]
+    const ADMIN_GID: Option<u32> = None;
+    owner == 0 && (group == ROOT_GID || Some(group) == ADMIN_GID)
 }
 
 #[cfg(windows)]
