@@ -135,13 +135,10 @@ async fn a_bundle_others_can_write_falls_back_to_the_verified_release_cache() {
 #[test]
 fn a_private_directory_this_user_created_is_admitted() {
     let directory = tempfile::tempdir().unwrap();
-    let nested = directory
-        .path()
-        .join("clock")
-        .join("0.1.0")
-        .join("test-host");
+    let root = real(&directory);
+    let nested = root.join("clock").join("0.1.0").join("test-host");
     std::fs::create_dir_all(&nested).unwrap();
-    crate::module::cache::secure_release_cache(directory.path(), &nested);
+    crate::module::cache::secure_release_cache(&root, &nested);
     check_directory(&nested).unwrap();
 }
 
