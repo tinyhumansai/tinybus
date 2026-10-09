@@ -379,13 +379,95 @@ pub(crate) fn stage(dir: &Path) -> Result<tempfile::TempDir> {
     let parent = dir
         .parent()
         .ok_or_else(|| refused(dir, "release cache directory has no parent"))?;
-    std::fs::create_dir_all(parent)
+    create_private_dir_all(parent)
         .map_err(|_| refused(dir, "release cache directory could not be created"))?;
     let staging_parent = parent.parent().unwrap_or(parent);
     tempfile::Builder::new()
         .prefix(STAGING_PREFIX)
         .tempdir_in(staging_parent)
         .map_err(|_| refused(dir, "release staging directory could not be created"))
+}
+
+/// `create_dir_all`, with every directory it creates readable only by this user.
+///
+/// Left to the process umask, a desktop session's common `002` creates the
+/// cache `0775`, and the directory gate then refuses the cache it just filled.
+fn create_private_dir_all(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(path)
+    }
+}
+
+/// Take group and other write off the release cache this user owns.
+///
+/// Repairs a cache an earlier launch created under a permissive umask, so it
+/// passes the directory gate instead of being refused for good. Walks `dir` and
+/// its ancestors from `install_root` down, plus `install_root`'s ancestors
+/// strictly inside `$HOME` (`~/.cache/<host>` is usually created the same way).
+/// It never touches the home directory itself, anything outside it, or a
+/// directory another account owns: the gate still decides those. Best effort,
+/// since a failure here only means the gate reports the directory as before.
+pub(crate) fn secure_release_cache(install_root: &Path, dir: &Path) {
+    #[cfg(unix)]
+    {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        for directory in dir.ancestors() {
+            let inside_root = directory.starts_with(install_root);
+            let inside_home = home
+                .as_deref()
+                .is_some_and(|home| directory != home && directory.starts_with(home));
+            if !inside_root && !inside_home {
+                break;
+            }
+            tighten_owned_directory(directory);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (install_root, dir);
+    }
+}
+
+#[cfg(unix)]
+fn tighten_owned_directory(directory: &Path) {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    unsafe extern "C" {
+        fn getuid() -> u32;
+    }
+
+    let Ok(metadata) = std::fs::symlink_metadata(directory) else {
+        return;
+    };
+    let mode = metadata.mode();
+    if !metadata.file_type().is_dir()
+        || metadata.uid() != unsafe { getuid() }
+        || mode & 0o022 == 0
+        || mode & 0o1000 != 0
+    {
+        return;
+    }
+    let tightened = mode & 0o7777 & !0o022;
+    match std::fs::set_permissions(directory, std::fs::Permissions::from_mode(tightened)) {
+        Ok(()) => tracing::info!(
+            "[modules] removed group/other write from a release cache directory ({:o} -> {:o})",
+            mode & 0o7777,
+            tightened
+        ),
+        Err(error) => tracing::debug!(
+            "[modules] could not tighten a release cache directory: {}",
+            error.kind()
+        ),
+    }
 }
 
 /// Move a fully assembled staging directory into place as `dir`.

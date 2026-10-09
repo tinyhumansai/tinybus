@@ -176,3 +176,101 @@ fn a_bundle_marker_is_never_honoured_from_the_download_cache() {
     .unwrap_err();
     assert!(error.contains("downloads are disabled"), "{error}");
 }
+
+/// A marker-style bundle entry whose library and allowlist agree, so nothing
+/// about its bytes is refused before the loader reaches the directory gate.
+#[cfg(unix)]
+fn marked_bundle(bundled: &std::path::Path) -> std::path::PathBuf {
+    let dir = artifact_dir(bundled, "demo", "1.0.0", ASSET.host_key).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join(format!("{}.sha256", ASSET.archive)),
+        format!("{}\n", ASSET.sha256),
+    )
+    .unwrap();
+    let library = format!(
+        "libdemo_module.{}",
+        crate::module::cache::library_extension()
+    );
+    std::fs::write(dir.join(&library), b"not a real library").unwrap();
+    let sha = crate::module::sha256_file(dir.join(&library)).unwrap();
+    std::fs::write(
+        dir.join("modules.toml"),
+        format!("\"{library}\" = \"{sha}\"\n"),
+    )
+    .unwrap();
+    dir
+}
+
+#[cfg(unix)]
+#[test]
+fn a_bundle_refused_only_for_its_location_falls_back_to_the_release_cache() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let host = ModuleHost::new(Broker::new());
+    let bundled = tempfile::tempdir().unwrap();
+    let user_cache = tempfile::tempdir().unwrap();
+    let dir = marked_bundle(bundled.path());
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+
+    let assets = [ASSET];
+    let error = load_first_admitted(
+        &host,
+        &plan(&assets, user_cache.path(), Some(bundled.path())),
+        &serde_json::json!({}),
+    )
+    .unwrap_err();
+
+    // The release cache was consulted: with downloads off, that is a miss.
+    assert!(error.contains("downloads are disabled"), "{error}");
+    assert!(!error.contains("installer bundle"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_bundle_refused_for_its_content_is_still_authoritative() {
+    let host = ModuleHost::new(Broker::new());
+    let bundled = tempfile::tempdir().unwrap();
+    let user_cache = tempfile::tempdir().unwrap();
+    // A private directory: the gate admits the location, then the loader
+    // refuses bytes that are not a library.
+    marked_bundle(bundled.path());
+
+    let assets = [ASSET];
+    let error = load_first_admitted(
+        &host,
+        &plan(&assets, user_cache.path(), Some(bundled.path())),
+        &serde_json::json!({}),
+    )
+    .unwrap_err();
+
+    assert!(error.contains("installer bundle"), "{error}");
+    assert!(!user_cache.path().join("demo").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn the_release_cache_is_repaired_to_owner_only_write_before_it_is_used() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let host = ModuleHost::new(Broker::new());
+    let user_cache = tempfile::tempdir().unwrap();
+    let dir = artifact_dir(user_cache.path(), "demo", "1.0.0", ASSET.host_key).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    // What an earlier launch under umask 002 left behind.
+    for directory in [user_cache.path().to_path_buf(), dir.clone()] {
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o775)).unwrap();
+    }
+
+    let assets = [ASSET];
+    let _ = load_first_admitted(
+        &host,
+        &plan(&assets, user_cache.path(), None),
+        &serde_json::json!({}),
+    );
+
+    for directory in [user_cache.path().to_path_buf(), dir] {
+        let mode = std::fs::metadata(&directory).unwrap().permissions().mode();
+        assert_eq!(mode & 0o022, 0, "{} is {mode:o}", directory.display());
+    }
+}

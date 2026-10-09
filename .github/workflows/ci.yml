@@ -131,6 +131,18 @@ jobs:
             fi
           done
           TINYBUS_TEST_MODULE="$PWD/$module" TINYBUS_TEST_MODULE_TWO="$PWD/$module_two" TINYBUS_TEST_WRONG_TARGET="$PWD/$wrong_target" cargo test --locked --no-default-features --features modules,macros -- --ignored
+      # Directory admission against this runner's real filesystem: a bundle
+      # in a directory other accounts can write falls back to the verified
+      # release cache, and on macOS the real /Applications is admitted.
+      - name: Directory admission (Unix)
+        if: runner.os != 'Windows'
+        run: cargo test --locked --no-default-features --features modules,macros admission_tests -- --include-ignored
+      # Umask is process-wide, so this test runs alone and only when asked.
+      - name: Release cache under a permissive umask (Unix)
+        if: runner.os != 'Windows'
+        env:
+          TINYBUS_TEST_UMASK: "1"
+        run: cargo test --locked --no-default-features --features modules,macros permissive_umask -- --test-threads=1
       - name: Exercise the real loader (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -169,3 +181,7 @@ jobs:
           $env:TINYBUS_TEST_WRONG_TARGET = $wrongTarget
           $env:TINYBUS_TEST_MODULE_DIRECTORY = $mixed
           cargo test --locked --no-default-features --features modules,macros -- --ignored
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Directory admission against the real ACLs: a bundle Everyone can
+          # write falls back to the verified release cache.
+          cargo test --locked --no-default-features --features modules,macros admission_tests -- --include-ignored
