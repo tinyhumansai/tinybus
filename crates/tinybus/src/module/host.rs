@@ -1841,7 +1841,10 @@ const PLACEMENT_REFUSALS: &[&str] = &[
 
 /// Whether `error` refused an artifact for its location rather than its content.
 pub(crate) fn is_placement_refusal(error: &Error) -> bool {
-    matches!(error, Error::ModuleRefused { reason, .. } if PLACEMENT_REFUSALS.contains(&reason.as_str()))
+    // A unix refusal goes on to name the ancestor that failed, so match the
+    // phrase it starts with.
+    matches!(error, Error::ModuleRefused { reason, .. }
+        if PLACEMENT_REFUSALS.iter().any(|phrase| reason.starts_with(phrase)))
 }
 
 fn check_allowlist(path: &Path, file: std::fs::File) -> Result<()> {
@@ -1914,10 +1917,6 @@ fn has_library_extension(path: &Path) -> bool {
 fn check_directory(path: &Path) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
 
-    unsafe extern "C" {
-        fn getuid() -> u32;
-    }
-
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -1925,7 +1924,11 @@ fn check_directory(path: &Path) -> Result<()> {
             .map_err(|_| Error::module_refused(path, "module directory is unavailable"))?
             .join(path)
     };
-    let uid = unsafe { getuid() };
+    // SAFETY: getuid cannot fail and touches no memory.
+    let uid = unsafe { libc::getuid() };
+    // Looked up once per walk, and only if some ancestor is group-writable:
+    // a directory-service (LDAP, sssd) lookup is not free.
+    let private_gid = std::cell::OnceCell::new();
     for component in absolute.ancestors() {
         let metadata = std::fs::symlink_metadata(component)
             .map_err(|_| Error::module_refused(path, "module directory is unavailable"))?;
@@ -1935,15 +1938,57 @@ fn check_directory(path: &Path) -> Result<()> {
                 "module search path contains a non-directory component",
             ));
         }
+        let mode = metadata.mode();
+        let private_gid = if mode & 0o020 != 0 {
+            *private_gid.get_or_init(|| current_user_private_gid(uid))
+        } else {
+            None
+        };
         if let Some(reason) =
-            unix_directory_refusal(metadata.uid(), metadata.gid(), metadata.mode(), uid, None)
+            unix_directory_refusal(metadata.uid(), metadata.gid(), mode, uid, private_gid)
         {
-            return Err(Error::module_refused(path, reason));
+            let mode = mode & 0o7777;
+            tracing::debug!(
+                directory = %component.display(),
+                mode = format_args!("{mode:04o}"),
+                reason,
+                "module directory ancestor refused"
+            );
+            let label = ancestor_label(component, &absolute);
+            return Err(Error::module_refused(
+                path,
+                format!("{reason} at {label} mode {mode:04o}"),
+            ));
         }
     }
     Ok(())
 }
 
+/// How a refusal names the ancestor that failed.
+///
+/// A refusal reaches telemetry, so it carries one path component rather than
+/// a path, and never the home directory's name, which is usually the account
+/// name.
+#[cfg(unix)]
+fn ancestor_label(component: &Path, module_directory: &Path) -> String {
+    if component.parent().is_none() {
+        return "the filesystem root".to_string();
+    }
+    if component == module_directory {
+        return "the directory itself".to_string();
+    }
+    if std::env::var_os("HOME").is_some_and(|home| Path::new(&home) == component) {
+        return "the home directory".to_string();
+    }
+    component
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("an unnamed ancestor")
+        .to_string()
+}
+
+/// `private_gid` is the current user's private group (see
+/// [`is_user_private_group`]), or `None` when they have none.
 #[cfg(unix)]
 fn unix_directory_refusal(
     owner: u32,
@@ -1952,21 +1997,36 @@ fn unix_directory_refusal(
     current_uid: u32,
     private_gid: Option<u32>,
 ) -> Option<&'static str> {
-    let _ = private_gid;
     let world_writable = mode & 0o002 != 0;
     let group_writable = mode & 0o020 != 0;
     let sticky = mode & 0o1000 != 0;
+    // Only consulted for a directory this user or root owns, where group
+    // write by the user's private group grants nobody but that user.
+    let group_grants_only_the_user =
+        root_equivalent_group(owner, group) || private_gid == Some(group);
     if owner != current_uid && owner != 0 {
         Some("module directory is owned by another user")
     } else if sticky {
         None
-    } else if world_writable || (group_writable && !root_equivalent_group(owner, group)) {
+    } else if world_writable || (group_writable && !group_grants_only_the_user) {
         Some("module directory is writable by another user")
     } else {
         None
     }
 }
 
+/// Whether a group is the user-private group of the account checked for.
+///
+/// Debian, Ubuntu and Fedora give every account a group of its own, named
+/// after it, as its primary group, and pair that with umask 002, so `$HOME`
+/// and `~/.cache` are routinely `user:user 0775`. Group write there grants
+/// nobody but the user, and refusing it refused the per-user release cache
+/// for good. The rule is deliberately narrow: the group must be the user's
+/// primary group, carry the user's own name, and list no member other than
+/// the user. Anything else is treated as shared.
+///
+/// The group database cannot show which *other* accounts take this gid as
+/// their primary group; the name match is what rules that out in practice.
 #[cfg(unix)]
 fn is_user_private_group(
     user_name: &str,
@@ -1975,8 +2035,106 @@ fn is_user_private_group(
     group_gid: u32,
     members: &[&str],
 ) -> bool {
-    let _ = (user_name, user_gid, group_name, group_gid, members);
-    false
+    !user_name.is_empty()
+        && group_gid == user_gid
+        && group_name == user_name
+        && members.iter().all(|member| *member == user_name)
+}
+
+/// The current user's private group, if the passwd and group databases show
+/// one. Any lookup failure answers `None`, which keeps group write refused.
+#[cfg(unix)]
+fn current_user_private_gid(uid: u32) -> Option<u32> {
+    use std::ffi::CStr;
+
+    let mut passwd_buffer = Vec::new();
+    // SAFETY: all-zero is a valid `passwd` (null pointers, zero ids).
+    let mut passwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let found = with_growing_buffer(&mut passwd_buffer, |buffer| {
+        let mut result = std::ptr::null_mut();
+        // SAFETY: every pointer is valid for the call, and the caller keeps
+        // `buffer` alive for as long as it reads `passwd`'s strings.
+        let status = unsafe {
+            libc::getpwuid_r(
+                uid,
+                &mut passwd,
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+        (status, !result.is_null())
+    });
+    if !found || passwd.pw_name.is_null() {
+        return None;
+    }
+    // SAFETY: a successful lookup leaves `pw_name` NUL-terminated in the buffer.
+    let user_name = unsafe { CStr::from_ptr(passwd.pw_name) }.to_str().ok()?;
+    let user_gid = passwd.pw_gid;
+
+    let mut group_buffer = Vec::new();
+    // SAFETY: all-zero is a valid `group`.
+    let mut group: libc::group = unsafe { std::mem::zeroed() };
+    let found = with_growing_buffer(&mut group_buffer, |buffer| {
+        let mut result = std::ptr::null_mut();
+        // SAFETY: as for `getpwuid_r` above.
+        let status = unsafe {
+            libc::getgrgid_r(
+                user_gid,
+                &mut group,
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+        (status, !result.is_null())
+    });
+    if !found || group.gr_name.is_null() {
+        return None;
+    }
+    // SAFETY: a successful lookup leaves `gr_name` NUL-terminated in the buffer.
+    let group_name = unsafe { CStr::from_ptr(group.gr_name) }.to_str().ok()?;
+    let mut members = Vec::new();
+    if !group.gr_mem.is_null() {
+        // SAFETY: `gr_mem` is a NULL-terminated array of NUL-terminated
+        // strings inside the buffer.
+        unsafe {
+            let mut cursor = group.gr_mem;
+            while !(*cursor).is_null() {
+                // A member whose name is not UTF-8 is not this user.
+                members.push(CStr::from_ptr(*cursor).to_str().unwrap_or("\u{fffd}"));
+                cursor = cursor.add(1);
+            }
+        }
+    }
+    let private = is_user_private_group(user_name, user_gid, group_name, group.gr_gid, &members);
+    tracing::debug!(
+        uid,
+        gid = user_gid,
+        private,
+        "module directory gate checked the user's primary group"
+    );
+    private.then_some(user_gid)
+}
+
+/// Run a reentrant `get*_r` lookup, growing `buffer` while it answers
+/// `ERANGE`. Returns whether an entry was found.
+#[cfg(unix)]
+fn with_growing_buffer(
+    buffer: &mut Vec<u8>,
+    mut lookup: impl FnMut(&mut [u8]) -> (i32, bool),
+) -> bool {
+    /// Room for a group with thousands of members; past it, give up.
+    const MAX: usize = 1 << 20;
+    let mut size = 1024;
+    loop {
+        buffer.resize(size, 0);
+        match lookup(buffer) {
+            (0, found) => return found,
+            (libc::ERANGE, _) if size < MAX => size *= 2,
+            _ => return false,
+        }
+    }
 }
 
 /// Whether group write on a root-owned directory grants nothing beyond root.

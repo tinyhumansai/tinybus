@@ -1486,7 +1486,10 @@ fn a_module_file_writable_by_everyone_is_refused() {
 #[test]
 fn a_sticky_world_writable_module_directory_is_accepted() {
     assert_eq!(unix_directory_refusal(0, 0, 0o1777, 1_000, None), None);
-    assert_eq!(unix_directory_refusal(1_000, 1_000, 0o1777, 1_000, None), None);
+    assert_eq!(
+        unix_directory_refusal(1_000, 1_000, 0o1777, 1_000, None),
+        None
+    );
 }
 
 #[cfg(unix)]
@@ -1531,7 +1534,10 @@ fn group_write_by_an_ordinary_group_is_still_refused() {
     assert_eq!(unix_directory_refusal(0, 20, 0o775, 501, None), refused);
     // The user's own directory writable by a group: the gid alone cannot
     // show the group is private to them.
-    assert_eq!(unix_directory_refusal(1_000, 1_000, 0o775, 1_000, None), refused);
+    assert_eq!(
+        unix_directory_refusal(1_000, 1_000, 0o775, 1_000, None),
+        refused
+    );
     #[cfg(not(target_os = "macos"))]
     assert_eq!(unix_directory_refusal(0, 80, 0o775, 1_000, None), refused);
 }
@@ -1543,10 +1549,19 @@ fn group_write_by_an_ordinary_group_is_still_refused() {
 #[test]
 fn group_write_by_the_users_private_group_is_admitted() {
     // The user's own directory, group-writable by their private group.
-    assert_eq!(unix_directory_refusal(1_000, 1_000, 0o775, 1_000, Some(1_000)), None);
-    assert_eq!(unix_directory_refusal(1_000, 1_000, 0o40770, 1_000, Some(1_000)), None);
+    assert_eq!(
+        unix_directory_refusal(1_000, 1_000, 0o775, 1_000, Some(1_000)),
+        None
+    );
+    assert_eq!(
+        unix_directory_refusal(1_000, 1_000, 0o40770, 1_000, Some(1_000)),
+        None
+    );
     // A root-owned directory whose group is the user's private group.
-    assert_eq!(unix_directory_refusal(0, 1_000, 0o775, 1_000, Some(1_000)), None);
+    assert_eq!(
+        unix_directory_refusal(0, 1_000, 0o775, 1_000, Some(1_000)),
+        None
+    );
 }
 
 #[cfg(unix)]
@@ -1554,12 +1569,24 @@ fn group_write_by_the_users_private_group_is_admitted() {
 fn group_write_by_a_shared_group_is_refused_even_with_a_private_group() {
     let refused = Some("module directory is writable by another user");
     // `users` (gid 100) is shared, whoever owns the directory.
-    assert_eq!(unix_directory_refusal(1_000, 100, 0o775, 1_000, Some(1_000)), refused);
-    assert_eq!(unix_directory_refusal(0, 100, 0o775, 1_000, Some(1_000)), refused);
+    assert_eq!(
+        unix_directory_refusal(1_000, 100, 0o775, 1_000, Some(1_000)),
+        refused
+    );
+    assert_eq!(
+        unix_directory_refusal(0, 100, 0o775, 1_000, Some(1_000)),
+        refused
+    );
     // Another user's private group is not this user's.
-    assert_eq!(unix_directory_refusal(1_000, 1_001, 0o775, 1_000, Some(1_000)), refused);
+    assert_eq!(
+        unix_directory_refusal(1_000, 1_001, 0o775, 1_000, Some(1_000)),
+        refused
+    );
     // A private group never excuses world write.
-    assert_eq!(unix_directory_refusal(1_000, 1_000, 0o777, 1_000, Some(1_000)), refused);
+    assert_eq!(
+        unix_directory_refusal(1_000, 1_000, 0o777, 1_000, Some(1_000)),
+        refused
+    );
     // Nor ownership by another account.
     assert_eq!(
         unix_directory_refusal(1_001, 1_000, 0o775, 1_000, Some(1_000)),
@@ -1573,10 +1600,28 @@ fn the_user_private_group_rule_needs_a_matching_name_and_no_other_members() {
     // Ubuntu/Fedora `useradd` default: group named after the user, no members.
     assert!(is_user_private_group("alice", 1_000, "alice", 1_000, &[]));
     // Some tools list the user as an explicit member of their own group.
-    assert!(is_user_private_group("alice", 1_000, "alice", 1_000, &["alice"]));
+    assert!(is_user_private_group(
+        "alice",
+        1_000,
+        "alice",
+        1_000,
+        &["alice"]
+    ));
     // Another member can write through the group.
-    assert!(!is_user_private_group("alice", 1_000, "alice", 1_000, &["alice", "bob"]));
-    assert!(!is_user_private_group("alice", 1_000, "alice", 1_000, &["bob"]));
+    assert!(!is_user_private_group(
+        "alice",
+        1_000,
+        "alice",
+        1_000,
+        &["alice", "bob"]
+    ));
+    assert!(!is_user_private_group(
+        "alice",
+        1_000,
+        "alice",
+        1_000,
+        &["bob"]
+    ));
     // A primary group not named after the user is a shared group (`users`).
     assert!(!is_user_private_group("alice", 100, "users", 100, &[]));
     // The group must be the user's primary group.
