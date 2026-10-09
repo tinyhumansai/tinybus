@@ -1967,20 +1967,26 @@ fn unix_directory_refusal(
 
 /// Whether group write on a root-owned directory grants nothing beyond root.
 ///
-/// Members of these groups can already act as root, so their write access is
-/// not "another user" in the sense this gate guards against. macOS ships
-/// `/Applications` as `root:admin 0775`; refusing it refused every module
-/// bundled in an app installed the normal way.
+/// macOS only. It ships `/Applications` as `root:admin 0775`, and refusing it
+/// refused every module bundled in an app installed the normal way. An `admin`
+/// member who can rewrite an app there can equally replace the host's own
+/// executable, which runs before any module gate, so refusing the module
+/// protects nothing the host's code is not already exposed to. `wheel` (gid
+/// 0) holds only root on macOS. Elsewhere gid 0 is not guaranteed to be
+/// root-only and no installer needs it, so group write stays refused.
 #[cfg(unix)]
 fn root_equivalent_group(owner: u32, group: u32) -> bool {
-    /// `wheel` on macOS and the BSDs, `root` on Linux.
-    const ROOT_GID: u32 = 0;
-    /// macOS `admin`: the sudoers group of every administrator account.
     #[cfg(target_os = "macos")]
-    const ADMIN_GID: Option<u32> = Some(80);
+    {
+        /// `wheel` and `admin`.
+        const TRUSTED_GIDS: [u32; 2] = [0, 80];
+        owner == 0 && TRUSTED_GIDS.contains(&group)
+    }
     #[cfg(not(target_os = "macos"))]
-    const ADMIN_GID: Option<u32> = None;
-    owner == 0 && (group == ROOT_GID || Some(group) == ADMIN_GID)
+    {
+        let _ = (owner, group);
+        false
+    }
 }
 
 #[cfg(windows)]

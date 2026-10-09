@@ -1461,11 +1461,21 @@ fn a_module_directory_owned_by_another_user_is_refused() {
     assert_eq!(unix_directory_refusal(0, 0, 0o755, 1_000), None);
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[test]
-fn a_root_owned_directory_writable_by_a_root_group_is_accepted() {
-    // /usr/local-style `root:root 0775`: only root can write through the group.
-    assert_eq!(unix_directory_refusal(0, 0, 0o775, 1_000), None);
+fn a_root_owned_directory_writable_by_wheel_is_accepted_on_macos() {
+    // `wheel` holds only root on macOS.
+    assert_eq!(unix_directory_refusal(0, 0, 0o775, 501), None);
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+fn group_write_by_gid_zero_is_refused_off_macos() {
+    // gid 0 is not guaranteed to be root-only outside macOS.
+    assert_eq!(
+        unix_directory_refusal(0, 0, 0o775, 1_000),
+        Some("module directory is writable by another user")
+    );
 }
 
 #[cfg(target_os = "macos")]
