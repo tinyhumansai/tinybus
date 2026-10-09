@@ -468,7 +468,9 @@ fn tighten_owned_directory(directory: &Path) {
         return;
     };
     if opened.dev() != metadata.dev() || opened.ino() != metadata.ino() {
-        tracing::debug!("[modules] release cache directory changed while tightening it; left as is");
+        tracing::debug!(
+            "[modules] release cache directory changed while tightening it; left as is"
+        );
         return;
     }
     let tightened = mode & 0o7777 & !0o022;
