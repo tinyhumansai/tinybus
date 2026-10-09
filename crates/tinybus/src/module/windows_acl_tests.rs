@@ -22,7 +22,15 @@ fn an_untrusted_modify_grant_on_the_directory_is_refused() {
 #[test]
 fn every_single_write_right_counts() {
     for bit in [
-        0x2u32, 0x4, 0x10, 0x100, 0x1_0000, 0x4_0000, 0x8_0000, 0x1000_0000, 0x4000_0000,
+        0x2u32,
+        0x4,
+        0x10,
+        0x100,
+        0x1_0000,
+        0x4_0000,
+        0x8_0000,
+        0x1000_0000,
+        0x4000_0000,
     ] {
         assert!(ace_grants_untrusted_write(0, 0, bit, false), "{bit:#x}");
     }
@@ -66,7 +74,10 @@ fn the_sddl_is_protected_and_names_only_the_owner_and_system() {
     let sid = "S-1-5-21-1004336348-1177238915-682003330-1000";
     let sddl = owner_only_sddl(sid).unwrap();
     assert_eq!(sddl, format!("D:P(A;OICI;FA;;;{sid})(A;OICI;FA;;;SY)"));
-    assert!(sddl.starts_with("D:P("), "inheritance from the parent is cut");
+    assert!(
+        sddl.starts_with("D:P("),
+        "inheritance from the parent is cut"
+    );
     assert_eq!(sddl.matches("(A;").count(), 2);
 }
 
@@ -84,7 +95,10 @@ fn a_malformed_sid_never_reaches_the_sddl() {
     ] {
         assert_eq!(owner_only_sddl(bad), None, "{bad:?}");
     }
-    assert_eq!(owner_only_sddl(&format!("S-1-5-{}", "1-".repeat(100))), None);
+    assert_eq!(
+        owner_only_sddl(&format!("S-1-5-{}", "1-".repeat(100))),
+        None
+    );
 }
 
 #[test]
@@ -118,4 +132,57 @@ fn scope_comparison_ignores_case_and_requires_a_real_prefix() {
     // Without a base, only the install root's own tree qualifies.
     assert!(!in_repair_scope(&base.join("other"), &root, None));
     assert!(in_repair_scope(&root.join("modules"), &root, None));
+}
+
+#[cfg(windows)]
+fn icacls_grant(path: &Path, grant: &str) {
+    let output = std::process::Command::new("icacls")
+        .arg(path)
+        .args(["/grant", grant])
+        .output()
+        .expect("icacls is installed on Windows");
+    assert!(output.status.success(), "icacls failed: {output:?}");
+}
+
+#[cfg(windows)]
+use super::super::host::windows_path_grants_untrusted_write as refused;
+
+#[cfg(windows)]
+#[test]
+fn a_directory_created_private_is_accepted_and_not_open_to_others() {
+    let root = tempfile::tempdir().unwrap();
+    let nested = root.path().join("a").join("b").join("c");
+    create_private_dir_all(&nested).unwrap();
+    assert!(nested.is_dir());
+    assert!(!refused(&nested).unwrap());
+    // Idempotent on an existing tree.
+    create_private_dir_all(&nested).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn a_cache_inheriting_a_group_write_grant_is_repaired() {
+    let install = tempfile::tempdir().unwrap();
+    icacls_grant(install.path(), "*S-1-5-11:(OI)(CI)(M)"); // Authenticated Users
+    let cache = install
+        .path()
+        .join("tinydocs")
+        .join("0.1.15")
+        .join("windows");
+    std::fs::create_dir_all(&cache).unwrap();
+    assert!(refused(&cache).unwrap(), "the inherited grant is refused");
+
+    secure_release_cache(install.path(), &cache);
+
+    assert!(!refused(&cache).unwrap(), "the repaired cache is accepted");
+}
+
+#[cfg(windows)]
+#[test]
+fn a_directory_outside_the_install_root_is_left_alone() {
+    let install = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    icacls_grant(other.path(), "*S-1-1-0:(OI)(CI)(M)");
+    secure_release_cache(install.path(), other.path());
+    assert!(refused(other.path()).unwrap(), "the gate still decides it");
 }

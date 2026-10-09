@@ -27,6 +27,8 @@ mod remembered_hash;
 mod resolve;
 #[cfg(feature = "modules")]
 mod transport;
+#[cfg(feature = "modules")]
+mod windows_acl;
 
 #[cfg(feature = "modules")]
 pub use cache::{artifact_dir, is_safe_path_component, prune_stale_versions};
