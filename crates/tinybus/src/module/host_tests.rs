@@ -1660,10 +1660,11 @@ fn a_directory_refusal_names_the_ancestor_that_failed() {
 #[cfg(unix)]
 #[test]
 fn a_refused_ancestor_is_named_without_leaking_a_path() {
-    let module_dir = Path::new("/opt/app/bundled-modules/x86_64");
-    assert_eq!(ancestor_label(Path::new("/"), module_dir), "the filesystem root");
-    assert_eq!(ancestor_label(module_dir, module_dir), "the directory itself");
-    assert_eq!(ancestor_label(Path::new("/opt/app"), module_dir), "app");
+    let module = Path::new("/opt/app/bundled-modules/x86_64");
+    let label = |ancestor: &str| ancestor_label(Path::new(ancestor), module);
+    assert_eq!(label("/"), "the filesystem root");
+    assert_eq!(label("/opt/app/bundled-modules/x86_64"), "the directory itself");
+    assert_eq!(label("/opt/app"), "app");
 }
 
 /// The lookup agrees with `id`: an account whose primary group is not named
@@ -1703,9 +1704,11 @@ fn a_reentrant_lookup_grows_its_buffer_until_the_entry_fits() {
     assert!(found);
     assert_eq!(buffer.len(), 8 * 1024);
     // An entry that never fits is given up on rather than grown forever.
-    assert!(!with_growing_buffer(&mut Vec::new(), |_| (libc::ERANGE, false)));
+    let never_fits = |_: &mut [u8]| (libc::ERANGE, false);
+    assert!(!with_growing_buffer(&mut Vec::new(), never_fits));
     // Any other error is a failed lookup.
-    assert!(!with_growing_buffer(&mut Vec::new(), |_| (libc::EIO, false)));
+    let io_error = |_: &mut [u8]| (libc::EIO, false);
+    assert!(!with_growing_buffer(&mut Vec::new(), io_error));
 }
 
 #[cfg(unix)]
