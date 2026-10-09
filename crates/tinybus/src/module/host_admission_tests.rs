@@ -9,6 +9,16 @@
 use super::*;
 use crate::module::{ReleaseAsset, ReleasePlan, artifact_dir, load_first_admitted};
 
+/// A temporary directory's real path. macOS reaches `$TMPDIR` through the
+/// `/var` symlink, which the gate refuses as a non-directory component.
+fn real(directory: &tempfile::TempDir) -> PathBuf {
+    if cfg!(windows) {
+        directory.path().to_path_buf()
+    } else {
+        std::fs::canonicalize(directory.path()).unwrap()
+    }
+}
+
 /// Give every account write access to `directory`, as a shared or mis-set
 /// install location would.
 fn open_to_other_accounts(directory: &Path) {
@@ -60,13 +70,14 @@ fn write_lazy_library(dir: &Path, stem: &str) -> PathBuf {
 /// directory other accounts can write, so the gate refuses it for its location;
 /// the same pinned release, already verified into this user's cache, loads.
 #[ignore = "needs a private temporary directory; run by CI's modules job on every OS"]
-#[test]
-fn a_bundle_others_can_write_falls_back_to_the_verified_release_cache() {
-    let bundled = tempfile::tempdir().unwrap();
-    let user_cache = tempfile::tempdir().unwrap();
+#[tokio::test]
+async fn a_bundle_others_can_write_falls_back_to_the_verified_release_cache() {
+    let bundled_dir = tempfile::tempdir().unwrap();
+    let user_cache_dir = tempfile::tempdir().unwrap();
+    let (bundled, user_cache) = (real(&bundled_dir), real(&user_cache_dir));
     let archive_bytes = b"the pinned release archive";
     let pin = {
-        let path = user_cache.path().join("pin-probe");
+        let path = user_cache.as_path().join("pin-probe");
         std::fs::write(&path, archive_bytes).unwrap();
         let pin = crate::module::sha256_file(&path).unwrap();
         std::fs::remove_file(path).unwrap();
@@ -80,7 +91,7 @@ fn a_bundle_others_can_write_falls_back_to_the_verified_release_cache() {
 
     // The bundle: a marker equal to the pin and an admissible extraction, in
     // a directory the gate must refuse for its location alone.
-    let bundle_dir = artifact_dir(bundled.path(), "clock", "0.1.0", asset.host_key).unwrap();
+    let bundle_dir = artifact_dir(bundled.as_path(), "clock", "0.1.0", asset.host_key).unwrap();
     std::fs::create_dir_all(&bundle_dir).unwrap();
     write_lazy_library(&bundle_dir, "bundled_clock");
     std::fs::write(
@@ -93,7 +104,7 @@ fn a_bundle_others_can_write_falls_back_to_the_verified_release_cache() {
     assert!(is_placement_refusal(&refusal), "{refusal}");
 
     // The release cache: the archive that hashes to the pin, and its extraction.
-    let cache_dir = artifact_dir(user_cache.path(), "clock", "0.1.0", asset.host_key).unwrap();
+    let cache_dir = artifact_dir(user_cache.as_path(), "clock", "0.1.0", asset.host_key).unwrap();
     std::fs::create_dir_all(&cache_dir).unwrap();
     std::fs::write(cache_dir.join(asset.archive), archive_bytes).unwrap();
     let cached = write_lazy_library(&cache_dir, "cached_clock");
@@ -105,8 +116,8 @@ fn a_bundle_others_can_write_falls_back_to_the_verified_release_cache() {
         version: "0.1.0",
         release_url: "https://github.com/tinyhumansai/clock/releases/tag/v0.1.0",
         assets: &assets,
-        install_root: user_cache.path(),
-        bundled_root: Some(bundled.path()),
+        install_root: user_cache.as_path(),
+        bundled_root: Some(bundled.as_path()),
         allow_download: false,
     };
     let info = load_first_admitted(&host, &plan, &serde_json::json!({})).unwrap();
@@ -158,8 +169,9 @@ fn release_cache_directories_are_private_under_a_permissive_umask() {
     if std::env::var_os("TINYBUS_TEST_UMASK").is_none() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
-    let dir = artifact_dir(root.path(), "clock", "0.1.0", "test-host").unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let root = real(&directory);
+    let dir = artifact_dir(&root, "clock", "0.1.0", "test-host").unwrap();
     let previous = unsafe { umask(0o002) };
     let staged = crate::module::cache::stage(&dir);
     unsafe { umask(previous) };
