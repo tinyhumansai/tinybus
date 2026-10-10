@@ -828,3 +828,24 @@ async fn admission_never_promotes_a_frame_already_queued_without_provenance() {
     );
     assert_eq!(transport.recv().await.unwrap().unwrap(), frame);
 }
+
+#[tokio::test]
+async fn old_hosts_retain_sender_headers_without_authenticating_them() {
+    let _guard = host_state_guard().await;
+    let (sender, receiver) = mpsc::channel(1);
+    let transport = ModuleTransport {
+        host: HostCalls(host(b"{}")),
+        inbound: Mutex::new(receiver),
+        detach_on_panic: false,
+    };
+    let mut frame = message();
+    frame.header.sender = Some(":1.99".parse().unwrap());
+    sender
+        .send((serde_json::to_vec(&frame).unwrap(), false))
+        .await
+        .unwrap();
+    assert_eq!(transport.recv().await.unwrap().unwrap(), frame);
+    // No routing callback means startup selects ordinary Connection::attach;
+    // sender headers remain protocol data, not incoming-call authority.
+    assert!(transport.host.0.broker_routing.is_none());
+}

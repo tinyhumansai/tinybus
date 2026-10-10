@@ -289,7 +289,7 @@ impl Transport for ModuleTransport {
         let mut message: Message = serde_json::from_slice(&bytes)?;
         // Admission is captured at delivery, never when draining the queue:
         // a pre-admission frame must not acquire authority after admission.
-        if !brokered {
+        if self.host.0.broker_routing.is_some() && !brokered {
             message.header.sender = None;
         }
         Ok(Some(message))
