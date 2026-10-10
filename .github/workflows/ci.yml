@@ -78,7 +78,11 @@ jobs:
           chmod 700 "$private"
           cp "$module_two" "$private/"
           library="$(basename "$module_two")"
-          digest="$(sha256sum "$private/$library" | awk '{print $1}')"
+          if command -v sha256sum >/dev/null 2>&1; then
+            digest="$(sha256sum "$private/$library" | awk '{print $1}')"
+          else
+            digest="$(shasum -a 256 "$private/$library" | awk '{print $1}')"
+          fi
           printf '"%s" = "%s"\n' "$library" "$digest" > "$private/modules.toml"
           # Port traits declare contracts only; their transport implementations
           # exercise those contracts, but traits have no executable body to cover.

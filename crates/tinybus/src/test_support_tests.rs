@@ -35,6 +35,21 @@ fn checks_the_adjacent_modules_toml_digest_before_loading() {
     assert!(verify_modules_pin(&artifact).is_err());
 }
 
+#[test]
+fn a_failed_load_reservation_can_be_retried() {
+    let state = AtomicU8::new(MODULE_UNLOADED);
+    {
+        let _reservation = LoadReservation::reserve(&state).unwrap();
+        assert_eq!(state.load(Ordering::Acquire), MODULE_LOADING);
+    }
+    assert_eq!(state.load(Ordering::Acquire), MODULE_UNLOADED);
+
+    let mut reservation = LoadReservation::reserve(&state).unwrap();
+    reservation.admitted();
+    assert_eq!(state.load(Ordering::Acquire), MODULE_ADMITTED);
+    assert!(LoadReservation::reserve(&state).is_err());
+}
+
 #[tokio::test]
 #[ignore = "requires TINYBUS_TEST_MODULE_TWO to point at the built clock fixture"]
 async fn the_shared_helper_loads_an_allowlisted_module_and_calls_it() {

@@ -7,7 +7,7 @@
 
 use std::{
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicU8, Ordering},
     time::Duration,
 };
 
@@ -20,7 +20,53 @@ use crate::{
     transport::memory::MemoryBus,
 };
 
-static MODULE_LOADED: AtomicBool = AtomicBool::new(false);
+const MODULE_UNLOADED: u8 = 0;
+const MODULE_LOADING: u8 = 1;
+const MODULE_ADMITTED: u8 = 2;
+
+static MODULE_LOAD_STATE: AtomicU8 = AtomicU8::new(MODULE_UNLOADED);
+
+struct LoadReservation<'a> {
+    state: &'a AtomicU8,
+    admitted: bool,
+}
+
+impl<'a> LoadReservation<'a> {
+    fn reserve(state: &'a AtomicU8) -> Result<Self> {
+        state
+            .compare_exchange(
+                MODULE_UNLOADED,
+                MODULE_LOADING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map_err(|_| {
+                crate::Error::failed("only one dynamic module may be loaded per test process")
+            })?;
+        Ok(Self {
+            state,
+            admitted: false,
+        })
+    }
+
+    fn admitted(&mut self) {
+        self.state.store(MODULE_ADMITTED, Ordering::Release);
+        self.admitted = true;
+    }
+}
+
+impl Drop for LoadReservation<'_> {
+    fn drop(&mut self) {
+        if !self.admitted {
+            let _ = self.state.compare_exchange(
+                MODULE_LOADING,
+                MODULE_UNLOADED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+        }
+    }
+}
 
 /// Resolve the library filename Cargo produces for `crate_name` on this OS.
 ///
@@ -49,15 +95,6 @@ pub fn admit_module(
     env_var: &str,
     expected_module_name: &str,
 ) -> Result<ModuleInfo> {
-    if MODULE_LOADED
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return Err(crate::Error::failed(
-            "only one dynamic module may be loaded per test process",
-        ));
-    }
-
     let artifact = std::env::var_os(env_var)
         .map(PathBuf::from)
         .ok_or_else(|| crate::Error::failed(format!("{env_var} must point to the built module")))?;
@@ -65,22 +102,27 @@ pub fn admit_module(
     let directory = artifact
         .parent()
         .ok_or_else(|| crate::Error::failed("module artifact has no parent directory"))?;
+    verify_single_artifact(directory, &artifact)?;
+    let mut reservation = LoadReservation::reserve(&MODULE_LOAD_STATE)?;
     let outcomes = host.load_dir(directory)?;
-    let info = outcomes
-        .into_iter()
-        .find_map(|result| match result {
-            Ok(info) if info.name == expected_module_name => Some(Ok(info)),
-            Ok(_) => None,
-            Err(error) => Some(Err(error)),
-        })
-        .transpose()?
-        .ok_or_else(|| {
-            crate::Error::failed(format!(
-                "TinyBus did not admit module `{expected_module_name}` from {}",
-                artifact.display()
-            ))
-        })?;
-    Ok(info)
+    for result in outcomes {
+        match result {
+            Ok(info) => {
+                reservation.admitted();
+                if info.name != expected_module_name {
+                    return Err(crate::Error::failed(format!(
+                        "expected TinyBus module `{expected_module_name}`, admitted `{}`",
+                        info.name
+                    )));
+                }
+                return Ok(info);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(crate::Error::failed(format!(
+        "TinyBus did not admit module `{expected_module_name}` from the test artifact directory"
+    )))
 }
 
 /// Start an in-memory broker and return its host, client, and task handle.
@@ -154,12 +196,8 @@ fn verify_modules_pin(artifact: &Path) -> Result<()> {
         .and_then(|name| name.to_str())
         .ok_or_else(|| crate::Error::failed("module artifact filename is not UTF-8"))?;
     let manifest_path = directory.join("modules.toml");
-    let manifest = std::fs::read_to_string(&manifest_path).map_err(|error| {
-        crate::Error::failed(format!(
-            "cannot read module digest manifest {}: {error}",
-            manifest_path.display()
-        ))
-    })?;
+    let manifest = std::fs::read_to_string(&manifest_path)
+        .map_err(|_| crate::Error::failed("cannot read modules.toml beside the module artifact"))?;
     let expected = crate::attest::parse_allowlist(&manifest)
         .find_map(|(name, digest)| (name == file_name).then_some(digest))
         .ok_or_else(|| crate::Error::failed(format!("modules.toml does not pin `{file_name}`")))?;
@@ -168,6 +206,28 @@ fn verify_modules_pin(artifact: &Path) -> Result<()> {
         return Err(crate::Error::failed(format!(
             "module `{file_name}` digest does not match modules.toml"
         )));
+    }
+    Ok(())
+}
+
+fn verify_single_artifact(directory: &Path, selected: &Path) -> Result<()> {
+    let entries = std::fs::read_dir(directory)
+        .map_err(|_| crate::Error::failed("cannot inspect the test module artifact directory"))?;
+    let mut libraries = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|_| {
+            crate::Error::failed("cannot inspect the test module artifact directory")
+        })?;
+        let path = entry.path();
+        let extension = path.extension().and_then(|value| value.to_str());
+        if matches!(extension, Some("dll" | "dylib" | "so")) {
+            libraries.push(path);
+        }
+    }
+    if libraries.len() != 1 || libraries[0] != selected {
+        return Err(crate::Error::failed(
+            "the test module artifact directory must contain only the selected library",
+        ));
     }
     Ok(())
 }
