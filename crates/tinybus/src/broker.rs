@@ -118,6 +118,12 @@ impl Broker {
             .expect("router lock is never held across a panic point")
             .attach(outbox);
 
+        #[cfg(feature = "modules")]
+        if let Some(module) = crate::transport::downcast::<crate::module::transport::ModuleTransport>(
+            transport.as_ref(),
+        ) {
+            module.admit_broker();
+        }
         tracing::debug!(peer = %unique, transport = %transport.describe(), "peer attached");
         tokio::spawn(writer_task(transport.clone(), inbox));
         tokio::spawn(reader_task(self.clone(), transport, id, unique.clone()));
@@ -678,7 +684,15 @@ fn parse_args<T: serde::de::DeserializeOwned>(member: &MemberName, body: Value) 
 /// Drain one peer's queue onto its transport.
 async fn writer_task(transport: Arc<dyn Transport>, mut inbox: mpsc::Receiver<Message>) {
     while let Some(message) = inbox.recv().await {
-        if let Err(e) = transport.send(message).await {
+        let result = if let Some(memory) = crate::transport::downcast::<
+            crate::transport::memory::MemoryTransport,
+        >(transport.as_ref())
+        {
+            memory.send_brokered(message).await
+        } else {
+            transport.send(message).await
+        };
+        if let Err(e) = result {
             tracing::debug!(error = %e, "peer write failed; dropping the peer");
             break;
         }

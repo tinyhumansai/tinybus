@@ -14,7 +14,7 @@ use serde_json::Value;
 
 use crate::error::{Error, Result};
 use crate::name::{InterfaceName, MemberName, ObjectPath};
-use crate::service::Interface;
+use crate::service::{CallContext, Interface};
 
 /// Everything one connection exports.
 #[derive(Default)]
@@ -104,7 +104,40 @@ impl ObjectTree {
         args: Value,
         confidential: bool,
     ) -> Result<Value> {
+        self.dispatch_with_context(
+            path,
+            interface,
+            member,
+            args,
+            confidential,
+            &CallContext::default(),
+        )
+        .await
+    }
+
+    /// Resolve and invoke with out-of-band incoming context and delivery flags.
+    pub async fn dispatch_with_context(
+        &self,
+        path: &ObjectPath,
+        interface: &InterfaceName,
+        member: &MemberName,
+        args: Value,
+        confidential: bool,
+        context: &CallContext,
+    ) -> Result<Value> {
         let target = self.lookup(path, interface)?;
+        Self::invoke(target, interface, member, args, confidential, context).await
+    }
+
+    /// Invoke a resolved snapshot without holding the connection's tree lock.
+    pub(crate) async fn invoke(
+        target: Arc<dyn Interface>,
+        interface: &InterfaceName,
+        member: &MemberName,
+        args: Value,
+        confidential: bool,
+        context: &CallContext,
+    ) -> Result<Value> {
         if !target.members().contains(member) {
             return Err(Error::UnknownMethod {
                 interface: interface.clone(),
@@ -117,7 +150,7 @@ impl ObjectTree {
                 member: member.clone(),
             });
         }
-        target.call(member, args).await
+        target.call_with_context(member, args, context).await
     }
 }
 

@@ -485,3 +485,42 @@ async fn delivery_maps_a_faulted_transport_a_missing_module_and_module_refusals(
         Err(Error::ConnectionClosed)
     ));
 }
+
+#[test]
+fn native_provenance_requires_actual_broker_admission() {
+    let (transport, host) = ModuleTransport::new("context".into(), b"{}".to_vec());
+    let callback = host
+        .broker_routing
+        .expect("additive broker provenance callback");
+    assert_eq!(unsafe { callback(host.host_ctx) }, 0);
+    assert_eq!(unsafe { callback(std::ptr::null_mut()) }, 0);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let _guard = runtime.enter();
+    crate::broker::Broker::new().attach(transport);
+    assert_eq!(unsafe { callback(host.host_ctx) }, 1);
+}
+
+unsafe extern "C" fn legacy_host_prefix_init(
+    host: *const TbHostVtable,
+    out: *mut TbModuleVtable,
+) -> i32 {
+    let prefix = unsafe {
+        host.cast::<crate::module::abi::TbHostVtableV1Prefix>()
+            .read()
+    };
+    assert!(prefix.size >= crate::module::abi::TB_HOST_VTABLE_BASE_SIZE);
+    assert_eq!(prefix.config.len, 2);
+    // An old module only copies these bytes and never interprets the tail.
+    unsafe { initialize_ok(host, out) }
+}
+
+#[tokio::test]
+async fn a_new_host_keeps_the_frozen_prefix_readable_by_old_modules() {
+    let (transport, host) = ModuleTransport::new("legacy".into(), b"{}".to_vec());
+    let mut module = TbModuleVtable::default();
+    assert_eq!(
+        unsafe { legacy_host_prefix_init(&host, &mut module) },
+        TB_OK
+    );
+    transport.initialize(module).unwrap();
+}

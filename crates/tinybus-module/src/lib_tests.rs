@@ -73,6 +73,7 @@ fn host(config: &[u8]) -> TbHostVtable {
             len: config.len(),
         },
         ready: host_ready,
+        broker_routing: None,
     }
 }
 
@@ -534,7 +535,7 @@ fn configured_startup_refuses_a_host_vtable_it_cannot_trust() {
     // A host built against an older, smaller descriptor. Reading our
     // fields out of it would run off the end of what it allocated.
     let mut truncated = host(b"{}");
-    truncated.size = (size_of::<TbHostVtable>() - 1) as u32;
+    truncated.size = tinybus::module::abi::TB_HOST_VTABLE_BASE_SIZE - 1;
     assert_eq!(
         attempt(&truncated),
         TB_BAD_ARGUMENT,
@@ -712,4 +713,63 @@ fn a_linked_reconfigurable_module_refuses_bad_hosts_and_reports_closed_before_it
         TB_CLOSED
     );
     assert_eq!(unsafe { (out.shutdown)(out.module_ctx, 10) }, TB_OK);
+}
+
+#[test]
+fn an_older_host_prefix_is_copied_without_reading_the_additive_tail() {
+    let current = host(b"{}");
+    let prefix = tinybus::module::abi::TbHostVtableV1Prefix {
+        size: tinybus::module::abi::TB_HOST_VTABLE_BASE_SIZE,
+        _reserved: current._reserved,
+        host_ctx: current.host_ctx,
+        send: current.send,
+        wake: current.wake,
+        log: current.log,
+        fault: current.fault,
+        config: current.config,
+        ready: current.ready,
+    };
+    let ptr = std::ptr::from_ref(&prefix).cast::<TbHostVtable>();
+    let normalized = unsafe { TbHostVtable::read_compatible(ptr) }.unwrap();
+    assert!(normalized.broker_routing.is_none());
+    assert_eq!(
+        unsafe { parse_config::<serde_json::Value>(ptr) }.unwrap(),
+        serde_json::json!({})
+    );
+    assert_eq!(
+        tinybus::module::abi::TB_HOST_VTABLE_BASE_SIZE as usize,
+        std::mem::offset_of!(TbHostVtable, broker_routing)
+    );
+}
+
+#[test]
+fn an_incomplete_host_tail_never_reads_the_callback() {
+    let mut current = host(b"{}");
+    current.size = size_of::<TbHostVtable>() as u32 - 1;
+    let normalized = unsafe { TbHostVtable::read_compatible(&current) }.unwrap();
+    assert!(normalized.broker_routing.is_none());
+    assert!(unsafe { TbHostVtable::read_compatible(std::ptr::null()) }.is_none());
+    current.size = tinybus::module::abi::TB_HOST_VTABLE_BASE_SIZE - 1;
+    assert!(unsafe { TbHostVtable::read_compatible(&current) }.is_none());
+}
+
+unsafe extern "C" fn routing_assertion(ctx: *mut c_void) -> u32 {
+    unsafe { ctx.cast::<u32>().read() }
+}
+
+#[test]
+fn native_routing_requires_an_explicit_affirmative_host_assertion() {
+    let mut table = host(b"{}");
+    assert!(!HostCalls(table).is_broker_routed());
+    table.broker_routing = Some(routing_assertion);
+    for value in [0u32, 2, u32::MAX] {
+        table.host_ctx = std::ptr::from_ref(&value).cast_mut().cast();
+        assert!(!HostCalls(table).is_broker_routed());
+    }
+    // Counterfeit host callbacks can assert 1: that is why start_module and
+    // __attach_brokered_module are unsafe trusted-host contracts, never safe
+    // generic transport authentication APIs.
+    let affirmative = 1u32;
+    table.host_ctx = std::ptr::from_ref(&affirmative).cast_mut().cast();
+    assert!(HostCalls(table).is_broker_routed());
 }

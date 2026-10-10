@@ -164,6 +164,12 @@ unsafe impl Send for HostCalls {}
 unsafe impl Sync for HostCalls {}
 
 impl HostCalls {
+    fn is_broker_routed(&self) -> bool {
+        self.0
+            .broker_routing
+            .is_some_and(|routing| unsafe { routing(self.0.host_ctx) } == 1)
+    }
+
     fn send(&self, bytes: &[u8]) -> i32 {
         unsafe { (self.0.send)(self.0.host_ctx, bytes.as_ptr(), bytes.len()) }
     }
@@ -398,6 +404,12 @@ unsafe fn write_module_vtable(
 ///
 /// This is public only for [`module_export!`] expansions. Module authors call
 /// the macro, not this function directly.
+///
+/// # Safety
+/// The host vtable must meet `TbHostVtable::read_compatible`'s requirements.
+/// In particular an affirmative routing callback is a trusted host assertion
+/// that only real broker deliveries enter `deliver`, not an arbitrary frame
+/// injection capability. Artifact attestation does not establish this fact.
 #[doc(hidden)]
 pub unsafe fn start_module<F, Fut>(
     host: *const TbHostVtable,
@@ -475,10 +487,10 @@ where
         }
         // `size` is the frozen prefix field; do not copy the full vtable until
         // the host has proved that all v1 fields are present.
-        if unsafe { host.cast::<u32>().read() } < size_of::<TbHostVtable>() as u32 {
+        let Some(host) = (unsafe { TbHostVtable::read_compatible(host) }) else {
             return TB_BAD_ARGUMENT;
-        }
-        let host = HostCalls(unsafe { *host });
+        };
+        let host = HostCalls(host);
 
         // A cdylib carries its own statically linked `tracing` and `std` state;
         // this registration is global to the module's copy, not the embedding
@@ -531,7 +543,7 @@ where
             Err(_) => return TB_CLOSED,
         };
         let (inbound_tx, inbound_rx) = mpsc::channel(MODULE_QUEUE_CAPACITY);
-        let transport = Box::new(ModuleTransport {
+        let transport: Arc<dyn Transport> = Arc::new(ModuleTransport {
             host,
             inbound: Mutex::new(inbound_rx),
             detach_on_panic,
@@ -540,7 +552,16 @@ where
         let task_connection_slot = connection_slot.clone();
 
         runtime.spawn(async move {
-            let outcome = match Connection::connect(transport).await {
+            let brokered = host.is_broker_routed();
+            // SAFETY: module initialization requires a trusted host vtable.
+            // Only its size-checked additive callback can assert actual broker
+            // admission; older hosts and absent/false callbacks stay unverified.
+            let connection = if brokered {
+                unsafe { Connection::__attach_brokered_module(transport) }
+            } else {
+                Connection::attach(transport)
+            };
+            let outcome = match connection.handshake().await.map(|()| connection) {
                 Ok(connection) => {
                     connection.__set_panic_handler(std::sync::Arc::new(move || {
                         let location = panic_location
@@ -600,10 +621,7 @@ unsafe fn parse_config<C: serde::de::DeserializeOwned>(
     if host.is_null() {
         return Err(TB_BAD_ARGUMENT);
     }
-    if unsafe { host.cast::<u32>().read() } < size_of::<TbHostVtable>() as u32 {
-        return Err(TB_BAD_ARGUMENT);
-    }
-    let host_ref = unsafe { &*host };
+    let host_ref = unsafe { TbHostVtable::read_compatible(host) }.ok_or(TB_BAD_ARGUMENT)?;
     if host_ref.config.len > 1024 * 1024
         || (host_ref.config.ptr.is_null() && host_ref.config.len != 0)
     {

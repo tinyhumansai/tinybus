@@ -101,6 +101,31 @@ impl TbAbiDescriptor {
     }
 }
 
+/// Frozen revision-one host vtable prefix, accepted from older hosts.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct TbHostVtableV1Prefix {
+    /// Size of this vtable, allowing additive growth.
+    pub size: u32,
+    /// Reserved and zero in v1.
+    pub _reserved: u32,
+    /// Opaque host context, never dereferenced by the module.
+    pub host_ctx: *mut c_void,
+    /// Send one complete JSON message frame to the host.
+    pub send: unsafe extern "C" fn(*mut c_void, *const u8, usize) -> i32,
+    /// Tell the host the module's inbound queue has room again.
+    pub wake: unsafe extern "C" fn(*mut c_void),
+    /// Forward one log record to the host.
+    pub log: unsafe extern "C" fn(*mut c_void, u32, *const u8, usize),
+    /// Mark the module failed and detach it.
+    pub fault: unsafe extern "C" fn(*mut c_void, *const u8, usize),
+    /// Borrowed JSON configuration. The module must copy it during init and
+    /// must not retain this pointer.
+    pub config: TbSlice,
+    /// Module setup completed and its declared bus surface is ready.
+    pub ready: unsafe extern "C" fn(*mut c_void),
+}
+
 /// Calls from a module into its host.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -124,6 +149,48 @@ pub struct TbHostVtable {
     pub config: TbSlice,
     /// Module setup completed and its declared bus surface is ready.
     pub ready: unsafe extern "C" fn(*mut c_void),
+    /// Optional additive tail: 1 only when all deliveries originate from the
+    /// actual broker routing pipeline, which overwrites sender on ingress.
+    /// Older hosts omit this field and therefore supply unverified context.
+    /// The SDK trusts this callback under the unsafe module-init host contract;
+    /// it is not authentication of arbitrary user-provided C vtables.
+    pub broker_routing: Option<unsafe extern "C" fn(*mut c_void) -> u32>,
+}
+
+/// Size required from an older host before reading its frozen prefix.
+pub const TB_HOST_VTABLE_BASE_SIZE: u32 = size_of::<TbHostVtableV1Prefix>() as u32;
+
+impl TbHostVtable {
+    /// Copy the available host prefix and normalize an absent additive tail.
+    ///
+    /// # Safety
+    /// `host` must be aligned, readable for its declared size, and contain valid
+    /// callbacks and a context that outlive the module runtime. A nonzero routing
+    /// callback must truthfully guarantee exclusive broker delivery.
+    #[doc(hidden)]
+    pub unsafe fn read_compatible(host: *const Self) -> Option<Self> {
+        if host.is_null() || unsafe { host.cast::<u32>().read() } < TB_HOST_VTABLE_BASE_SIZE {
+            return None;
+        }
+        let base = unsafe { host.cast::<TbHostVtableV1Prefix>().read() };
+        let broker_routing = if base.size as usize >= size_of::<Self>() {
+            unsafe { std::ptr::addr_of!((*host).broker_routing).read() }
+        } else {
+            None
+        };
+        Some(Self {
+            size: base.size,
+            _reserved: base._reserved,
+            host_ctx: base.host_ctx,
+            send: base.send,
+            wake: base.wake,
+            log: base.log,
+            fault: base.fault,
+            config: base.config,
+            ready: base.ready,
+            broker_routing,
+        })
+    }
 }
 
 /// Calls from a host into one initialized module.

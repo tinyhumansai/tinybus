@@ -25,15 +25,49 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::error::Result;
-use crate::name::{InterfaceName, MemberName};
+use crate::name::{BusName, InterfaceName, MemberName};
 
 pub use crate::service::tree::ObjectTree;
 
+/// Transport-authenticated facts about one incoming method call.
+///
+/// A sender identifies a connection in this broker session, never a human or
+/// an artifact. Bind it to trusted initialization separately. This type has no
+/// wire representation and no public constructor for authenticated identity.
+/// Direct dispatch and transports without proven broker routing are unverified.
+/// Memory deliveries carry a private broker proof; custom transports and Unix
+/// sockets remain unverified even after Hello. Native SDK deliveries require a
+/// trusted host's additive C routing callback. Confidential recipient attestation
+/// is separate from incoming sender authentication. Invalidate any binding on
+/// disconnect or broker replacement; names are unique only within one session.
+///
+/// Authority cannot be deserialized from invocation JSON:
+/// ```compile_fail
+/// let _: tinybus::CallContext = serde_json::from_str("{}").unwrap();
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct CallContext {
+    sender: Option<BusName>,
+}
+
+impl CallContext {
+    /// The broker-stamped unique sender, only on a proven broker delivery path.
+    pub fn authenticated_sender(&self) -> Option<&BusName> {
+        self.sender.as_ref()
+    }
+
+    pub(crate) fn brokered(sender: Option<&BusName>) -> Self {
+        Self {
+            sender: sender.filter(|name| name.is_unique()).cloned(),
+        }
+    }
+}
+
 /// One contract a service implements.
 ///
-/// Implement this by hand only for dynamic interfaces — a bridge that proxies
-/// an interface it does not know at compile time. Everything else should use
-/// `#[tinybus::interface]`.
+/// Use `#[tinybus::interface]` for ordinary typed methods. Implement by hand for
+/// dynamic bridges or to authorize incoming calls with `call_with_context`;
+/// context never becomes an extra positional argument.
 #[async_trait]
 pub trait Interface: Send + Sync + 'static {
     /// The interface's name, e.g. `ai.tinyhumans.openhuman.Voice`.
@@ -64,6 +98,20 @@ pub trait Interface: Send + Sync + 'static {
     /// because a service that has panicked has an unknown internal state and
     /// answering the next call from it is worse than being restarted.
     async fn call(&self, member: &MemberName, args: Value) -> Result<Value>;
+
+    /// Run a call with transport-authenticated incoming facts.
+    ///
+    /// Context is out of band: positional arguments and legacy implementations
+    /// stay unchanged. Override this method to authorize callers; an unverified
+    /// context must fail closed when caller identity is required.
+    async fn call_with_context(
+        &self,
+        member: &MemberName,
+        args: Value,
+        _context: &CallContext,
+    ) -> Result<Value> {
+        self.call(member, args).await
+    }
 }
 
 #[async_trait]
@@ -83,4 +131,17 @@ impl<T: Interface + ?Sized> Interface for std::sync::Arc<T> {
     async fn call(&self, member: &MemberName, args: Value) -> Result<Value> {
         (**self).call(member, args).await
     }
+
+    async fn call_with_context(
+        &self,
+        member: &MemberName,
+        args: Value,
+        context: &CallContext,
+    ) -> Result<Value> {
+        (**self).call_with_context(member, args, context).await
+    }
 }
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod tests;

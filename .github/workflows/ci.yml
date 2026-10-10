@@ -59,7 +59,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-llvm-cov
       - name: Build loader fixtures
-        run: cargo build --locked --example module_clock --example module_clock_two --example module_wrong_target --no-default-features --features modules,macros
+        run: cargo build --locked --example module_clock --example module_clock_two --example module_wrong_target --example module_context --no-default-features --features modules,macros
       - name: Enforce 90% line coverage per source file
         shell: bash
         run: |
@@ -67,7 +67,8 @@ jobs:
           module=$(find target/debug/examples -maxdepth 1 -type f -name 'libmodule_clock.so' -print -quit)
           module_two=$(find target/debug/examples -maxdepth 1 -type f -name 'libmodule_clock_two.so' -print -quit)
           wrong_target=$(find target/debug/examples -maxdepth 1 -type f -name 'libmodule_wrong_target.so' -print -quit)
-          for artifact in "$module" "$module_two" "$wrong_target"; do
+          context_module=$(find target/debug/examples -maxdepth 1 -type f -name 'libmodule_context.so' -print -quit)
+          for artifact in "$module" "$module_two" "$wrong_target" "$context_module"; do
             if [ -z "$artifact" ] || [ ! -f "$artifact" ]; then
               echo "a module loader fixture is missing" >&2
               exit 1
@@ -91,7 +92,7 @@ jobs:
           # process/network branches are not meaningful per-file coverage. The
           # test-support module is integration-test glue whose platform-specific
           # dynamic-loader and timeout paths run in the dedicated OS jobs instead.
-          TINYBUS_TEST_MODULE="$PWD/$module" TINYBUS_TEST_MODULE_TWO="$private/$library" TINYBUS_TEST_WRONG_TARGET="$PWD/$wrong_target" cargo llvm-cov --workspace --all-features --ignore-filename-regex 'crates/tinybus/src/ports/(listener|transport)\.rs$|crates/tinybus/src/module/github\.rs$|crates/tinybus/src/module/(host|mod)\.rs$|crates/tinybus/src/bin/tinybus\.rs$|crates/tinybus/src/connection\.rs$|crates/tinybus/src/test_support\.rs$' --fail-under-file-lines 90 -- --include-ignored
+          TINYBUS_TEST_MODULE="$PWD/$module" TINYBUS_TEST_MODULE_TWO="$private/$library" TINYBUS_TEST_WRONG_TARGET="$PWD/$wrong_target" TINYBUS_TEST_CONTEXT_MODULE="$PWD/$context_module" cargo llvm-cov --workspace --all-features --ignore-filename-regex 'crates/tinybus/src/ports/(listener|transport)\.rs$|crates/tinybus/src/module/github\.rs$|crates/tinybus/src/module/(host|mod)\.rs$|crates/tinybus/src/bin/tinybus\.rs$|crates/tinybus/src/connection\.rs$|crates/tinybus/src/test_support\.rs$' --fail-under-file-lines 90 -- --include-ignored
 
   # The bus is meant to be embeddable on every platform OpenHuman ships on. The
   # socket adapter remains Unix-only, while the in-process module transport
@@ -128,7 +129,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build example module
-        run: cargo build --locked --example module_clock --example module_clock_two --example module_wrong_target --no-default-features --features modules,macros
+        run: cargo build --locked --example module_clock --example module_clock_two --example module_wrong_target --example module_context --no-default-features --features modules,macros
       - name: Test shared module test support
         run: cargo test --locked --no-default-features --features modules,macros,test-support test_support::tests
       - name: Exercise the real loader (Unix)
@@ -139,7 +140,8 @@ jobs:
           module=$(find target/debug/examples -maxdepth 1 -type f \( -name 'libmodule_clock.so' -o -name 'libmodule_clock.dylib' \) -print -quit)
           module_two=$(find target/debug/examples -maxdepth 1 -type f \( -name 'libmodule_clock_two.so' -o -name 'libmodule_clock_two.dylib' \) -print -quit)
           wrong_target=$(find target/debug/examples -maxdepth 1 -type f \( -name 'libmodule_wrong_target.so' -o -name 'libmodule_wrong_target.dylib' \) -print -quit)
-          for artifact in "$module" "$module_two" "$wrong_target"; do
+          context_module=$(find target/debug/examples -maxdepth 1 -type f \( -name 'libmodule_context.so' -o -name 'libmodule_context.dylib' \) -print -quit)
+          for artifact in "$module" "$module_two" "$wrong_target" "$context_module"; do
             if [ -z "$artifact" ] || [ ! -f "$artifact" ]; then
               echo "a module example artifact is missing; the loader tests would not exercise it" >&2
               exit 1
@@ -156,7 +158,7 @@ jobs:
             digest="$(shasum -a 256 "$private/$library" | awk '{print $1}')"
           fi
           printf '"%s" = "%s"\n' "$library" "$digest" > "$private/modules.toml"
-          TINYBUS_TEST_MODULE="$PWD/$module" TINYBUS_TEST_MODULE_TWO="$private/$library" TINYBUS_TEST_WRONG_TARGET="$PWD/$wrong_target" cargo test --locked --no-default-features --features modules,macros,test-support -- --ignored
+          TINYBUS_TEST_MODULE="$PWD/$module" TINYBUS_TEST_MODULE_TWO="$private/$library" TINYBUS_TEST_WRONG_TARGET="$PWD/$wrong_target" TINYBUS_TEST_CONTEXT_MODULE="$PWD/$context_module" cargo test --locked --no-default-features --features modules,macros,test-support -- --ignored
       # Directory admission against this runner's real filesystem: a bundle
       # in a directory other accounts can write falls back to the verified
       # release cache, and on macOS the real /Applications is admitted.
@@ -190,6 +192,7 @@ jobs:
           $acl.AddAccessRule($rule)
           Set-Acl -LiteralPath $private -AclObject $acl
           Copy-Item target/debug/examples/module_clock.dll $private
+          Copy-Item target/debug/examples/module_context.dll $private
           $clockTwoDirectory = Join-Path $private module-clock-two
           New-Item -ItemType Directory -Force $clockTwoDirectory | Out-Null
           Set-Acl -LiteralPath $clockTwoDirectory -AclObject $acl
@@ -207,6 +210,7 @@ jobs:
           $wrongTarget = (Get-ChildItem "$private/module_wrong_target.dll" | Select-Object -First 1).FullName
           $env:TEMP = $private
           $env:TMP = $private
+          $env:TINYBUS_TEST_CONTEXT_MODULE = (Get-Item "$private/module_context.dll").FullName
           $env:TINYBUS_TEST_MODULE = $module
           $env:TINYBUS_TEST_MODULE_TWO = $moduleTwo
           $env:TINYBUS_TEST_WRONG_TARGET = $wrongTarget

@@ -192,3 +192,32 @@ fn one_object_can_carry_several_contracts() {
     assert!(tree.remove(&path()));
     assert!(!tree.remove(&path()));
 }
+
+#[tokio::test]
+async fn direct_context_dispatch_defaults_to_unverified_and_keeps_legacy_arguments() {
+    let mut tree = ObjectTree::new();
+    tree.insert(
+        path(),
+        Arc::new(Echo {
+            name: "ai.tinyhumans.Voice",
+            tag: "legacy",
+            confidential: false,
+        }),
+    );
+    let member = MemberName::new("Echo").unwrap();
+    let context = CallContext::default();
+    assert_eq!(context.authenticated_sender(), None);
+    assert_eq!(
+        tree.dispatch_with_context(
+            &path(),
+            &iface("ai.tinyhumans.Voice"),
+            &member,
+            serde_json::json!([1, 2]),
+            false,
+            &context
+        )
+        .await
+        .unwrap(),
+        "legacy"
+    );
+}

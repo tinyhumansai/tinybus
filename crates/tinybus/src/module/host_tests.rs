@@ -2348,3 +2348,66 @@ async fn a_module_with_neither_a_pin_nor_an_allowlist_is_loaded_but_never_attest
         "a module nobody vouched for must not be eligible to receive a secret"
     );
 }
+
+struct NativeContextCallback;
+#[async_trait::async_trait]
+impl crate::Interface for NativeContextCallback {
+    fn name(&self) -> crate::InterfaceName {
+        "org.example.Callback".parse().unwrap()
+    }
+    fn members(&self) -> Vec<crate::MemberName> {
+        vec!["Observe".parse().unwrap()]
+    }
+    async fn call(
+        &self,
+        _: &crate::MemberName,
+        _: serde_json::Value,
+    ) -> crate::Result<serde_json::Value> {
+        Err(Error::failed("missing contextual dispatch"))
+    }
+    async fn call_with_context(
+        &self,
+        _: &crate::MemberName,
+        args: serde_json::Value,
+        context: &crate::CallContext,
+    ) -> crate::Result<serde_json::Value> {
+        assert_eq!(args, serde_json::json!([]));
+        Ok(serde_json::json!(
+            context
+                .authenticated_sender()
+                .expect("native callback is broker routed")
+        ))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires TINYBUS_TEST_CONTEXT_MODULE to point at the built cdylib"]
+async fn a_real_cdylib_authenticates_incoming_calls_and_its_host_callback() {
+    let artifact =
+        std::env::var_os("TINYBUS_TEST_CONTEXT_MODULE").expect("TINYBUS_TEST_CONTEXT_MODULE");
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    let task = broker.spawn(bus.clone());
+    let modules = ModuleHost::new(broker);
+    modules.load_file(artifact).unwrap();
+    let client = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    client
+        .serve_at("/callback".parse().unwrap(), NativeContextCallback)
+        .await
+        .unwrap();
+    let proxy = client
+        .proxy("org.example.Context", "/context", "org.example.Context")
+        .unwrap();
+    let sender: crate::BusName = proxy.call("Inspect", ()).await.unwrap();
+    assert_eq!(Some(sender.clone()), client.unique_name());
+    let module = client
+        .name_owner("org.example.Context")
+        .await
+        .unwrap()
+        .unwrap();
+    let callback: (crate::BusName, crate::BusName) = proxy.call("Callback", ()).await.unwrap();
+    assert_eq!(callback, (sender, module));
+    task.abort();
+}

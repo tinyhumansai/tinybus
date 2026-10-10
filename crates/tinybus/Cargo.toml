@@ -118,3 +118,8 @@ required-features = ["modules"]
 
 [dev-dependencies.tinybus-module]
 workspace = true
+
+[[example]]
+name = "module_context"
+crate-type = ["cdylib"]
+required-features = ["modules"]
