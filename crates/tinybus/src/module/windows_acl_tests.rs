@@ -1,5 +1,5 @@
 use super::*;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const FILE_ALL_ACCESS: u32 = 0x1F_01FF;
 const READ_ONLY: u32 = 0x12_00A9;
