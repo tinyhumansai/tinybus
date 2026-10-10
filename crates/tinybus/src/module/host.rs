@@ -2123,10 +2123,21 @@ fn private_group_in(passwd: &str, group: &str, uid: u32) -> Option<u32> {
     if user_name.is_empty() || others_with_gid.contains(&user_gid) {
         return None;
     }
-    let mut matches = group.lines().filter_map(|line| {
+    let mut records = Vec::new();
+    for line in group.lines() {
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
+        }
         let fields: Vec<&str> = line.split(':').collect();
-        (fields.len() >= 4 && fields[2].parse::<u32>().ok() == Some(user_gid)).then_some(fields)
-    });
+        // As for passwd: a record that cannot be read could share the gid.
+        if fields.len() < 4 || fields[2].parse::<u32>().is_err() {
+            return None;
+        }
+        records.push(fields);
+    }
+    let mut matches = records
+        .into_iter()
+        .filter(|fields| fields[2].parse::<u32>().ok() == Some(user_gid));
     let entry = matches.next()?;
     if matches.next().is_some() || entry[0] != user_name {
         return None;

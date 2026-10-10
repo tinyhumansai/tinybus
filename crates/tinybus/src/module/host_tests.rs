@@ -1621,6 +1621,11 @@ fn the_user_private_group_rule_reads_local_accounts_and_proves_exclusivity() {
         private_group_in(&format!("{passwd}broken-line\n"), group, 1_000),
         None
     );
+    // A malformed group record could share the gid.
+    assert_eq!(
+        private_group_in(passwd, &format!("{group}other:x:1000\n"), 1_000),
+        None
+    );
     // Unknown account, missing group, or duplicate group entries prove nothing.
     assert_eq!(private_group_in(passwd, group, 4_242), None);
     assert_eq!(private_group_in(passwd, "root:x:0:\n", 1_000), None);
@@ -1664,10 +1669,26 @@ fn a_directory_counts_as_empty_only_when_missing_or_without_entries() {
 #[test]
 fn a_plain_directory_has_no_extended_acl() {
     let directory = tempfile::tempdir().unwrap();
-    assert!(
-        !has_extended_acl(directory.path()),
-        "a plain directory must not be reported as ACL-bearing"
-    );
+    // A parent with a default ACL hands it to the new directory; only a
+    // directory without one is a fair subject.
+    let parent_default_acl = directory.path().parent().is_some_and(|parent| {
+        let parent = std::ffi::CString::new(parent.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: valid NUL-terminated strings; null buffer asks for the length.
+        unsafe {
+            libc::getxattr(
+                parent.as_ptr(),
+                c"system.posix_acl_default".as_ptr(),
+                std::ptr::null_mut(),
+                0,
+            ) >= 0
+        }
+    });
+    if !parent_default_acl {
+        assert!(
+            !has_extended_acl(directory.path()),
+            "a plain directory must not be reported as ACL-bearing"
+        );
+    }
     assert!(has_extended_acl(&directory.path().join("missing")));
 }
 
