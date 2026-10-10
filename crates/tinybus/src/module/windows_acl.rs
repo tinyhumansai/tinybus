@@ -18,7 +18,7 @@ use std::path::Path;
 /// data, append, write EA and attributes, delete child, delete, WRITE_DAC,
 /// WRITE_OWNER, GENERIC_WRITE and GENERIC_ALL.
 pub(super) const WRITE_MASK: u32 =
-    0x2 | 0x4 | 0x10 | 0x100 | 0x1_0000 | 0x4_0000 | 0x8_0000 | 0x1000_0000 | 0x4000_0000;
+    0x2 | 0x4 | 0x10 | 0x40 | 0x100 | 0x1_0000 | 0x4_0000 | 0x8_0000 | 0x1000_0000 | 0x4000_0000;
 /// `ACCESS_ALLOWED_ACE_TYPE`.
 pub(super) const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
 /// `INHERIT_ONLY_ACE`.
@@ -55,9 +55,17 @@ pub(super) fn should_repair(is_real_dir: bool, owned_by_current_user: bool, refu
 /// Whether `directory` is inside the part of the tree the repair pass may
 /// rewrite: at or below `install_root`, or strictly below `base` (the user's
 /// local application data directory, never `base` itself or anything above it).
+/// A path with a `..` component is never in scope.
 /// Windows paths are case-insensitive, so components compare case-folded.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(super) fn in_repair_scope(directory: &Path, install_root: &Path, base: Option<&Path>) -> bool {
+    // A `..` could climb out of the prefix the comparison below accepts.
+    if directory
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return false;
+    }
     let fold = |path: &Path| -> Vec<String> {
         path.components()
             .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
@@ -97,6 +105,12 @@ pub(super) fn create_private_dir_all(path: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Whether `path` is itself a symlink or junction (never followed).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn is_link(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
+}
+
 /// Replace the DACL of release-cache directories this user owns when the gate
 /// would refuse them. Best effort: a failure leaves the gate's verdict as is.
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -104,10 +118,17 @@ pub(super) fn secure_release_cache(install_root: &Path, dir: &Path) {
     #[cfg(windows)]
     {
         let base = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from);
-        for directory in dir.ancestors() {
-            if !in_repair_scope(directory, install_root, base.as_deref()) {
-                break;
-            }
+        let scoped: Vec<&Path> = dir
+            .ancestors()
+            .take_while(|directory| in_repair_scope(directory, install_root, base.as_deref()))
+            .collect();
+        // A junction or symlink anywhere in the chain could carry a repair
+        // outside the cache tree, so repair nothing when one is present.
+        if scoped.iter().any(|directory| is_link(directory)) {
+            tracing::debug!("[modules] release cache path crosses a link; not repaired");
+            return;
+        }
+        for directory in scoped {
             win32::repair_owned_directory(directory);
         }
     }
@@ -273,8 +294,16 @@ mod win32 {
     }
 
     pub(super) fn create_private_dir_all(path: &Path) -> std::io::Result<()> {
-        if path.is_dir() {
-            return Ok(());
+        if let Ok(metadata) = std::fs::symlink_metadata(path) {
+            // An existing real directory is accepted as is; a link (which
+            // `is_dir` would follow) or a file is not a cache directory.
+            return if metadata.file_type().is_dir() {
+                Ok(())
+            } else {
+                Err(std::io::Error::other(
+                    "a release cache path is not a plain directory",
+                ))
+            };
         }
         if let Some(parent) = path
             .parent()
@@ -295,7 +324,9 @@ mod win32 {
             return Ok(());
         }
         let code = unsafe { GetLastError() };
-        if code == ERROR_ALREADY_EXISTS && path.is_dir() {
+        if code == ERROR_ALREADY_EXISTS
+            && std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
+        {
             return Ok(());
         }
         Err(std::io::Error::from_raw_os_error(code as i32))
