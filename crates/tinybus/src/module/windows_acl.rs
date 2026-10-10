@@ -348,7 +348,7 @@ mod win32 {
         }
     }
 
-    /// BUILTIN\\Administrators. An elevated administrator's token makes the
+    /// BUILTIN\Administrators. An elevated administrator's token makes the
     /// group, not the user, the owner of everything it creates, so a cache that
     /// user made is owned by this SID.
     const ADMINISTRATORS_SID: &str = "S-1-5-32-544";
