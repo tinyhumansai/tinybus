@@ -27,7 +27,7 @@ use std::future::Future;
 use std::io::{self, Write};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -143,6 +143,8 @@ pub const OUTBOX_CAPACITY: usize = 1024;
 
 struct Inner {
     transport: Arc<dyn Transport>,
+    brokered_native: bool,
+    native_provenance: Option<Arc<AtomicBool>>,
     /// Everything outbound goes through here and out via the writer task.
     /// Serialising writes through one task is also what lets `send` be called
     /// concurrently without interleaving two frames on the wire.
@@ -157,7 +159,7 @@ struct Inner {
     panic_handler: std::sync::RwLock<Option<Arc<dyn Fn() -> Error + Send + Sync>>>,
     /// Bulk streams being received. On the connection rather than in the object
     /// tree because a chunk has to be checked against the header's stamped
-    /// `sender`, and [`Interface`] deliberately never sees a header.
+    /// `sender`; interfaces receive only the verified subset in CallContext.
     streams: StreamRegistry,
 }
 
@@ -240,10 +242,51 @@ impl Connection {
     /// drive the protocol by hand. Ordinary callers want
     /// [`Connection::connect`].
     pub fn attach(transport: Arc<dyn Transport>) -> Self {
+        Self::attach_inner(transport, false, None)
+    }
+
+    /// Attach the module SDK's broker-proven C transport bridge.
+    ///
+    /// # Safety
+    /// The caller must guarantee every received frame comes exclusively from
+    /// a real TinyBus broker which overwrites sender on ingress. A successful
+    /// Hello, artifact attestation, or arbitrary C callback is insufficient.
+    /// This boundary is an unsafe trusted-host contract, not cryptographic
+    /// authentication against a malicious native host.
+    #[doc(hidden)]
+    pub unsafe fn __attach_brokered_module(transport: Arc<dyn Transport>) -> Self {
+        Self::attach_inner(transport, true, None)
+    }
+
+    /// Attach the SDK bridge with a separately captured proof for each frame.
+    ///
+    /// # Safety
+    /// The transport must have exactly one reader: this connection's dispatch
+    /// loop. Before returning each received frame it must publish that frame's
+    /// immutable delivery proof into `provenance`; nobody else may write the
+    /// slot. True must mean the trusted host asserted exclusive real broker
+    /// delivery when that frame entered the SDK queue, never later admission.
+    /// Header identity remains protocol data unless that proof is true.
+    /// This is a trusted native host contract, not cryptographic authentication.
+    #[doc(hidden)]
+    pub unsafe fn __attach_module_with_provenance(
+        transport: Arc<dyn Transport>,
+        provenance: Arc<AtomicBool>,
+    ) -> Self {
+        Self::attach_inner(transport, false, Some(provenance))
+    }
+
+    fn attach_inner(
+        transport: Arc<dyn Transport>,
+        brokered_native: bool,
+        native_provenance: Option<Arc<AtomicBool>>,
+    ) -> Self {
         let (signals, _) = broadcast::channel(SIGNAL_BUFFER);
         let (outbox, outbound) = mpsc::channel(OUTBOX_CAPACITY);
         let inner = Arc::new(Inner {
             transport,
+            brokered_native,
+            native_provenance,
             outbox,
             // Serials start at 1: zero is the "unassigned" value a freshly
             // built `Message` carries, so it must never be a live serial.
@@ -1119,8 +1162,26 @@ async fn writer_loop(transport: Arc<dyn Transport>, mut outbound: mpsc::Receiver
 /// The single reader task. Owns `recv`; never awaits user code inline.
 async fn dispatch_loop(inner: Arc<Inner>) {
     loop {
-        let message = match inner.transport.recv().await {
-            Ok(Some(message)) => message,
+        let delivery = if let Some(memory) = crate::transport::downcast::<
+            crate::transport::memory::MemoryTransport,
+        >(inner.transport.as_ref())
+        {
+            memory.recv_with_provenance().await
+        } else {
+            inner.transport.recv().await.map(|message| {
+                message.map(|message| {
+                    // The exclusive reader samples the proof immediately after
+                    // recv, before any await or next recv can replace its slot.
+                    let brokered = inner
+                        .native_provenance
+                        .as_ref()
+                        .map_or(inner.brokered_native, |proof| proof.load(Ordering::Acquire));
+                    (message, brokered)
+                })
+            })
+        };
+        let (message, brokered) = match delivery {
+            Ok(Some(delivery)) => delivery,
             Ok(None) => break,
             Err(e) => {
                 tracing::debug!(error = %e, "connection read failed; closing");
@@ -1148,7 +1209,7 @@ async fn dispatch_loop(inner: Arc<Inner>) {
             MessageKind::MethodCall => {
                 // Spawned, so a long-running method does not block replies to
                 // calls this connection has outstanding.
-                tokio::spawn(handle_call(inner.clone(), message));
+                tokio::spawn(handle_call(inner.clone(), message, brokered));
             }
         }
     }
@@ -1159,7 +1220,7 @@ async fn dispatch_loop(inner: Arc<Inner>) {
 }
 
 /// Run one inbound method call and send its reply.
-async fn handle_call(inner: Arc<Inner>, message: Message) {
+async fn handle_call(inner: Arc<Inner>, message: Message, brokered: bool) {
     let header = message.header.clone();
     let panic_handler = inner
         .panic_handler
@@ -1171,12 +1232,12 @@ async fn handle_call(inner: Arc<Inner>, message: Message) {
             "a confidential call cannot request a streamed reply",
         ))
     } else if let Some(panic_handler) = panic_handler {
-        match CatchUnwind::new(dispatch(&inner, &header, message.body)).await {
+        match CatchUnwind::new(dispatch(&inner, &header, message.body, brokered)).await {
             Ok(result) => result,
             Err(()) => Err(panic_handler()),
         }
     } else {
-        dispatch(&inner, &header, message.body).await
+        dispatch(&inner, &header, message.body, brokered).await
     };
 
     let result = match result {
@@ -1282,7 +1343,7 @@ impl<F: Future> Future for CatchUnwind<F> {
     }
 }
 
-async fn dispatch(inner: &Inner, header: &Header, body: Value) -> Result<Value> {
+async fn dispatch(inner: &Inner, header: &Header, body: Value, brokered: bool) -> Result<Value> {
     // Streams are answered before the object tree is consulted, and without the
     // service having exported anything: bulk transfer is bus plumbing, and a
     // service that forgot to export it would be a service you cannot send a
@@ -1297,10 +1358,23 @@ async fn dispatch(inner: &Inner, header: &Header, body: Value) -> Result<Value> 
     else {
         return Err(Error::protocol("method call is missing an address"));
     };
-    let objects = inner.objects.read().await;
-    objects
-        .dispatch_with_confidential(path, interface, member, body, header.confidential)
-        .await
+    let context = if brokered {
+        crate::CallContext::brokered(header.sender.as_ref())
+    } else {
+        crate::CallContext::default()
+    };
+    // Snapshot admission under the lock, then release it before user code:
+    // callbacks can register/unserve interfaces while another call is parked.
+    let target = inner.objects.read().await.lookup(path, interface)?;
+    ObjectTree::invoke(
+        target,
+        interface,
+        member,
+        body,
+        header.confidential,
+        &context,
+    )
+    .await
 }
 
 #[cfg(test)]

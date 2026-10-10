@@ -77,8 +77,8 @@ A broker that sees it **must**:
 
 - refuse a `signal` carrying it, and refuse any message carrying it without a
   `destination`;
-- refuse a `method_call` carrying it unless the destination is a well-known name
-  owned by a recipient the host has attested, replying
+- refuse a `method_call` carrying it unless the destination is the exact
+  attested well-known name or fixed unique peer of an admitted artifact, replying
   `ai.tinyhumans.tinybus.Error.NotAttested`;
 - never deliver the message to a match-rule subscriber, and never log its body.
 

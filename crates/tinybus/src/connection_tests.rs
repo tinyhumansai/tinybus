@@ -415,3 +415,302 @@ async fn module_management_helpers_forward_their_requests_to_the_broker() {
     );
     assert!(connection.enable_module("missing", true).await.is_err());
 }
+
+struct ContextEcho;
+#[async_trait]
+impl Interface for ContextEcho {
+    fn name(&self) -> InterfaceName {
+        Echo.name()
+    }
+    fn members(&self) -> Vec<MemberName> {
+        vec![MemberName::new("Echo").unwrap()]
+    }
+    async fn call(&self, _: &MemberName, _: Value) -> Result<Value> {
+        Err(Error::failed("context override was lost"))
+    }
+    async fn call_with_context(
+        &self,
+        _: &MemberName,
+        args: Value,
+        context: &crate::CallContext,
+    ) -> Result<Value> {
+        Ok(serde_json::json!([context.authenticated_sender(), args]))
+    }
+}
+
+#[tokio::test]
+async fn brokered_context_authenticates_distinct_senders_and_overwrites_forgery() {
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let service = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    service.request_name("ai.tinyhumans.Test").await.unwrap();
+    service
+        .serve_at(path(), Arc::new(ContextEcho))
+        .await
+        .unwrap();
+    let first = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let second = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    assert_ne!(first.unique_name(), second.unique_name());
+    for caller in [&first, &second] {
+        let mut request = call("Echo", serde_json::json!([42]));
+        request.header.sender = first.unique_name();
+        let result = caller.call_raw(request, DEFAULT_TIMEOUT).await.unwrap();
+        assert_eq!(result, serde_json::json!([caller.unique_name(), [42]]));
+    }
+}
+
+#[tokio::test]
+async fn direct_header_sender_is_not_authenticated() {
+    let (a, b) = MemoryTransport::pair();
+    let service = Connection::attach(Arc::new(b));
+    service.serve_at(path(), ContextEcho).await.unwrap();
+    let client = Connection::attach(Arc::new(a));
+    let mut request = call("Echo", serde_json::json!([]));
+    request.header.sender = Some(BusName::new(":1.42").unwrap());
+    let result = client.call_raw(request, DEFAULT_TIMEOUT).await.unwrap();
+    assert_eq!(result, serde_json::json!([null, []]));
+}
+
+struct RegisterDuringCall(Connection);
+#[async_trait]
+impl Interface for RegisterDuringCall {
+    fn name(&self) -> InterfaceName {
+        Echo.name()
+    }
+    fn members(&self) -> Vec<MemberName> {
+        vec![MemberName::new("Echo").unwrap()]
+    }
+    async fn call(&self, _: &MemberName, args: Value) -> Result<Value> {
+        self.0
+            .serve_at(ObjectPath::new("/replacement").unwrap(), Echo)
+            .await?;
+        Ok(args)
+    }
+}
+
+#[tokio::test]
+async fn inbound_callback_can_register_an_interface_without_deadlock() {
+    let (client, service) = pair().await;
+    service
+        .serve_at(path(), RegisterDuringCall(service.clone()))
+        .await
+        .unwrap();
+    let result = client
+        .call_raw(
+            call("Echo", serde_json::json!([1])),
+            Duration::from_millis(500),
+        )
+        .await;
+    assert_eq!(result.unwrap(), serde_json::json!([1]));
+    service.unserve(&path()).await;
+}
+
+struct CaptureContext(mpsc::UnboundedSender<Option<BusName>>);
+#[async_trait]
+impl Interface for CaptureContext {
+    fn name(&self) -> InterfaceName {
+        Echo.name()
+    }
+    fn members(&self) -> Vec<MemberName> {
+        vec![MemberName::new("Echo").unwrap()]
+    }
+    async fn call(&self, _: &MemberName, _: Value) -> Result<Value> {
+        unreachable!()
+    }
+    async fn call_with_context(
+        &self,
+        _: &MemberName,
+        _: Value,
+        context: &crate::CallContext,
+    ) -> Result<Value> {
+        self.0
+            .send(context.authenticated_sender().cloned())
+            .unwrap();
+        Ok(Value::Null)
+    }
+}
+
+#[tokio::test]
+async fn retaining_a_broker_endpoint_does_not_allow_authenticated_injection() {
+    let (peer, broker_end) = MemoryTransport::pair();
+    let broker_end = Arc::new(broker_end);
+    Broker::new().attach(broker_end.clone());
+    let service = Connection::connect(Box::new(peer)).await.unwrap();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    service.serve_at(path(), CaptureContext(tx)).await.unwrap();
+    let mut forged = call("Echo", serde_json::json!([]));
+    forged.header.sender = Some(BusName::new(":1.42").unwrap());
+    broker_end.send(forged).await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        None
+    );
+}
+
+struct LyingTransport {
+    inner: MemoryTransport,
+}
+impl LyingTransport {
+    // This is exactly why provenance does not use a user-overridable as_any.
+    fn as_any(&self) -> &dyn std::any::Any {
+        &self.inner
+    }
+}
+#[async_trait]
+impl Transport for LyingTransport {
+    async fn send(&self, message: Message) -> Result<()> {
+        self.inner.send(message).await
+    }
+    async fn recv(&self) -> Result<Option<Message>> {
+        let mut message = self.inner.recv().await?;
+        if let Some(message) = message
+            .as_mut()
+            .filter(|message| message.header.kind == MessageKind::MethodCall)
+        {
+            message.header.sender = Some(BusName::new(":1.42").unwrap());
+        }
+        Ok(message)
+    }
+    async fn close(&self) -> Result<()> {
+        self.inner.close().await
+    }
+    fn describe(&self) -> String {
+        "memory".into()
+    }
+}
+
+#[tokio::test]
+async fn a_custom_transport_cannot_borrow_its_inner_broker_provenance() {
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    broker.spawn(bus.clone());
+    let (peer, broker_end) = MemoryTransport::pair();
+    broker.attach(Arc::new(broker_end));
+    let wrapper = LyingTransport { inner: peer };
+    assert!(wrapper.as_any().is::<MemoryTransport>());
+    let service = Connection::connect(Box::new(wrapper)).await.unwrap();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    service.serve_at(path(), CaptureContext(tx)).await.unwrap();
+    service.request_name("ai.tinyhumans.Test").await.unwrap();
+    let client = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    client
+        .send(call("Echo", serde_json::json!([])))
+        .await
+        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn replacing_a_well_known_name_does_not_inherit_the_old_sender_identity() {
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let service = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    service.request_name("ai.tinyhumans.Test").await.unwrap();
+    service.serve_at(path(), ContextEcho).await.unwrap();
+    let first = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    first.request_name("ai.tinyhumans.Operator").await.unwrap();
+    let old = first.unique_name().unwrap();
+    first.release_name("ai.tinyhumans.Operator").await.unwrap();
+    first.close().await.unwrap();
+    let replacement = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    replacement
+        .request_name("ai.tinyhumans.Operator")
+        .await
+        .unwrap();
+    let current = replacement.unique_name().unwrap();
+    assert_ne!(old, current);
+    assert_eq!(
+        service.name_owner("ai.tinyhumans.Operator").await.unwrap(),
+        Some(current.clone())
+    );
+    let mut request = call("Echo", serde_json::json!([]));
+    request.header.sender = Some(old);
+    let result = replacement
+        .call_raw(request, DEFAULT_TIMEOUT)
+        .await
+        .unwrap();
+    assert_eq!(result, serde_json::json!([current, []]));
+}
+
+struct ParkedSnapshot {
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+#[async_trait]
+impl Interface for ParkedSnapshot {
+    fn name(&self) -> InterfaceName {
+        Echo.name()
+    }
+    fn members(&self) -> Vec<MemberName> {
+        vec!["Echo".parse().unwrap()]
+    }
+    async fn call(&self, _: &MemberName, args: Value) -> Result<Value> {
+        self.started.notify_one();
+        self.release.notified().await;
+        Ok(args)
+    }
+}
+
+#[tokio::test]
+async fn unserve_stops_new_admission_but_preserves_an_already_admitted_call() {
+    let (client, service) = pair().await;
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    service
+        .serve_at(
+            path(),
+            ParkedSnapshot {
+                started: started.clone(),
+                release: release.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    let active_client = client.clone();
+    let active = tokio::spawn(async move {
+        active_client
+            .call_raw(call("Echo", serde_json::json!([1])), DEFAULT_TIMEOUT)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), started.notified())
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), service.unserve(&path()))
+            .await
+            .unwrap()
+    );
+    let rejected = client
+        .call_raw(call("Echo", serde_json::json!([2])), DEFAULT_TIMEOUT)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        rejected.wire_name(),
+        "ai.tinyhumans.tinybus.Error.UnknownObject"
+    );
+    release.notify_one();
+    assert_eq!(active.await.unwrap().unwrap(), serde_json::json!([1]));
+}

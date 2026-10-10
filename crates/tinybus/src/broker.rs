@@ -118,6 +118,12 @@ impl Broker {
             .expect("router lock is never held across a panic point")
             .attach(outbox);
 
+        #[cfg(feature = "modules")]
+        if let Some(module) = crate::transport::downcast::<crate::module::transport::ModuleTransport>(
+            transport.as_ref(),
+        ) {
+            module.admit_broker();
+        }
         tracing::debug!(peer = %unique, transport = %transport.describe(), "peer attached");
         tokio::spawn(writer_task(transport.clone(), inbox));
         tokio::spawn(reader_task(self.clone(), transport, id, unique.clone()));
@@ -207,29 +213,18 @@ impl Broker {
                     ));
                 }
 
-                // A confidential *call* may only go to a well-known name the
-                // broker has verified an artifact for. A confidential *reply*
-                // goes back to the unique name the broker itself minted for the
-                // peer that made the call — that peer already chose to take
-                // part in the exchange, and unique names are never reused, so
-                // there is no one else the reply could reach.
+                // Both destination forms resolve and check admission under
+                // one router lock. Unique names pin the admitted artifact;
+                // well-known names require an exact attested identity.
+                // Confidential replies still return to the caller's unique
+                // connection, which chose to participate in the exchange.
                 let confidential_call =
                     message.header.confidential && message.header.kind == MessageKind::MethodCall;
                 let target = if confidential_call {
-                    if destination.is_unique() {
-                        // The broker knows *which connection* a unique name is,
-                        // but not what binary is behind it. A sender that needs
-                        // that answer has to address the well-known name.
-                        Err(Error::not_attested(
-                            destination.clone(),
-                            "a confidential call must address a well-known name",
-                        ))
-                    } else {
-                        self.router
-                            .lock()
-                            .expect("router lock")
-                            .resolve_attested(&destination)
-                    }
+                    self.router
+                        .lock()
+                        .expect("router lock")
+                        .resolve_attested(&destination)
                 } else {
                     self.router
                         .lock()
@@ -256,13 +251,13 @@ impl Broker {
                 });
                 let target = target?;
                 // A stopped, disabled, failed or faulted module can keep its
-                // well-known name for a moment after the host settles its
-                // state: the peer detaches only once its reader sees the
+                // unique connection and well-known name briefly after the host
+                // settles its state: the peer detaches only once its reader sees the
                 // closed transport. A call routed into that window would sit
                 // in a queue nobody drains and the caller would wait out its
                 // whole deadline, so answer from the host's state instead.
                 #[cfg(feature = "modules")]
-                if message.header.kind == MessageKind::MethodCall && !destination.is_unique() {
+                if message.header.kind == MessageKind::MethodCall {
                     let control = self
                         .modules
                         .lock()
@@ -678,7 +673,15 @@ fn parse_args<T: serde::de::DeserializeOwned>(member: &MemberName, body: Value) 
 /// Drain one peer's queue onto its transport.
 async fn writer_task(transport: Arc<dyn Transport>, mut inbox: mpsc::Receiver<Message>) {
     while let Some(message) = inbox.recv().await {
-        if let Err(e) = transport.send(message).await {
+        let result = if let Some(memory) = crate::transport::downcast::<
+            crate::transport::memory::MemoryTransport,
+        >(transport.as_ref())
+        {
+            memory.send_brokered(message).await
+        } else {
+            transport.send(message).await
+        };
+        if let Err(e) = result {
             tracing::debug!(error = %e, "peer write failed; dropping the peer");
             break;
         }

@@ -21,8 +21,11 @@ use crate::error::Result;
 use crate::message::Message;
 
 /// One peer's bidirectional link, framed at the message level.
+///
+/// `Any` supplies intrinsic concrete identity for private transport provenance;
+/// it does not offer custom transports a hook to claim broker authentication.
 #[async_trait]
-pub trait Transport: Send + Sync + 'static {
+pub trait Transport: std::any::Any + Send + Sync + 'static {
     /// Write one message. Must be safe to call from many tasks at once.
     async fn send(&self, message: Message) -> Result<()>;
 

@@ -26,7 +26,7 @@ mod remembered_hash;
 #[cfg(feature = "modules")]
 mod resolve;
 #[cfg(feature = "modules")]
-mod transport;
+pub(crate) mod transport;
 #[cfg(feature = "modules")]
 mod windows_acl;
 

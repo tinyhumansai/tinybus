@@ -42,7 +42,7 @@ pub fn encode(bytes: &[u8]) -> String {
 /// definition, and this message travels back to the peer as an error reply.
 pub fn decode(text: &str) -> Result<Vec<u8>> {
     let bytes = text.as_bytes();
-    if !bytes.len().is_multiple_of(4) {
+    if bytes.len() % 4 != 0 {
         return Err(Error::protocol(
             "base64 chunk length is not a multiple of four",
         ));

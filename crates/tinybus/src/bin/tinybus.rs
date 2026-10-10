@@ -504,10 +504,10 @@ fn resolve_address(explicit: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(path) = explicit {
         return Ok(path);
     }
-    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR")
-        && !dir.is_empty()
-    {
-        return Ok(PathBuf::from(dir).join("tinybus").join("bus"));
+    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
+        if !dir.is_empty() {
+            return Ok(PathBuf::from(dir).join("tinybus").join("bus"));
+        }
     }
     let uid = unsafe { libc_getuid() };
     Ok(PathBuf::from(format!("/tmp/tinybus-{uid}/bus")))

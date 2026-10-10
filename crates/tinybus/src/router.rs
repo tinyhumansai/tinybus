@@ -93,28 +93,34 @@ impl MatchRule {
     /// Whether `message` satisfies every set field.
     pub fn matches(&self, message: &Message) -> bool {
         let h = &message.header;
-        if let Some(kind) = self.kind
-            && kind != h.kind
+        if self.kind.is_some_and(|kind| kind != h.kind) {
+            return false;
+        }
+        if self
+            .sender
+            .as_ref()
+            .is_some_and(|sender| h.sender.as_ref() != Some(sender))
         {
             return false;
         }
-        if let Some(sender) = &self.sender
-            && h.sender.as_ref() != Some(sender)
+        if self
+            .interface
+            .as_ref()
+            .is_some_and(|interface| h.interface.as_ref() != Some(interface))
         {
             return false;
         }
-        if let Some(interface) = &self.interface
-            && h.interface.as_ref() != Some(interface)
+        if self
+            .member
+            .as_ref()
+            .is_some_and(|member| h.member.as_ref() != Some(member))
         {
             return false;
         }
-        if let Some(member) = &self.member
-            && h.member.as_ref() != Some(member)
-        {
-            return false;
-        }
-        if let Some(path) = &self.path
-            && h.path.as_ref() != Some(path)
+        if self
+            .path
+            .as_ref()
+            .is_some_and(|path| h.path.as_ref() != Some(path))
         {
             return false;
         }
@@ -184,6 +190,9 @@ struct Peer {
     /// absence of an entry is what refuses a confidential delivery, so an
     /// ordinary out-of-process peer is ineligible by construction.
     attestations: HashMap<BusName, Attestation>,
+    /// The artifact admitted for this exact connection. Its original manifest
+    /// identity survives alias release; unrelated aliases never inherit it.
+    admitted_artifact: Option<Attestation>,
 }
 
 /// Who is attached, what they are called, and what they want to hear.
@@ -221,6 +230,7 @@ impl Router {
                 matches: Vec::new(),
                 manifest: None,
                 attestations: HashMap::new(),
+                admitted_artifact: None,
             },
         );
         self.names.insert(unique.clone(), id);
@@ -392,7 +402,10 @@ impl Router {
         self.peers.get(id).map(|p| p.unique.clone())
     }
 
-    /// Record what the host verified about the peer owning `name`.
+    /// Record what the host verified for an exact well-known name.
+    ///
+    /// This does not admit an artifact for the peer's unique connection or
+    /// replace an artifact explicitly admitted by the module host.
     ///
     /// Gated with module loading, because that is the only thing that can
     /// produce an attestation. Without it nothing is ever attested and every
@@ -412,8 +425,8 @@ impl Router {
         }
     }
 
-    /// [`Router::set_attestation`] addressed by the peer's unique name, for the
-    /// module host, which holds that rather than the internal peer id.
+    /// Record the module host's verified artifact on its exact unique peer,
+    /// retaining its manifest name and digest for fixed-peer delivery.
     #[cfg(feature = "modules")]
     pub(crate) fn set_attestation_for_unique(
         &mut self,
@@ -421,6 +434,9 @@ impl Router {
         attestation: Attestation,
     ) {
         if let Some(id) = self.names.get(unique).copied() {
+            if let Some(peer) = self.peers.get_mut(&id) {
+                peer.admitted_artifact = Some(attestation.clone());
+            }
             self.set_attestation(id, attestation);
         }
     }
@@ -428,11 +444,17 @@ impl Router {
     /// What the broker verified about whoever owns `name`, if anything.
     pub fn attestation_of(&self, name: &BusName) -> Option<Attestation> {
         let id = self.names.get(name)?;
-        self.peers.get(id)?.attestations.get(name).cloned()
+        let peer = self.peers.get(id)?;
+        if name.is_unique() {
+            peer.admitted_artifact.clone()
+        } else {
+            peer.attestations.get(name).cloned()
+        }
     }
 
     /// The outbox of whoever owns `destination`, but only if the host has
-    /// verified that peer's artifact *for that name*.
+    /// verified that peer's artifact for that well-known identity, or admitted
+    /// the artifact on that exact unique connection.
     ///
     /// The lookup and the check are one operation on purpose. Resolving first
     /// and checking after would leave a window in which a caller could hold a
@@ -447,7 +469,12 @@ impl Router {
             .peers
             .get(id)
             .ok_or_else(|| Error::NameHasNoOwner(destination.clone()))?;
-        if !peer.attestations.contains_key(destination) {
+        let attested = if destination.is_unique() {
+            peer.admitted_artifact.is_some()
+        } else {
+            peer.attestations.contains_key(destination)
+        };
+        if !attested {
             return Err(Error::not_attested(
                 destination.clone(),
                 "only a loaded module with a verified artifact may receive a secret",

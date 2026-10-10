@@ -36,6 +36,7 @@ struct HostContext {
     init_started: AtomicBool,
     init_notify: Notify,
     ready: AtomicBool,
+    broker_routing: AtomicBool,
     ready_notify: Notify,
     inflight: AtomicUsize,
 }
@@ -95,6 +96,10 @@ impl DeferredInitializer {
 }
 
 impl ModuleTransport {
+    pub(crate) fn admit_broker(&self) {
+        self.context.broker_routing.store(true, Ordering::Release);
+    }
+
     pub(crate) fn new(label: String, config: Vec<u8>) -> (Arc<Self>, TbHostVtable) {
         let (inbound_tx, inbound_rx) = mpsc::channel(HOST_QUEUE_CAPACITY);
         let context = Box::leak(Box::new(HostContext {
@@ -106,6 +111,7 @@ impl ModuleTransport {
             init_started: AtomicBool::new(false),
             init_notify: Notify::new(),
             ready: AtomicBool::new(false),
+            broker_routing: AtomicBool::new(false),
             ready_notify: Notify::new(),
             inflight: AtomicUsize::new(0),
         }));
@@ -138,6 +144,7 @@ impl ModuleTransport {
             fault: host_fault,
             config: config_slice,
             ready: host_ready,
+            broker_routing: Some(host_broker_routing),
         };
         (transport, vtable)
     }
@@ -678,6 +685,13 @@ unsafe extern "C" fn host_fault(ctx: *mut c_void, _: *const u8, _: usize) {
             context.inbound.lock().expect("host inbound lock").take();
         }
     }));
+}
+
+unsafe extern "C" fn host_broker_routing(ctx: *mut c_void) -> u32 {
+    // HostContext is leaked for the lifetime of the vtable; no module-owned
+    // JSON or transport label can grant this provenance.
+    unsafe { ctx.cast::<HostContext>().as_ref() }
+        .is_some_and(|context| context.broker_routing.load(Ordering::Acquire)) as u32
 }
 
 unsafe extern "C" fn host_ready(ctx: *mut c_void) {

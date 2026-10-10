@@ -33,6 +33,11 @@ use crate::ports::{Listener, Transport};
 /// backpressure rather than a longer queue.
 pub const CHANNEL_CAPACITY: usize = 256;
 
+struct Delivery {
+    message: Message,
+    brokered: bool,
+}
+
 /// One end of an in-process link.
 ///
 /// The outbound sender lives in an `Option` behind a *std* mutex so that
@@ -41,8 +46,8 @@ pub const CHANNEL_CAPACITY: usize = 256;
 /// look, to the peer, exactly like an idle one. The lock is a std mutex rather
 /// than a tokio one precisely so that it is never held across the send await.
 pub struct MemoryTransport {
-    outbound: std::sync::Mutex<Option<mpsc::Sender<Message>>>,
-    inbound: Mutex<mpsc::Receiver<Message>>,
+    outbound: std::sync::Mutex<Option<mpsc::Sender<Delivery>>>,
+    inbound: Mutex<mpsc::Receiver<Delivery>>,
     label: String,
 }
 
@@ -54,7 +59,7 @@ impl MemoryTransport {
         (Self::new(a_tx, b_rx), Self::new(b_tx, a_rx))
     }
 
-    fn new(outbound: mpsc::Sender<Message>, inbound: mpsc::Receiver<Message>) -> Self {
+    fn new(outbound: mpsc::Sender<Delivery>, inbound: mpsc::Receiver<Delivery>) -> Self {
         Self {
             outbound: std::sync::Mutex::new(Some(outbound)),
             inbound: Mutex::new(inbound),
@@ -62,8 +67,30 @@ impl MemoryTransport {
         }
     }
 
+    // Only the actual broker writer can mint this out-of-band provenance.
+    pub(crate) async fn send_brokered(&self, message: Message) -> Result<()> {
+        self.send_delivery(message, true).await
+    }
+
+    async fn send_delivery(&self, message: Message, brokered: bool) -> Result<()> {
+        self.sender()?
+            .send(Delivery { message, brokered })
+            .await
+            .map_err(|_| Error::transport("the peer end of the in-process link was dropped"))
+    }
+
+    pub(crate) async fn recv_with_provenance(&self) -> Result<Option<(Message, bool)>> {
+        Ok(self
+            .inbound
+            .lock()
+            .await
+            .recv()
+            .await
+            .map(|delivery| (delivery.message, delivery.brokered)))
+    }
+
     /// Take a clone of the sender without holding the lock across an await.
-    fn sender(&self) -> Result<mpsc::Sender<Message>> {
+    fn sender(&self) -> Result<mpsc::Sender<Delivery>> {
         self.outbound
             .lock()
             .expect("the outbound lock is never held across a panic point")
@@ -75,17 +102,16 @@ impl MemoryTransport {
 #[async_trait]
 impl Transport for MemoryTransport {
     async fn send(&self, message: Message) -> Result<()> {
-        self.sender()?
-            .send(message)
-            .await
-            .map_err(|_| Error::transport("the peer end of the in-process link was dropped"))
+        self.send_delivery(message, false).await
     }
 
     async fn recv(&self) -> Result<Option<Message>> {
-        // Single-reader contract (see the port docs) makes holding this lock
-        // across the await safe: there is never a second task to block.
-        let mut inbound = self.inbound.lock().await;
-        Ok(inbound.recv().await)
+        // Public receive discards provenance; wrapping/replaying a frame cannot
+        // carry the private broker delivery proof into a custom transport.
+        Ok(self
+            .recv_with_provenance()
+            .await?
+            .map(|(message, _)| message))
     }
 
     async fn close(&self) -> Result<()> {

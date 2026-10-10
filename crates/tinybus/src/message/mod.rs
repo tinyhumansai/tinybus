@@ -59,8 +59,9 @@ pub struct Header {
     pub reply_serial: Option<u64>,
     /// Stamped by the broker, never trusted from the peer.
     ///
-    /// A service authorising a call reads this field; if peers could set it,
-    /// every authorisation decision on the bus would be forgeable.
+    /// Caller authorization uses `CallContext::authenticated_sender`, which
+    /// also verifies delivery provenance. Direct transports can supply arbitrary
+    /// headers, so this wire field alone is not authenticated authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender: Option<BusName>,
     /// Who the message is for. `None` on signals, which are broadcast.

@@ -2246,6 +2246,21 @@ async fn a_module_loaded_from_an_allowlisted_artifact_becomes_an_attested_recipi
         .expect("an allowlisted module is attested");
     assert_eq!(attestation.sha256, hash);
     assert_eq!(attestation.name, info.manifest.bus_name);
+    let unique = client
+        .name_owner(info.manifest.bus_name)
+        .await
+        .unwrap()
+        .unwrap();
+    let proxy = client
+        .proxy(
+            unique.as_str(),
+            "/ai/tinyhumans/openhuman/Clock",
+            "ai.tinyhumans.openhuman.Clock",
+        )
+        .unwrap();
+    assert_eq!(proxy.attestation().await.unwrap(), Some(attestation));
+    let now: String = proxy.call_confidential("Now", ()).await.unwrap();
+    assert!(!now.is_empty());
 }
 
 #[cfg(unix)]
@@ -2347,4 +2362,172 @@ async fn a_module_with_neither_a_pin_nor_an_allowlist_is_loaded_but_never_attest
             .is_none(),
         "a module nobody vouched for must not be eligible to receive a secret"
     );
+}
+
+struct NativeContextCallback;
+#[async_trait::async_trait]
+impl crate::Interface for NativeContextCallback {
+    fn name(&self) -> crate::InterfaceName {
+        "org.example.Callback".parse().unwrap()
+    }
+    fn members(&self) -> Vec<crate::MemberName> {
+        vec!["Observe".parse().unwrap()]
+    }
+    async fn call(
+        &self,
+        _: &crate::MemberName,
+        _: serde_json::Value,
+    ) -> crate::Result<serde_json::Value> {
+        Err(Error::failed("missing contextual dispatch"))
+    }
+    async fn call_with_context(
+        &self,
+        _: &crate::MemberName,
+        args: serde_json::Value,
+        context: &crate::CallContext,
+    ) -> crate::Result<serde_json::Value> {
+        assert_eq!(args, serde_json::json!([]));
+        Ok(serde_json::json!(
+            context
+                .authenticated_sender()
+                .expect("native callback is broker routed")
+        ))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires TINYBUS_TEST_CONTEXT_MODULE to point at the built cdylib"]
+async fn a_real_cdylib_authenticates_incoming_calls_and_its_host_callback() {
+    authenticates_native_context("TINYBUS_TEST_CONTEXT_MODULE").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires TINYBUS_TEST_CONTEXT_EAGER_MODULE to point at the built cdylib"]
+async fn an_eager_cdylib_authenticates_after_its_worker_runs_before_admission() {
+    authenticates_native_context("TINYBUS_TEST_CONTEXT_EAGER_MODULE").await;
+}
+
+async fn authenticates_native_context(variable: &str) {
+    let artifact = PathBuf::from(std::env::var_os(variable).expect(variable));
+    let hash = crate::module::hash::file_hex(std::fs::File::open(&artifact).unwrap()).unwrap();
+    #[cfg(unix)]
+    let (_dir, artifact) = staged_module(&artifact, &hash);
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    let task = broker.spawn(bus.clone());
+    let modules = ModuleHost::new(broker);
+    let info = modules.load_file(artifact).unwrap();
+    let client = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    client
+        .serve_at("/callback".parse().unwrap(), NativeContextCallback)
+        .await
+        .unwrap();
+    let unique = client
+        .name_owner("org.example.Context")
+        .await
+        .unwrap()
+        .unwrap();
+    let proxy = client
+        .proxy(unique.as_str(), "/context", "org.example.Context")
+        .unwrap();
+    assert_eq!(
+        proxy.attestation().await.unwrap(),
+        Some(crate::attest::Attestation {
+            name: info.manifest.bus_name,
+            sha256: hash
+        })
+    );
+    let sender: crate::BusName = proxy.call_confidential("Inspect", ()).await.unwrap();
+    assert_eq!(Some(sender.clone()), client.unique_name());
+    let module = client
+        .name_owner("org.example.Context")
+        .await
+        .unwrap()
+        .unwrap();
+    let callback: (crate::BusName, crate::BusName) =
+        proxy.call_confidential("Callback", ()).await.unwrap();
+    assert_eq!(callback, (sender, module));
+    task.abort();
+}
+
+#[tokio::test]
+async fn fixed_unique_module_calls_are_refused_in_terminal_states_before_detach() {
+    let _test_guard = FAKE_MODULE_TEST_LOCK.lock().await;
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    let broker_task = broker.spawn(bus.clone());
+    let host = ModuleHost::new(broker.clone());
+    let mut lazy_manifest = manifest();
+    lazy_manifest.lazy_init = true;
+    unsafe {
+        host.attach_raw(
+            "clock.so",
+            TbAbiDescriptor::current("clock", "0.1.0"),
+            lazy_manifest,
+            lazy_echo_init,
+        )
+    }
+    .unwrap();
+    let unique = host.inner.loaded.lock().unwrap()[0].unique_name.clone();
+    broker.attest_module(
+        &unique,
+        crate::attest::Attestation {
+            name: manifest().bus_name,
+            sha256: "a".repeat(64),
+        },
+    );
+    let client = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let proxy = client
+        .proxy(
+            unique.as_str(),
+            "/ai/tinyhumans/module/Clock",
+            "ai.tinyhumans.module.Clock",
+        )
+        .unwrap();
+    for (state, expected) in [
+        (ModuleState::Stopped, "stopped"),
+        (ModuleState::Disabled, "disabled"),
+        (
+            ModuleState::Faulted {
+                reason: "fixture".into(),
+            },
+            "faulted",
+        ),
+        (
+            ModuleState::Failed {
+                reason: "fixture".into(),
+            },
+            "failed",
+        ),
+    ] {
+        // Keep the real transport attached while setting its terminal state:
+        // this probes the pre-detach window without racing the reader task.
+        host.inner.loaded.lock().unwrap()[0].info.state = state;
+        assert!(
+            host.inner
+                .unavailable_for(&client.unique_name().unwrap())
+                .is_none()
+        );
+        assert!(
+            matches!(host.inner.unavailable_for(&unique), Some(Error::ModuleUnavailable { state, .. }) if state == expected)
+        );
+        for confidential in [false, true] {
+            let result = if confidential {
+                proxy
+                    .call_confidential::<String>("Echo", ("terminal",))
+                    .await
+            } else {
+                proxy.call::<String>("Echo", ("terminal",)).await
+            };
+            assert_eq!(
+                result.unwrap_err().wire_name(),
+                "ai.tinyhumans.tinybus.Error.ModuleUnavailable"
+            );
+        }
+    }
+    broker_task.abort();
 }
