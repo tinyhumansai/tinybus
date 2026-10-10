@@ -77,7 +77,7 @@ fn requires_a_dedicated_module_artifact_directory() {
 
 #[test]
 fn a_rejected_library_consumes_the_loader_attempt() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
     let artifact = artifact_path(directory.path(), "not-a-module");
     std::fs::write(&artifact, b"not a dynamic library").unwrap();
     let file_name = artifact.file_name().unwrap().to_str().unwrap();
