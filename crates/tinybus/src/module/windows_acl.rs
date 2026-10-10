@@ -153,6 +153,17 @@ mod win32 {
         inherit_handle: i32,
     }
     #[repr(C)]
+    struct ByHandleFileInformation {
+        attributes: u32,
+        times: [u64; 3],
+        volume_serial: u32,
+        size_high: u32,
+        size_low: u32,
+        links: u32,
+        index_high: u32,
+        index_low: u32,
+    }
+    #[repr(C)]
     struct SidAndAttributes {
         sid: *mut c_void,
         attributes: u32,
@@ -176,8 +187,8 @@ mod win32 {
             dacl: *mut *mut c_void,
             defaulted: *mut i32,
         ) -> i32;
-        fn SetNamedSecurityInfoW(
-            name: *mut u16,
+        fn SetSecurityInfo(
+            handle: *mut c_void,
             object_type: u32,
             security_info: u32,
             owner: *mut c_void,
@@ -185,8 +196,8 @@ mod win32 {
             dacl: *mut c_void,
             sacl: *mut c_void,
         ) -> u32;
-        fn GetNamedSecurityInfoW(
-            name: *mut u16,
+        fn GetSecurityInfo(
+            handle: *mut c_void,
             object_type: u32,
             security_info: u32,
             owner: *mut *mut c_void,
@@ -208,6 +219,19 @@ mod win32 {
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn CreateDirectoryW(path: *const u16, attributes: *const SecurityAttributes) -> i32;
+        fn CreateFileW(
+            path: *const u16,
+            access: u32,
+            share: u32,
+            attributes: *const SecurityAttributes,
+            disposition: u32,
+            flags: u32,
+            template: *mut c_void,
+        ) -> *mut c_void;
+        fn GetFileInformationByHandle(
+            handle: *mut c_void,
+            information: *mut ByHandleFileInformation,
+        ) -> i32;
         fn GetLastError() -> u32;
         fn LocalFree(memory: *mut c_void) -> *mut c_void;
         fn GetCurrentProcess() -> *mut c_void;
@@ -222,6 +246,15 @@ mod win32 {
     const TOKEN_QUERY: u32 = 0x8;
     const TOKEN_USER: u32 = 1;
     const ERROR_ALREADY_EXISTS: u32 = 183;
+    const READ_CONTROL: u32 = 0x2_0000;
+    const WRITE_DAC: u32 = 0x4_0000;
+    const FILE_READ_ATTRIBUTES: u32 = 0x80;
+    const FILE_SHARE_ALL: u32 = 0x7;
+    const OPEN_EXISTING: u32 = 3;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
     fn wide(path: &Path) -> Vec<u16> {
         path.as_os_str().encode_wide().chain([0]).collect()
@@ -338,18 +371,64 @@ mod win32 {
         Err(std::io::Error::from_raw_os_error(code as i32))
     }
 
+    /// An open directory handle that is closed on drop.
+    struct Directory(*mut c_void);
+
+    impl Directory {
+        /// Opens `path` without following a final reparse point, and accepts
+        /// only a real directory. Every later check and the DACL write go
+        /// through this handle, so a name swapped after the open cannot
+        /// redirect them to another object.
+        fn open_plain(path: &Path) -> Option<Self> {
+            let name = wide(path);
+            let handle = unsafe {
+                CreateFileW(
+                    name.as_ptr(),
+                    READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES,
+                    FILE_SHARE_ALL,
+                    std::ptr::null(),
+                    OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                    std::ptr::null_mut(),
+                )
+            };
+            if handle.is_null() || handle as isize == -1 {
+                return None;
+            }
+            let directory = Self(handle);
+            let mut info = ByHandleFileInformation {
+                attributes: 0,
+                times: [0; 3],
+                volume_serial: 0,
+                size_high: 0,
+                size_low: 0,
+                links: 0,
+                index_high: 0,
+                index_low: 0,
+            };
+            if unsafe { GetFileInformationByHandle(handle, &mut info) } == 0 {
+                return None;
+            }
+            let plain = info.attributes & FILE_ATTRIBUTE_DIRECTORY != 0
+                && info.attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0;
+            plain.then_some(directory)
+        }
+    }
+
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
     pub(super) fn repair_owned_directory(directory: &Path) {
-        let Ok(metadata) = std::fs::symlink_metadata(directory) else {
+        let Some(handle) = Directory::open_plain(directory) else {
             return;
         };
-        let is_real_dir = metadata.file_type().is_dir();
-        if !is_real_dir {
-            return;
-        }
-        let owned = owned_by_current_user_or_admins(directory);
+        let owned = owned_by_current_user_or_admins(&handle);
         let refused = owned
             && super::super::host::windows_path_grants_untrusted_write(directory).unwrap_or(false);
-        if !should_repair(is_real_dir, owned, refused) {
+        if !should_repair(true, owned, refused) {
             return;
         }
         let Some(descriptor) = Descriptor::owner_only() else {
@@ -364,10 +443,9 @@ mod win32 {
         if have_dacl == 0 || present == 0 || dacl.is_null() {
             return;
         }
-        let mut name = wide(directory);
         let status = unsafe {
-            SetNamedSecurityInfoW(
-                name.as_mut_ptr(),
+            SetSecurityInfo(
+                handle.0,
                 SE_FILE_OBJECT,
                 DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
                 std::ptr::null_mut(),
@@ -394,16 +472,15 @@ mod win32 {
     /// group (the default owner of what an elevated administrator creates).
     /// Rewriting the DACL still needs WRITE_DAC, so another account's directory
     /// stays untouched: the call fails and the gate's verdict stands.
-    fn owned_by_current_user_or_admins(directory: &Path) -> bool {
+    fn owned_by_current_user_or_admins(directory: &Directory) -> bool {
         let Some((_buffer, user)) = current_user() else {
             return false;
         };
-        let mut name = wide(directory);
         let mut owner = std::ptr::null_mut();
         let mut descriptor = std::ptr::null_mut();
         let status = unsafe {
-            GetNamedSecurityInfoW(
-                name.as_mut_ptr(),
+            GetSecurityInfo(
+                directory.0,
                 SE_FILE_OBJECT,
                 OWNER_SECURITY_INFORMATION,
                 &mut owner,
