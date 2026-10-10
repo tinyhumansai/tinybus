@@ -1,5 +1,5 @@
 use super::*;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const FILE_ALL_ACCESS: u32 = 0x1F_01FF;
 const READ_ONLY: u32 = 0x12_00A9;
@@ -25,6 +25,7 @@ fn every_single_write_right_counts() {
         0x2u32,
         0x4,
         0x10,
+        0x40,
         0x100,
         0x1_0000,
         0x4_0000,
@@ -116,6 +117,20 @@ fn the_repair_covers_the_cache_tree_but_not_its_container() {
 }
 
 #[test]
+fn a_parent_component_never_counts_as_in_scope() {
+    let base = PathBuf::from("users/ana/appdata/local");
+    let root = base.join("openhuman");
+    let escaping = root
+        .join("cache")
+        .join("..")
+        .join("..")
+        .join("..")
+        .join("outside");
+    assert!(!in_repair_scope(&escaping, &root, Some(&base)));
+    assert!(!in_repair_scope(&root.join("..").join("x"), &root, None));
+}
+
+#[test]
 fn scope_comparison_ignores_case_and_requires_a_real_prefix() {
     let base = PathBuf::from("/users/ana/appdata/local");
     let root = base.join("openhuman");
@@ -187,6 +202,37 @@ fn a_cache_inheriting_a_group_write_grant_is_repaired() {
         !refused(&cache).unwrap(),
         "the repaired cache is accepted; its ACL is now: {}",
         icacls_show(&cache)
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_junction_in_the_cache_path_stops_the_repair() {
+    let install = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    icacls_grant(outside.path(), "*S-1-5-11:(OI)(CI)(M)");
+    let junction = install.path().join("linked");
+    let made = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&junction)
+        .arg(outside.path())
+        .output()
+        .expect("cmd is available on Windows");
+    assert!(made.status.success(), "mklink failed: {made:?}");
+    let through = junction.join("cache");
+    std::fs::create_dir_all(&through).unwrap();
+    assert!(refused(&through).unwrap(), "the target inherits the grant");
+
+    secure_release_cache(install.path(), &through);
+
+    assert!(
+        refused(&through).unwrap(),
+        "nothing behind a junction is rewritten"
+    );
+    assert!(refused(outside.path()).unwrap());
+    assert!(
+        create_private_dir_all(&junction).is_err(),
+        "a link is not a cache directory"
     );
 }
 

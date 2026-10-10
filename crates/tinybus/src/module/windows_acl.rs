@@ -169,9 +169,6 @@ mod win32 {
         attributes: u32,
     }
 
-    // `host.rs` declares `GetNamedSecurityInfoW` with a typed DACL out-pointer;
-    // this one only reads the owner and passes no DACL pointer.
-    #[allow(clashing_extern_declarations)]
     #[link(name = "advapi32")]
     unsafe extern "system" {
         fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
