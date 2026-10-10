@@ -2134,6 +2134,26 @@ fn private_group_in(passwd: &str, group: &str, uid: u32) -> Option<u32> {
     members_ok.then_some(user_gid)
 }
 
+/// Where nss-systemd reads user and group records from.
+#[cfg(unix)]
+const SYSTEMD_USER_RECORD_DIRECTORIES: &[&str] = &[
+    "/etc/userdb",
+    "/run/userdb",
+    "/run/host/userdb",
+    "/usr/lib/userdb",
+    "/var/lib/systemd/home",
+    "/run/systemd/home",
+];
+
+/// A missing directory has no entries; one that cannot be read is assumed to.
+#[cfg(unix)]
+fn directory_has_no_entries(path: &Path) -> bool {
+    match std::fs::read_dir(path) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
 /// The current user's private group. Reads only the local account files and
 /// only when `nsswitch.conf` shows no directory service, so no NSS call is
 /// made, nothing blocks on the network, and no process-wide libc cursor is
@@ -2146,11 +2166,16 @@ fn current_user_private_gid(uid: u32) -> Option<u32> {
         return None;
     }
     let mut gid = private_group_in(&read("/etc/passwd")?, &read("/etc/group")?, uid);
-    // `nss-systemd` serves dynamic and homed users, and it is not enumerable
-    // here. Its records live in reserved gid ranges (61184-65519, 60001-60513,
-    // 524288 and up), so a regular-user gid below them cannot be shared with
-    // one. Outside that range, systemd in `nsswitch.conf` proves nothing.
-    if nsswitch.contains("systemd") && !gid.is_some_and(|gid| (1_000..60_000).contains(&gid)) {
+    // `nss-systemd` serves dynamic users, whose gids are in reserved ranges,
+    // and user records (`memberOf` can add supplementary groups) from the
+    // userdb and homed directories. Trust it only for a regular-user gid with
+    // no such records on disk.
+    if nsswitch.contains("systemd")
+        && !(gid.is_some_and(|gid| (1_000..60_000).contains(&gid))
+            && SYSTEMD_USER_RECORD_DIRECTORIES
+                .iter()
+                .all(|directory| directory_has_no_entries(Path::new(directory))))
+    {
         gid = None;
     }
     tracing::debug!(

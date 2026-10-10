@@ -1641,6 +1641,20 @@ fn accounts_count_as_local_only_without_a_directory_service() {
     assert!(!accounts_are_local(""));
 }
 
+#[cfg(unix)]
+#[test]
+fn a_directory_counts_as_empty_only_when_missing_or_without_entries() {
+    let directory = tempfile::tempdir().unwrap();
+    assert!(directory_has_no_entries(directory.path()));
+    assert!(directory_has_no_entries(&directory.path().join("missing")));
+    std::fs::write(directory.path().join("alice.user"), "{}").unwrap();
+    assert!(!directory_has_no_entries(directory.path()));
+    // Not a directory: unreadable, so not proven empty.
+    assert!(!directory_has_no_entries(
+        &directory.path().join("alice.user")
+    ));
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn a_plain_directory_has_no_extended_acl() {
