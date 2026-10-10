@@ -294,22 +294,28 @@ mod win32 {
     }
 
     pub(super) fn create_private_dir_all(path: &Path) -> std::io::Result<()> {
+        create_private(path, true)
+    }
+
+    /// `leaf` is the directory the caller asked for: an existing link there is
+    /// refused (a write through it would land elsewhere). Its parents are only
+    /// required to resolve to directories, since a redirected profile folder
+    /// high in the path is legitimate.
+    fn create_private(path: &Path, leaf: bool) -> std::io::Result<()> {
         if let Ok(metadata) = std::fs::symlink_metadata(path) {
-            // An existing real directory is accepted as is; a link (which
-            // `is_dir` would follow) or a file is not a cache directory.
-            return if metadata.file_type().is_dir() {
-                Ok(())
-            } else {
-                Err(std::io::Error::other(
-                    "a release cache path is not a plain directory",
-                ))
-            };
+            let plain_dir = metadata.file_type().is_dir();
+            if plain_dir || (!leaf && path.is_dir()) {
+                return Ok(());
+            }
+            return Err(std::io::Error::other(
+                "a release cache path is not a plain directory",
+            ));
         }
         if let Some(parent) = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
         {
-            create_private_dir_all(parent)?;
+            create_private(parent, false)?;
         }
         let descriptor = Descriptor::owner_only().ok_or_else(|| {
             std::io::Error::other("an owner-only directory ACL could not be built")
