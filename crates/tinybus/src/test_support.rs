@@ -7,7 +7,10 @@
 
 use std::{
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU8, Ordering},
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicU8, Ordering},
+    },
     time::Duration,
 };
 
@@ -25,6 +28,7 @@ const MODULE_LOADING: u8 = 1;
 const MODULE_LOAD_CONSUMED: u8 = 2;
 
 static MODULE_LOAD_STATE: AtomicU8 = AtomicU8::new(MODULE_UNLOADED);
+static STAGED_ARTIFACTS: OnceLock<Mutex<Vec<tempfile::TempDir>>> = OnceLock::new();
 
 struct LoadReservation<'a> {
     state: &'a AtomicU8,
@@ -117,29 +121,49 @@ fn admit_artifact(
     expected_module_name: &str,
     load_state: &AtomicU8,
 ) -> Result<ModuleInfo> {
-    verify_modules_pin(artifact)?;
     let directory = artifact
         .parent()
         .ok_or_else(|| crate::Error::failed("module artifact has no parent directory"))?;
     verify_single_artifact(directory, artifact)?;
+    // Stage an immutable-to-the-caller copy in a private directory. Hash and
+    // load this same copy so a concurrent replacement of the build artifact
+    // cannot race the loader's later open.
+    let stage = tempfile::Builder::new()
+        .prefix("tinybus-test-module-")
+        .tempdir()
+        .map_err(|_| crate::Error::failed("cannot stage the test module artifact"))?;
+    let staged_artifact = stage.path().join(
+        artifact
+            .file_name()
+            .ok_or_else(|| crate::Error::failed("module artifact has no filename"))?,
+    );
+    std::fs::copy(artifact, &staged_artifact)
+        .map_err(|_| crate::Error::failed("cannot stage the test module artifact"))?;
+    std::fs::copy(
+        directory.join("modules.toml"),
+        stage.path().join("modules.toml"),
+    )
+    .map_err(|_| crate::Error::failed("cannot stage modules.toml"))?;
+    verify_modules_pin(&staged_artifact)?;
+    verify_single_artifact(stage.path(), &staged_artifact)?;
     let mut reservation = LoadReservation::reserve(load_state)?;
-    // load_dir can map a library before it reports an admission failure. Since
-    // TinyBus cannot unload a mapped module, consume the process slot before
-    // crossing that loader boundary, including when the result is an error.
+    let outcomes = host.load_dir_expected(stage.path(), expected_module_name);
+    STAGED_ARTIFACTS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .expect("staged artifact lock")
+        .push(stage);
+    let outcomes = outcomes?;
+    // Per-artifact errors can follow a loader attempt that mapped the library,
+    // so consume the slot once the outer scan succeeds. An outer scan error
+    // leaves the reservation uncommitted and therefore retryable.
     reservation.commit();
-    let outcomes = host.load_dir(directory)?;
     let Some(result) = outcomes.into_iter().next() else {
         return Err(crate::Error::failed(format!(
             "TinyBus did not admit module `{expected_module_name}` from the test artifact directory"
         )));
     };
     let info = result?;
-    if info.name != expected_module_name {
-        return Err(crate::Error::failed(format!(
-            "expected TinyBus module `{expected_module_name}`, admitted `{}`",
-            info.name
-        )));
-    }
     Ok(info)
 }
 
@@ -252,4 +276,5 @@ fn verify_single_artifact(directory: &Path, selected: &Path) -> Result<()> {
 
 #[cfg(test)]
 #[path = "test_support_tests.rs"]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests;

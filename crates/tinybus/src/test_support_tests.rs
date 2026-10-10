@@ -1,5 +1,3 @@
-#![allow(clippy::expect_used, clippy::unwrap_used)]
-
 use super::*;
 
 #[test]
@@ -147,16 +145,25 @@ async fn the_shared_helper_loads_an_allowlisted_module_and_calls_it() {
     let load_state = AtomicU8::new(MODULE_UNLOADED);
     assert!(admit_artifact(&host, &artifact, "unexpected-module-name", &load_state).is_err());
     assert_eq!(load_state.load(Ordering::Acquire), MODULE_LOAD_CONSUMED);
-    let module = host
-        .list()
-        .into_iter()
-        .find(|module| module.name == "module-clock-two")
-        .unwrap();
-    assert_eq!(module.manifest.module.name, "module-clock-two");
+    assert!(
+        host.list().iter().all(|module| {
+            module.name != "module-clock-two"
+                || matches!(module.state, ModuleState::Rejected { .. })
+        }),
+        "mismatched identity must not be registered"
+    );
+    assert!(
+        !client
+            .list_names()
+            .await
+            .unwrap()
+            .iter()
+            .any(|name| name.as_str() == "ai.tinyhumans.openhuman.SecondClock")
+    );
 
-    let empty_state = AtomicU8::new(MODULE_UNLOADED);
-    assert!(admit_artifact(&host, &artifact, "module-clock-two", &empty_state).is_err());
-    assert_eq!(empty_state.load(Ordering::Acquire), MODULE_LOAD_CONSUMED);
+    let load_state = AtomicU8::new(MODULE_UNLOADED);
+    let module = admit_artifact(&host, &artifact, "module-clock-two", &load_state).unwrap();
+    assert_eq!(module.manifest.module.name, "module-clock-two");
 
     let name = "ai.tinyhumans.openhuman.SecondClock";
     wait_until_serving(&client, name, Duration::from_secs(5))
