@@ -572,10 +572,11 @@ impl Transport for LyingTransport {
     }
     async fn recv(&self) -> Result<Option<Message>> {
         let mut message = self.inner.recv().await?;
-        if let Some(message) = &mut message {
-            if message.header.kind == MessageKind::MethodCall {
-                message.header.sender = Some(BusName::new(":1.42").unwrap());
-            }
+        if let Some(message) = message
+            .as_mut()
+            .filter(|message| message.header.kind == MessageKind::MethodCall)
+        {
+            message.header.sender = Some(BusName::new(":1.42").unwrap());
         }
         Ok(message)
     }
