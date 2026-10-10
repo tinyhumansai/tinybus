@@ -1637,6 +1637,19 @@ fn the_user_private_group_rule_reads_local_accounts_and_proves_exclusivity() {
 
 #[cfg(unix)]
 #[test]
+fn a_gid_inside_a_subordinate_range_is_delegated() {
+    let subgid = "alice:100000:65536\n# c\n";
+    assert!(gid_is_delegated(subgid, 100_000));
+    assert!(gid_is_delegated(subgid, 165_535));
+    assert!(!gid_is_delegated(subgid, 165_536));
+    assert!(!gid_is_delegated(subgid, 1_000));
+    assert!(!gid_is_delegated("", 1_000));
+    // An unreadable record is assumed to cover the gid.
+    assert!(gid_is_delegated("garbage\n", 1_000));
+}
+
+#[cfg(unix)]
+#[test]
 fn accounts_count_as_local_only_without_a_directory_service() {
     assert!(accounts_are_local(
         "passwd: files systemd\ngroup: files systemd\nhosts: dns\n"
@@ -1646,6 +1659,13 @@ fn accounts_count_as_local_only_without_a_directory_service() {
     assert!(!accounts_are_local("passwd: compat\ngroup: compat\n"));
     assert!(!accounts_are_local("passwd: files sss\ngroup: files\n"));
     assert!(!accounts_are_local("passwd: files ldap\ngroup: files\n"));
+    // Supplementary memberships may come from `initgroups`.
+    assert!(!accounts_are_local(
+        "passwd: files\ngroup: files\ninitgroups: files sss\n"
+    ));
+    assert!(accounts_are_local(
+        "passwd: files\ngroup: files\ninitgroups: files\n"
+    ));
     // Both databases must be stated.
     assert!(!accounts_are_local("passwd: files\n"));
     assert!(!accounts_are_local(""));

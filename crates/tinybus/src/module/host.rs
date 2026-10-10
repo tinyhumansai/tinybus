@@ -2058,7 +2058,7 @@ fn unix_directory_refusal(
 /// and `/etc/group` are the whole account database.
 #[cfg(unix)]
 fn accounts_are_local(nsswitch: &str) -> bool {
-    let mut seen = [false; 2];
+    let mut seen = [false; 3];
     for line in nsswitch.lines() {
         let line = line.split('#').next().unwrap_or("").trim();
         let Some((database, sources)) = line.split_once(':') else {
@@ -2067,6 +2067,10 @@ fn accounts_are_local(nsswitch: &str) -> bool {
         let index = match database.trim() {
             "passwd" => 0,
             "group" => 1,
+            // Supplementary memberships can come from here as well; when it
+            // is stated it must be local too, and an absent line follows
+            // `group`.
+            "initgroups" => 2,
             _ => continue,
         };
         seen[index] = true;
@@ -2079,7 +2083,29 @@ fn accounts_are_local(nsswitch: &str) -> bool {
             return false;
         }
     }
-    seen == [true, true]
+    seen[0] && seen[1]
+}
+
+/// Whether `gid` falls inside any subordinate-gid range of `/etc/subgid`
+/// (`name:start:count`). A user namespace can map such a gid for another
+/// account, so it is not private. Unreadable records count as covering.
+#[cfg(unix)]
+fn gid_is_delegated(subgid: &str, gid: u32) -> bool {
+    subgid.lines().any(|line| {
+        if line.trim().is_empty() || line.starts_with('#') {
+            return false;
+        }
+        let fields: Vec<&str> = line.split(':').collect();
+        match (
+            fields.get(1).and_then(|start| start.parse::<u64>().ok()),
+            fields.get(2).and_then(|count| count.parse::<u64>().ok()),
+        ) {
+            (Some(start), Some(count)) if fields.len() == 3 => {
+                (start..start.saturating_add(count)).contains(&u64::from(gid))
+            }
+            _ => true,
+        }
+    })
 }
 
 /// The gid of `uid`'s private group, from the text of `/etc/passwd` and
@@ -2183,6 +2209,14 @@ fn current_user_private_gid(uid: u32) -> Option<u32> {
         return None;
     }
     let mut gid = private_group_in(&read("/etc/passwd")?, &read("/etc/group")?, uid);
+    // A gid delegated through /etc/subgid can be mapped by another account.
+    if let Some(candidate) = gid {
+        match std::fs::read_to_string("/etc/subgid") {
+            Ok(subgid) if gid_is_delegated(&subgid, candidate) => gid = None,
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => gid = None,
+            _ => {}
+        }
+    }
     // `nss-systemd` serves dynamic users, whose gids are in reserved ranges,
     // and user records (`memberOf` can add supplementary groups) from the
     // userdb and homed directories. Trust it only for a regular-user gid with
