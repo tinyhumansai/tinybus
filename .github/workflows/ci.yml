@@ -196,20 +196,20 @@ jobs:
           Copy-Item target/debug/examples/module_clock.dll $private
           Copy-Item target/debug/examples/module_context.dll $private
           Copy-Item target/debug/examples/module_context_eager.dll $private
-          # Context fixtures exercise confidential delivery to the fixed unique
-          # peer, so admission must verify their actual built artifact bytes.
-          $contextAllowlist = @('module_context.dll', 'module_context_eager.dll') | ForEach-Object {
+          Copy-Item target/debug/examples/module_wrong_target.dll $private
+          # Admit every intentional fixture by its actual built bytes so later
+          # checks, including the wrong-target gate, can exercise their contract.
+          $fixtureAllowlist = @('module_clock.dll', 'module_context.dll', 'module_context_eager.dll', 'module_wrong_target.dll') | ForEach-Object {
             $digest = (Get-FileHash -LiteralPath (Join-Path $private $_) -Algorithm SHA256).Hash.ToLowerInvariant()
             '"' + $_ + '" = "' + $digest + '"'
           }
-          $contextAllowlist | Set-Content -LiteralPath (Join-Path $private modules.toml)
+          $fixtureAllowlist | Set-Content -LiteralPath (Join-Path $private modules.toml)
           $clockTwoDirectory = Join-Path $private module-clock-two
           New-Item -ItemType Directory -Force $clockTwoDirectory | Out-Null
           Set-Acl -LiteralPath $clockTwoDirectory -AclObject $acl
           Copy-Item target/debug/examples/module_clock_two.dll $clockTwoDirectory
           $clockTwoHash = (Get-FileHash -LiteralPath (Join-Path $clockTwoDirectory module_clock_two.dll) -Algorithm SHA256).Hash.ToLowerInvariant()
           '"module_clock_two.dll" = "' + $clockTwoHash + '"' | Set-Content -LiteralPath (Join-Path $clockTwoDirectory modules.toml) -NoNewline
-          Copy-Item target/debug/examples/module_wrong_target.dll $private
           $mixed = Join-Path $private mixed
           New-Item -ItemType Directory -Force $mixed | Out-Null
           Set-Acl -LiteralPath $mixed -AclObject $acl
