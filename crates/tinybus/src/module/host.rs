@@ -1841,7 +1841,10 @@ const PLACEMENT_REFUSALS: &[&str] = &[
 
 /// Whether `error` refused an artifact for its location rather than its content.
 pub(crate) fn is_placement_refusal(error: &Error) -> bool {
-    matches!(error, Error::ModuleRefused { reason, .. } if PLACEMENT_REFUSALS.contains(&reason.as_str()))
+    // A unix refusal goes on to name the ancestor that failed, so match the
+    // phrase it starts with.
+    matches!(error, Error::ModuleRefused { reason, .. }
+        if PLACEMENT_REFUSALS.iter().any(|phrase| reason.starts_with(phrase)))
 }
 
 fn check_allowlist(path: &Path, file: std::fs::File) -> Result<()> {
@@ -1914,10 +1917,6 @@ fn has_library_extension(path: &Path) -> bool {
 fn check_directory(path: &Path) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
 
-    unsafe extern "C" {
-        fn getuid() -> u32;
-    }
-
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -1925,7 +1924,11 @@ fn check_directory(path: &Path) -> Result<()> {
             .map_err(|_| Error::module_refused(path, "module directory is unavailable"))?
             .join(path)
     };
-    let uid = unsafe { getuid() };
+    // SAFETY: getuid cannot fail and touches no memory.
+    let uid = unsafe { libc::getuid() };
+    // Looked up once per walk, and only if some ancestor is group-writable:
+    // a directory-service (LDAP, sssd) lookup is not free.
+    let private_gid = std::cell::OnceCell::new();
     for component in absolute.ancestors() {
         let metadata = std::fs::symlink_metadata(component)
             .map_err(|_| Error::module_refused(path, "module directory is unavailable"))?;
@@ -1935,34 +1938,346 @@ fn check_directory(path: &Path) -> Result<()> {
                 "module search path contains a non-directory component",
             ));
         }
+        let mode = metadata.mode();
+        // Only a directory that is group-writable, not sticky, and owned by the
+        // user or root can reach the private-group exception, so everything
+        // else (`/tmp`) skips the account lookup.
+        let needs_private_gid = mode & 0o020 != 0
+            && mode & 0o1000 == 0
+            && (metadata.uid() == uid || metadata.uid() == 0)
+            && !root_equivalent_group(metadata.uid(), metadata.gid());
+        let private_gid = if needs_private_gid {
+            // An ACL can grant another account what the mode does not show.
+            (!has_extended_acl(component))
+                .then(|| *private_gid.get_or_init(|| current_user_private_gid(uid)))
+                .flatten()
+        } else {
+            None
+        };
         if let Some(reason) =
-            unix_directory_refusal(metadata.uid(), metadata.gid(), metadata.mode(), uid)
+            unix_directory_refusal(metadata.uid(), metadata.gid(), mode, uid, private_gid)
         {
-            return Err(Error::module_refused(path, reason));
+            let mode = mode & 0o7777;
+            let label = ancestor_label(component, &absolute);
+            tracing::debug!(
+                directory = %label,
+                mode = format_args!("{mode:04o}"),
+                reason,
+                "module directory ancestor refused"
+            );
+            return Err(Error::module_refused(
+                path,
+                format!("{reason} at {label} mode {mode:04o}"),
+            ));
         }
     }
     Ok(())
 }
 
+/// Top-level system directories that are safe to report; matched only
+/// directly beneath the filesystem root, never by basename elsewhere.
+#[cfg(unix)]
+const REPORTABLE_ROOT_CHILDREN: &[&str] = &[
+    "bin",
+    "boot",
+    "etc",
+    "home",
+    "lib",
+    "lib64",
+    "Library",
+    "media",
+    "mnt",
+    "opt",
+    "private",
+    "root",
+    "run",
+    "sbin",
+    "srv",
+    "tmp",
+    "usr",
+    "var",
+    "Users",
+    "Applications",
+    "Volumes",
+];
+
+/// How a refusal names the ancestor that failed.
+///
+/// A refusal reaches telemetry, so it never carries a name that could belong
+/// to an account or a user-made directory. Only the filesystem root, the
+/// module directory itself, `$HOME`, and a fixed top-level system directory
+/// are named; every other component is reported as `an ancestor directory`.
+#[cfg(unix)]
+fn ancestor_label(component: &Path, module_directory: &Path) -> String {
+    if component.parent().is_none() {
+        return "the filesystem root".to_string();
+    }
+    if component == module_directory {
+        return "the directory itself".to_string();
+    }
+    if std::env::var_os("HOME").is_some_and(|home| Path::new(&home) == component) {
+        return "the home directory".to_string();
+    }
+    let top_level = component.parent() == Some(Path::new("/"));
+    match component.file_name().and_then(|name| name.to_str()) {
+        Some(name) if top_level && REPORTABLE_ROOT_CHILDREN.contains(&name) => name.to_string(),
+        _ => "an ancestor directory".to_string(),
+    }
+}
+
+/// `private_gid` is the current user's private group (see
+/// [`is_user_private_group`]), or `None` when they have none.
 #[cfg(unix)]
 fn unix_directory_refusal(
     owner: u32,
     group: u32,
     mode: u32,
     current_uid: u32,
+    private_gid: Option<u32>,
 ) -> Option<&'static str> {
     let world_writable = mode & 0o002 != 0;
     let group_writable = mode & 0o020 != 0;
     let sticky = mode & 0o1000 != 0;
+    // Only consulted for a directory this user or root owns, where group
+    // write by the user's private group grants nobody but that user.
+    let group_grants_only_the_user =
+        root_equivalent_group(owner, group) || private_gid == Some(group);
     if owner != current_uid && owner != 0 {
         Some("module directory is owned by another user")
     } else if sticky {
         None
-    } else if world_writable || (group_writable && !root_equivalent_group(owner, group)) {
+    } else if world_writable || (group_writable && !group_grants_only_the_user) {
         Some("module directory is writable by another user")
     } else {
         None
     }
+}
+
+/// Whether `etc/nsswitch.conf` text resolves users and groups from local
+/// files only (`files`, `systemd`; `compat` can import NIS entries, so it is not local), the one case where `/etc/passwd`
+/// and `/etc/group` are the whole account database.
+#[cfg(unix)]
+fn accounts_are_local(nsswitch: &str) -> bool {
+    let mut seen = [false; 4];
+    for line in nsswitch.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        let Some((database, sources)) = line.split_once(':') else {
+            continue;
+        };
+        let index = match database.trim() {
+            "passwd" => 0,
+            "group" => 1,
+            // Supplementary memberships can come from here as well; when it
+            // is stated it must be local too, and an absent line follows
+            // `group`.
+            "initgroups" => 2,
+            // The subordinate id provider must be local too (`/etc/subgid`).
+            "subid" => 3,
+            _ => continue,
+        };
+        seen[index] = true;
+        // `[NOTFOUND=return]` style actions are not sources.
+        let local = sources
+            .split_whitespace()
+            .filter(|source| !source.starts_with('['))
+            .all(|source| matches!(source, "files" | "systemd"));
+        if !local {
+            return false;
+        }
+    }
+    seen[0] && seen[1]
+}
+
+/// Whether `gid` falls inside any subordinate-gid range of `/etc/subgid`
+/// (`name:start:count`). A user namespace can map such a gid for another
+/// account, so it is not private. Unreadable records count as covering.
+#[cfg(unix)]
+fn gid_is_delegated(subgid: &str, gid: u32) -> bool {
+    subgid.lines().any(|line| {
+        if line.trim().is_empty() || line.starts_with('#') {
+            return false;
+        }
+        let fields: Vec<&str> = line.split(':').collect();
+        match (
+            fields.get(1).and_then(|start| start.parse::<u64>().ok()),
+            fields.get(2).and_then(|count| count.parse::<u64>().ok()),
+        ) {
+            (Some(start), Some(count)) if fields.len() == 3 => {
+                (start..start.saturating_add(count)).contains(&u64::from(gid))
+            }
+            _ => true,
+        }
+    })
+}
+
+/// The gid of `uid`'s private group, from the text of `/etc/passwd` and
+/// `/etc/group`, or `None`.
+///
+/// Debian, Ubuntu and Fedora give every account a group of its own, named
+/// after it, as its primary group, and pair that with umask 002, so `$HOME`
+/// and `~/.cache` are routinely `user:user 0775`. Group write there grants
+/// nobody but the user, and refusing it refused the per-user release cache
+/// for good. The rule is deliberately narrow: the group must be the user's
+/// primary group, carry the user's own name, list no member, and be the
+/// primary group of no other account. Anything unproven is shared.
+#[cfg(unix)]
+fn private_group_in(passwd: &str, group: &str, uid: u32) -> Option<u32> {
+    let mut user = None;
+    let mut others_with_gid = Vec::new();
+    let mut names = std::collections::HashSet::new();
+    for line in passwd.lines() {
+        let fields: Vec<&str> = line.split(':').collect();
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // A record that cannot be read could be the account that shares the
+        // gid, so any malformed line makes the whole answer unavailable.
+        if fields.len() < 4 {
+            return None;
+        }
+        let (Ok(entry_uid), Ok(entry_gid)) = (fields[2].parse::<u32>(), fields[3].parse::<u32>())
+        else {
+            return None;
+        };
+        // A second record under the same name would resolve to this group's
+        // member entry as well.
+        if !names.insert(fields[0]) {
+            return None;
+        }
+        if entry_uid == uid {
+            if user.is_some() {
+                return None;
+            }
+            user = Some((fields[0], entry_gid));
+        } else {
+            others_with_gid.push(entry_gid);
+        }
+    }
+    let (user_name, user_gid) = user?;
+    if user_name.is_empty() || others_with_gid.contains(&user_gid) {
+        return None;
+    }
+    let mut records = Vec::new();
+    for line in group.lines() {
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields: Vec<&str> = line.split(':').collect();
+        // As for passwd: a record that cannot be read could share the gid.
+        if fields.len() < 4 || fields[2].parse::<u32>().is_err() {
+            return None;
+        }
+        records.push(fields);
+    }
+    let mut matches = records
+        .into_iter()
+        .filter(|fields| fields[2].parse::<u32>().ok() == Some(user_gid));
+    let entry = matches.next()?;
+    if matches.next().is_some() || entry[0] != user_name {
+        return None;
+    }
+    // Supplementary members can write through the group too.
+    let members_ok = entry[3]
+        .split(',')
+        .filter(|member| !member.is_empty())
+        .all(|member| member == user_name);
+    members_ok.then_some(user_gid)
+}
+
+/// Where nss-systemd reads user and group records from.
+#[cfg(unix)]
+const SYSTEMD_USER_RECORD_DIRECTORIES: &[&str] = &[
+    "/etc/userdb",
+    "/run/userdb",
+    "/run/systemd/userdb",
+    "/run/host/userdb",
+    "/usr/lib/userdb",
+    "/var/lib/systemd/home",
+    "/run/systemd/home",
+];
+
+/// A missing directory has no entries; one that cannot be read is assumed to.
+#[cfg(unix)]
+fn directory_has_no_entries(path: &Path) -> bool {
+    match std::fs::read_dir(path) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
+/// The current user's private group. Reads only the local account files and
+/// only when `nsswitch.conf` shows no directory service, so no NSS call is
+/// made, nothing blocks on the network, and no process-wide libc cursor is
+/// shared. Any doubt answers `None`, which keeps group write refused.
+#[cfg(unix)]
+fn current_user_private_gid(uid: u32) -> Option<u32> {
+    let read = |path| std::fs::read_to_string(path).ok();
+    let nsswitch = read("/etc/nsswitch.conf")?;
+    if !accounts_are_local(&nsswitch) {
+        return None;
+    }
+    let mut gid = private_group_in(&read("/etc/passwd")?, &read("/etc/group")?, uid);
+    // A gid delegated through /etc/subgid can be mapped by another account.
+    if let Some(candidate) = gid {
+        match std::fs::read_to_string("/etc/subgid") {
+            Ok(subgid) if gid_is_delegated(&subgid, candidate) => gid = None,
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => gid = None,
+            _ => {}
+        }
+    }
+    // `nss-systemd` serves dynamic users, whose gids are in reserved ranges,
+    // and user records (`memberOf` can add supplementary groups) from the
+    // userdb and homed directories. Trust it only for a regular-user gid with
+    // no such records on disk.
+    if nsswitch.contains("systemd")
+        && !(gid.is_some_and(|gid| (1_000..60_000).contains(&gid))
+            && SYSTEMD_USER_RECORD_DIRECTORIES
+                .iter()
+                .all(|directory| directory_has_no_entries(Path::new(directory))))
+    {
+        gid = None;
+    }
+    tracing::debug!(
+        uid,
+        private = gid.is_some(),
+        "module directory gate checked the user's primary group"
+    );
+    gid
+}
+
+/// Whether a directory carries a POSIX ACL beyond its mode bits, which could
+/// grant another account write access the mode and group do not show. An
+/// unreadable answer counts as an ACL.
+#[cfg(target_os = "linux")]
+fn has_extended_acl(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+
+    let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return true;
+    };
+    // SAFETY: both pointers are valid for the call; a null buffer with size 0
+    // only asks for the attribute's length.
+    let length = unsafe {
+        libc::getxattr(
+            path.as_ptr(),
+            c"system.posix_acl_access".as_ptr(),
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if length >= 0 {
+        return true;
+    }
+    !matches!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ENODATA) | Some(libc::ENOTSUP)
+    )
+}
+
+/// Other unixes: without a probe for ACLs, the private-group exception is off.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn has_extended_acl(_path: &Path) -> bool {
+    true
 }
 
 /// Whether group write on a root-owned directory grants nothing beyond root.

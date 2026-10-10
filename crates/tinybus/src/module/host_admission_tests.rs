@@ -142,6 +142,28 @@ fn a_private_directory_this_user_created_is_admitted() {
     check_directory(&nested).unwrap();
 }
 
+/// Ubuntu's umask 002 leaves `~/.cache` as `user:user 0775`. Where this
+/// account has a private group, a directory like that passes the gate; where
+/// it has none (CI runners, macOS `staff`) there is nothing to show.
+#[cfg(unix)]
+#[test]
+fn a_directory_writable_by_the_users_private_group_is_admitted() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let uid = unsafe { libc::getuid() };
+    let Some(private_gid) = current_user_private_gid(uid) else {
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let root = real(&directory);
+    let cache = root.join("cache");
+    let nested = cache.join("clock").join("0.1.0");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::os::unix::fs::chown(&cache, None, Some(private_gid)).unwrap();
+    std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o775)).unwrap();
+    check_directory(&nested).unwrap();
+}
+
 /// `/Applications` ships as `root:admin 0775`. Refusing it refused every module
 /// bundled in a normally installed app.
 #[cfg(target_os = "macos")]
