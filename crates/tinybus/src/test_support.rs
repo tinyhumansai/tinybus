@@ -74,14 +74,23 @@ impl Drop for LoadReservation<'_> {
 /// as its Rust library name (`tiny_docs_module`).
 pub fn artifact_path(target_dir: impl AsRef<Path>, crate_name: &str) -> PathBuf {
     let crate_name = crate_name.replace('-', "_");
-    let file_name = if cfg!(target_os = "windows") {
-        format!("{crate_name}.dll")
-    } else if cfg!(target_os = "macos") {
-        format!("lib{crate_name}.dylib")
-    } else {
-        format!("lib{crate_name}.so")
-    };
+    let file_name = artifact_filename(&crate_name);
     target_dir.as_ref().join(file_name)
+}
+
+#[cfg(target_os = "windows")]
+fn artifact_filename(crate_name: &str) -> String {
+    format!("{crate_name}.dll")
+}
+
+#[cfg(target_os = "macos")]
+fn artifact_filename(crate_name: &str) -> String {
+    format!("lib{crate_name}.dylib")
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn artifact_filename(crate_name: &str) -> String {
+    format!("lib{crate_name}.so")
 }
 
 /// Load the single module artifact named by `env_var` through `host`.
@@ -105,24 +114,20 @@ pub fn admit_module(
     verify_single_artifact(directory, &artifact)?;
     let mut reservation = LoadReservation::reserve(&MODULE_LOAD_STATE)?;
     let outcomes = host.load_dir(directory)?;
-    for result in outcomes {
-        match result {
-            Ok(info) => {
-                reservation.admitted();
-                if info.name != expected_module_name {
-                    return Err(crate::Error::failed(format!(
-                        "expected TinyBus module `{expected_module_name}`, admitted `{}`",
-                        info.name
-                    )));
-                }
-                return Ok(info);
-            }
-            Err(error) => return Err(error),
-        }
+    let Some(result) = outcomes.into_iter().next() else {
+        return Err(crate::Error::failed(format!(
+            "TinyBus did not admit module `{expected_module_name}` from the test artifact directory"
+        )));
+    };
+    let info = result?;
+    reservation.admitted();
+    if info.name != expected_module_name {
+        return Err(crate::Error::failed(format!(
+            "expected TinyBus module `{expected_module_name}`, admitted `{}`",
+            info.name
+        )));
     }
-    Err(crate::Error::failed(format!(
-        "TinyBus did not admit module `{expected_module_name}` from the test artifact directory"
-    )))
+    Ok(info)
 }
 
 /// Start an in-memory broker and return its host, client, and task handle.

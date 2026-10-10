@@ -36,6 +36,59 @@ fn checks_the_adjacent_modules_toml_digest_before_loading() {
 }
 
 #[test]
+fn rejects_a_missing_or_unpinned_module_artifact() {
+    let directory = tempfile::tempdir().unwrap();
+    let artifact = artifact_path(directory.path(), "clock-module");
+    std::fs::write(&artifact, b"fixture bytes").unwrap();
+
+    assert!(verify_modules_pin(&artifact).is_err());
+    std::fs::write(
+        directory.path().join("modules.toml"),
+        "\"another.so\" = \"abc\"\n",
+    )
+    .unwrap();
+    assert!(verify_modules_pin(&artifact).is_err());
+}
+
+#[test]
+fn requires_a_dedicated_module_artifact_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    let artifact = artifact_path(directory.path(), "clock-module");
+    std::fs::write(&artifact, b"fixture bytes").unwrap();
+    assert!(verify_single_artifact(directory.path(), &artifact).is_ok());
+
+    let other = artifact_path(directory.path(), "another-module");
+    std::fs::write(&other, b"another fixture").unwrap();
+    assert!(verify_single_artifact(directory.path(), &artifact).is_err());
+}
+
+#[tokio::test]
+async fn waits_report_missing_module_and_timeout_errors() {
+    let (host, client, broker_task) = start_bus().await.unwrap();
+    assert!(
+        wait_until_idle(&host, "missing-module", Duration::from_secs(1))
+            .await
+            .is_err()
+    );
+    assert!(
+        wait_until_serving(&client, "missing.service", Duration::from_millis(1))
+            .await
+            .is_err()
+    );
+    broker_task.abort();
+}
+
+#[test]
+fn missing_module_environment_variable_is_reported_before_reserving_the_load_slot() {
+    let env_var = format!("TINYBUS_TEST_SUPPORT_MISSING_{}", std::process::id());
+    // SAFETY: the pid-specific variable is private to this test and is not used
+    // by any other test or process environment consumer.
+    unsafe { std::env::remove_var(&env_var) };
+    let host = ModuleHost::new(Broker::new());
+    assert!(admit_module(&host, &env_var, "missing").is_err());
+}
+
+#[test]
 fn a_failed_load_reservation_can_be_retried() {
     let state = AtomicU8::new(MODULE_UNLOADED);
     {
