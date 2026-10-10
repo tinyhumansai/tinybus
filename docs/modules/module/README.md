@@ -32,7 +32,7 @@ restart.
    is set, and group write is refused unless the group grants nobody else
    (the user's private group on Linux and other Unixes, or `wheel`/`admin`
    on a root-owned macOS directory). A private group is the user's primary
-   group, named after the user, with no other member and no other account using it as its primary group.
+   group, named after the user, with no other member and no other account using it as its primary group. It is established only from `/etc/passwd` and `/etc/group` on a host whose `nsswitch.conf` names no directory service, and never for a directory with a POSIX ACL (Linux); otherwise group write stays refused.
 2. Read an adjacent lazy manifest when one is present; otherwise load eagerly
    and locally (`RTLD_NOW | RTLD_LOCAL` on Unix). On Windows, search the
    module's directory first for its dependencies, then System32. An artifact
