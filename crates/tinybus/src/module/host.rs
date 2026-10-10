@@ -2141,10 +2141,18 @@ fn private_group_in(passwd: &str, group: &str, uid: u32) -> Option<u32> {
 #[cfg(unix)]
 fn current_user_private_gid(uid: u32) -> Option<u32> {
     let read = |path| std::fs::read_to_string(path).ok();
-    if !accounts_are_local(&read("/etc/nsswitch.conf")?) {
+    let nsswitch = read("/etc/nsswitch.conf")?;
+    if !accounts_are_local(&nsswitch) {
         return None;
     }
-    let gid = private_group_in(&read("/etc/passwd")?, &read("/etc/group")?, uid);
+    let mut gid = private_group_in(&read("/etc/passwd")?, &read("/etc/group")?, uid);
+    // `nss-systemd` serves dynamic and homed users, and it is not enumerable
+    // here. Its records live in reserved gid ranges (61184-65519, 60001-60513,
+    // 524288 and up), so a regular-user gid below them cannot be shared with
+    // one. Outside that range, systemd in `nsswitch.conf` proves nothing.
+    if nsswitch.contains("systemd") && !gid.is_some_and(|gid| (1_000..60_000).contains(&gid)) {
+        gid = None;
+    }
     tracing::debug!(
         uid,
         private = gid.is_some(),
