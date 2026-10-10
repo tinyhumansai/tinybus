@@ -7,7 +7,7 @@
 use std::ffi::c_void;
 use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 
@@ -256,6 +256,7 @@ type IncomingFrame = (Vec<u8>, bool);
 struct ModuleTransport {
     host: HostCalls,
     inbound: Mutex<mpsc::Receiver<IncomingFrame>>,
+    provenance: Arc<AtomicBool>,
     detach_on_panic: bool,
 }
 
@@ -286,12 +287,11 @@ impl Transport for ModuleTransport {
             return Ok(None);
         };
         self.host.wake();
-        let mut message: Message = serde_json::from_slice(&bytes)?;
-        // Admission is captured at delivery, never when draining the queue:
-        // a pre-admission frame must not acquire authority after admission.
-        if self.host.0.broker_routing.is_some() && !brokered {
-            message.header.sender = None;
-        }
+        let message = serde_json::from_slice(&bytes)?;
+        // The connection is the only reader and samples this slot immediately
+        // after recv. Keep header identity intact for stream ownership/routing;
+        // only contextual dispatch consumes the captured delivery authority.
+        self.provenance.store(brokered, Ordering::Release);
         Ok(Some(message))
     }
 
@@ -302,6 +302,18 @@ impl Transport for ModuleTransport {
 
     fn describe(&self) -> String {
         "module".to_string()
+    }
+}
+
+fn module_connection(transport: Arc<ModuleTransport>) -> Connection {
+    if transport.host.0.broker_routing.is_some() {
+        let provenance = transport.provenance.clone();
+        // SAFETY: this private transport has one reader, publishes the queue's
+        // per-frame proof before returning, and no other writer touches its
+        // slot. The trusted host asserts routing at deliver, not at receive.
+        unsafe { Connection::__attach_module_with_provenance(transport, provenance) }
+    } else {
+        Connection::attach(transport)
     }
 }
 
@@ -554,26 +566,17 @@ where
             Err(_) => return TB_CLOSED,
         };
         let (inbound_tx, inbound_rx) = mpsc::channel(MODULE_QUEUE_CAPACITY);
-        let transport: Arc<dyn Transport> = Arc::new(ModuleTransport {
+        let transport = Arc::new(ModuleTransport {
             host,
             inbound: Mutex::new(inbound_rx),
+            provenance: Arc::new(AtomicBool::new(false)),
             detach_on_panic,
         });
         let connection_slot = Arc::new(StdMutex::new(None));
         let task_connection_slot = connection_slot.clone();
 
         runtime.spawn(async move {
-            let brokered = host.0.broker_routing.is_some();
-            // SAFETY: module initialization requires a trusted host vtable.
-            // The private transport retains sender only for frames whose
-            // size-checked callback asserted routing at delivery. Eager workers
-            // may start before admission; that does not freeze their authority.
-            // Older hosts without the callback stay entirely unverified.
-            let connection = if brokered {
-                unsafe { Connection::__attach_brokered_module(transport) }
-            } else {
-                Connection::attach(transport)
-            };
+            let connection = module_connection(transport);
             let outcome = match connection.handshake().await.map(|()| connection) {
                 Ok(connection) => {
                     connection.__set_panic_handler(std::sync::Arc::new(move || {

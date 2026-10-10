@@ -27,7 +27,7 @@ use std::future::Future;
 use std::io::{self, Write};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -144,6 +144,7 @@ pub const OUTBOX_CAPACITY: usize = 1024;
 struct Inner {
     transport: Arc<dyn Transport>,
     brokered_native: bool,
+    native_provenance: Option<Arc<AtomicBool>>,
     /// Everything outbound goes through here and out via the writer task.
     /// Serialising writes through one task is also what lets `send` be called
     /// concurrently without interleaving two frames on the wire.
@@ -241,30 +242,51 @@ impl Connection {
     /// drive the protocol by hand. Ordinary callers want
     /// [`Connection::connect`].
     pub fn attach(transport: Arc<dyn Transport>) -> Self {
-        Self::attach_inner(transport, false)
+        Self::attach_inner(transport, false, None)
     }
 
     /// Attach the module SDK's broker-proven C transport bridge.
     ///
     /// # Safety
-    /// The caller must guarantee every received frame with a sender comes
-    /// exclusively from a real TinyBus broker which overwrites it on ingress.
-    /// The SDK captures routing at delivery and removes sender on unverified
-    /// frames, including frames queued before an eager module's admission. A successful
+    /// The caller must guarantee every received frame comes exclusively from
+    /// a real TinyBus broker which overwrites sender on ingress. A successful
     /// Hello, artifact attestation, or arbitrary C callback is insufficient.
     /// This boundary is an unsafe trusted-host contract, not cryptographic
     /// authentication against a malicious native host.
     #[doc(hidden)]
     pub unsafe fn __attach_brokered_module(transport: Arc<dyn Transport>) -> Self {
-        Self::attach_inner(transport, true)
+        Self::attach_inner(transport, true, None)
     }
 
-    fn attach_inner(transport: Arc<dyn Transport>, brokered_native: bool) -> Self {
+    /// Attach the SDK bridge with a separately captured proof for each frame.
+    ///
+    /// # Safety
+    /// The transport must have exactly one reader: this connection's dispatch
+    /// loop. Before returning each received frame it must publish that frame's
+    /// immutable delivery proof into `provenance`; nobody else may write the
+    /// slot. True must mean the trusted host asserted exclusive real broker
+    /// delivery when that frame entered the SDK queue, never later admission.
+    /// Header identity remains protocol data unless that proof is true.
+    /// This is a trusted native host contract, not cryptographic authentication.
+    #[doc(hidden)]
+    pub unsafe fn __attach_module_with_provenance(
+        transport: Arc<dyn Transport>,
+        provenance: Arc<AtomicBool>,
+    ) -> Self {
+        Self::attach_inner(transport, false, Some(provenance))
+    }
+
+    fn attach_inner(
+        transport: Arc<dyn Transport>,
+        brokered_native: bool,
+        native_provenance: Option<Arc<AtomicBool>>,
+    ) -> Self {
         let (signals, _) = broadcast::channel(SIGNAL_BUFFER);
         let (outbox, outbound) = mpsc::channel(OUTBOX_CAPACITY);
         let inner = Arc::new(Inner {
             transport,
             brokered_native,
+            native_provenance,
             outbox,
             // Serials start at 1: zero is the "unassigned" value a freshly
             // built `Message` carries, so it must never be a live serial.
@@ -1146,11 +1168,17 @@ async fn dispatch_loop(inner: Arc<Inner>) {
         {
             memory.recv_with_provenance().await
         } else {
-            inner
-                .transport
-                .recv()
-                .await
-                .map(|message| message.map(|message| (message, inner.brokered_native)))
+            inner.transport.recv().await.map(|message| {
+                message.map(|message| {
+                    // The exclusive reader samples the proof immediately after
+                    // recv, before any await or next recv can replace its slot.
+                    let brokered = inner
+                        .native_provenance
+                        .as_ref()
+                        .map_or(inner.brokered_native, |proof| proof.load(Ordering::Acquire));
+                    (message, brokered)
+                })
+            })
         };
         let (message, brokered) = match delivery {
             Ok(Some(delivery)) => delivery,

@@ -255,6 +255,7 @@ async fn module_transport_maps_host_results_and_wakes_after_receiving() {
     let transport = ModuleTransport {
         host: HostCalls(host(&[])),
         inbound: Mutex::new(receiver),
+        provenance: Arc::new(AtomicBool::new(false)),
         detach_on_panic: true,
     };
     HOST_SEND_CODE.store(TB_BACKPRESSURE, Ordering::Release);
@@ -801,6 +802,7 @@ async fn admission_never_promotes_a_frame_already_queued_without_provenance() {
     let transport = ModuleTransport {
         host: HostCalls(table),
         inbound: Mutex::new(receiver),
+        provenance: Arc::new(AtomicBool::new(false)),
         detach_on_panic: false,
     };
     let mut frame = message();
@@ -816,17 +818,10 @@ async fn admission_never_promotes_a_frame_already_queued_without_provenance() {
     assert_eq!(enqueue(), TB_OK);
     admitted.store(true, Ordering::Release);
     assert_eq!(enqueue(), TB_OK);
-    assert!(
-        transport
-            .recv()
-            .await
-            .unwrap()
-            .unwrap()
-            .header
-            .sender
-            .is_none()
-    );
     assert_eq!(transport.recv().await.unwrap().unwrap(), frame);
+    assert!(!transport.provenance.load(Ordering::Acquire));
+    assert_eq!(transport.recv().await.unwrap().unwrap(), frame);
+    assert!(transport.provenance.load(Ordering::Acquire));
 }
 
 #[tokio::test]
@@ -836,6 +831,7 @@ async fn old_hosts_retain_sender_headers_without_authenticating_them() {
     let transport = ModuleTransport {
         host: HostCalls(host(b"{}")),
         inbound: Mutex::new(receiver),
+        provenance: Arc::new(AtomicBool::new(false)),
         detach_on_panic: false,
     };
     let mut frame = message();
@@ -848,4 +844,132 @@ async fn old_hosts_retain_sender_headers_without_authenticating_them() {
     // No routing callback means startup selects ordinary Connection::attach;
     // sender headers remain protocol data, not incoming-call authority.
     assert!(transport.host.0.broker_routing.is_none());
+}
+
+struct UnverifiedContext;
+#[async_trait]
+impl tinybus::Interface for UnverifiedContext {
+    fn name(&self) -> tinybus::InterfaceName {
+        "org.example.Context".parse().unwrap()
+    }
+    fn members(&self) -> Vec<tinybus::MemberName> {
+        vec!["Inspect".parse().unwrap()]
+    }
+    async fn call(
+        &self,
+        _: &tinybus::MemberName,
+        _: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        Err(Error::failed("context required"))
+    }
+    async fn call_with_context(
+        &self,
+        _: &tinybus::MemberName,
+        _: serde_json::Value,
+        context: &tinybus::CallContext,
+    ) -> Result<serde_json::Value> {
+        Ok(serde_json::json!(context.authenticated_sender().is_some()))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unverified_native_frames_preserve_distinct_stream_owners_and_unverified_context() {
+    let _guard = host_state_guard().await;
+    for compatible_callback in [false, true] {
+        let admitted = AtomicBool::new(false);
+        let mut table = host(b"{}");
+        table.send = capture_host_send;
+        if compatible_callback {
+            table.host_ctx = std::ptr::from_ref(&admitted).cast_mut().cast();
+            table.broker_routing = Some(atomic_routing_assertion);
+        }
+        let (outgoing_tx, mut outgoing_rx) = std::sync::mpsc::sync_channel(2);
+        *START_OUTGOING
+            .get_or_init(|| StdMutex::new(None))
+            .lock()
+            .unwrap() = Some(outgoing_tx);
+        let (sender, receiver) = mpsc::channel(2);
+        let state = RuntimeState {
+            host: HostCalls(table),
+            inbound: StdMutex::new(Some(sender)),
+            runtime: StdMutex::new(None),
+            reinitialize: None,
+        };
+        let transport = Arc::new(ModuleTransport {
+            host: HostCalls(table),
+            inbound: Mutex::new(receiver),
+            provenance: Arc::new(AtomicBool::new(false)),
+            detach_on_panic: false,
+        });
+        let connection = module_connection(transport);
+        connection
+            .serve_at("/context".parse().unwrap(), UnverifiedContext)
+            .await
+            .unwrap();
+        let mut serial = 0;
+        for (member, args, peer) in [
+            ("Open", serde_json::json!([{}]), ":1.1"),
+            ("Write", serde_json::json!(["s1", 0, "eA=="]), ":1.2"),
+            ("Write", serde_json::json!(["s1", 0, "eA=="]), ":1.1"),
+            ("Inspect", serde_json::json!([]), ":1.1"),
+            ("Inspect", serde_json::json!([]), ":1.2"),
+        ] {
+            serial += 1;
+            let inspect = member == "Inspect";
+            let mut frame = Message::method_call(
+                ":1.99".parse().unwrap(),
+                if inspect {
+                    "/context"
+                } else {
+                    tinybus::stream::STREAM_PATH
+                }
+                .parse()
+                .unwrap(),
+                if inspect {
+                    "org.example.Context"
+                } else {
+                    tinybus::stream::STREAM_INTERFACE
+                }
+                .parse()
+                .unwrap(),
+                member.parse().unwrap(),
+                args,
+            );
+            frame.header.serial = serial;
+            frame.header.sender = Some(peer.parse().unwrap());
+            let bytes = serde_json::to_vec(&frame).unwrap();
+            assert_eq!(
+                unsafe {
+                    deliver(
+                        std::ptr::from_ref(&state).cast_mut().cast(),
+                        bytes.as_ptr(),
+                        bytes.len(),
+                    )
+                },
+                TB_OK
+            );
+            let (bytes, receiver) = tokio::task::spawn_blocking(move || {
+                let bytes = outgoing_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                (bytes, outgoing_rx)
+            })
+            .await
+            .unwrap();
+            outgoing_rx = receiver;
+            let reply: Message = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(reply.header.reply_serial, Some(serial));
+            if peer == ":1.2" && member == "Write" {
+                assert_eq!(
+                    reply.header.error_name.as_deref(),
+                    Some("ai.tinyhumans.tinybus.Error.UnknownStream"),
+                    "wrong peer rejected with callback={compatible_callback}"
+                );
+            } else {
+                assert!(reply.header.error_name.is_none(), "{reply:?}");
+                if inspect {
+                    assert_eq!(reply.body, serde_json::json!(false));
+                }
+            }
+        }
+        drop(connection);
+    }
 }
