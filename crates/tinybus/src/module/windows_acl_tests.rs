@@ -128,6 +128,19 @@ fn a_parent_component_never_counts_as_in_scope() {
         .join("outside");
     assert!(!in_repair_scope(&escaping, &root, Some(&base)));
     assert!(!in_repair_scope(&root.join("..").join("x"), &root, None));
+    // A root that itself contains `..` is not trusted either.
+    let odd_root = base.join("x").join("..").join("openhuman");
+    assert!(!in_repair_scope(
+        &root.join("modules"),
+        &odd_root,
+        Some(&base)
+    ));
+    let odd_base = base.join("..").join("local");
+    assert!(!in_repair_scope(
+        &root.join("modules"),
+        &root,
+        Some(&odd_base)
+    ));
 }
 
 #[test]

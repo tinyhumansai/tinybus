@@ -55,15 +55,17 @@ pub(super) fn should_repair(is_real_dir: bool, owned_by_current_user: bool, refu
 /// Whether `directory` is inside the part of the tree the repair pass may
 /// rewrite: at or below `install_root`, or strictly below `base` (the user's
 /// local application data directory, never `base` itself or anything above it).
-/// A path with a `..` component is never in scope.
+/// A path or root with a `..` component is never in scope.
 /// Windows paths are case-insensitive, so components compare case-folded.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(super) fn in_repair_scope(directory: &Path, install_root: &Path, base: Option<&Path>) -> bool {
-    // A `..` could climb out of the prefix the comparison below accepts.
-    if directory
-        .components()
-        .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
+    // A `..` in the directory or in either root could climb out of the prefix
+    // the comparison below accepts; such a path is never repaired.
+    let has_parent = |path: &Path| {
+        path.components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    };
+    if has_parent(directory) || has_parent(install_root) || base.is_some_and(has_parent) {
         return false;
     }
     let fold = |path: &Path| -> Vec<String> {
