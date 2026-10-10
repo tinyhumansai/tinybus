@@ -130,7 +130,7 @@ fn admit_artifact(
     // cannot race the loader's later open.
     let stage = tempfile::Builder::new()
         .prefix("tinybus-test-module-")
-        .tempdir()
+        .tempdir_in(directory)
         .map_err(|_| crate::Error::failed("cannot stage the test module artifact"))?;
     let staged_artifact = stage.path().join(
         artifact

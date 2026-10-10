@@ -152,13 +152,12 @@ async fn the_shared_helper_loads_an_allowlisted_module_and_calls_it() {
         }),
         "mismatched identity must not be registered"
     );
+    let services = client.list_names().await.unwrap();
     assert!(
-        !client
-            .list_names()
-            .await
-            .unwrap()
+        !services
             .iter()
-            .any(|name| name.as_str() == "ai.tinyhumans.openhuman.SecondClock")
+            .any(|name| name.as_str() == "ai.tinyhumans.openhuman.SecondClock"),
+        "mismatched module service was exposed: {services:?}"
     );
 
     let load_state = AtomicU8::new(MODULE_UNLOADED);
