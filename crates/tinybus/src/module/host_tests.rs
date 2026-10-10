@@ -1598,14 +1598,22 @@ fn group_write_by_a_shared_group_is_refused_even_with_a_private_group() {
 #[test]
 fn the_user_private_group_rule_needs_a_matching_name_and_no_other_members() {
     // Ubuntu/Fedora `useradd` default: group named after the user, no members.
-    assert!(is_user_private_group("alice", 1_000, "alice", 1_000, &[]));
+    assert!(is_user_private_group(
+        "alice",
+        1_000,
+        "alice",
+        1_000,
+        &[],
+        Some(0)
+    ));
     // Some tools list the user as an explicit member of their own group.
     assert!(is_user_private_group(
         "alice",
         1_000,
         "alice",
         1_000,
-        &["alice"]
+        &["alice"],
+        Some(0)
     ));
     // Another member can write through the group.
     assert!(!is_user_private_group(
@@ -1613,19 +1621,53 @@ fn the_user_private_group_rule_needs_a_matching_name_and_no_other_members() {
         1_000,
         "alice",
         1_000,
-        &["alice", "bob"]
+        &["alice", "bob"],
+        Some(0)
     ));
     assert!(!is_user_private_group(
         "alice",
         1_000,
         "alice",
         1_000,
-        &["bob"]
+        &["bob"],
+        Some(0)
+    ));
+    // Another account whose primary group is this gid (absent from gr_mem).
+    assert!(!is_user_private_group(
+        "alice",
+        1_000,
+        "alice",
+        1_000,
+        &[],
+        Some(1)
+    ));
+    // An unenumerable passwd database proves nothing.
+    assert!(!is_user_private_group(
+        "alice",
+        1_000,
+        "alice",
+        1_000,
+        &[],
+        None
     ));
     // A primary group not named after the user is a shared group (`users`).
-    assert!(!is_user_private_group("alice", 100, "users", 100, &[]));
+    assert!(!is_user_private_group(
+        "alice",
+        100,
+        "users",
+        100,
+        &[],
+        Some(0)
+    ));
     // The group must be the user's primary group.
-    assert!(!is_user_private_group("alice", 1_000, "alice", 1_001, &[]));
+    assert!(!is_user_private_group(
+        "alice",
+        1_000,
+        "alice",
+        1_001,
+        &[],
+        Some(0)
+    ));
 }
 
 /// A refusal names the ancestor that failed: walking to `/` means the culprit
@@ -1653,7 +1695,9 @@ fn a_directory_refusal_names_the_ancestor_that_failed() {
         reason.starts_with("module directory is writable by another user"),
         "{reason}"
     );
-    assert!(reason.contains("shared-parent"), "{reason}");
+    // The failing component is not a fixed system name, so it is not echoed.
+    assert!(reason.contains("an ancestor directory"), "{reason}");
+    assert!(!reason.contains("shared-parent"), "{reason}");
     assert!(is_placement_refusal(&refusal), "{refusal}");
 }
 
@@ -1667,11 +1711,13 @@ fn a_refused_ancestor_is_named_without_leaking_a_path() {
         label("/opt/app/bundled-modules/x86_64"),
         "the directory itself"
     );
-    assert_eq!(label("/opt/app"), "app");
-    // A home directory other than `$HOME` is still named after an account.
-    assert_eq!(label("/home/someone-else"), "a home directory");
-    assert_eq!(label("/Users/someone-else"), "a home directory");
-    assert_eq!(label("/var/home/someone-else"), "a home directory");
+    assert_eq!(label("/opt/app"), "an ancestor directory");
+    assert_eq!(label("/opt"), "opt");
+    assert_eq!(label("/home/someone/.cache"), ".cache");
+    // A home directory is named after an account, wherever it lives.
+    assert_eq!(label("/home/someone-else"), "an ancestor directory");
+    assert_eq!(label("/Users/someone-else"), "an ancestor directory");
+    assert_eq!(label("/export/home/bob"), "an ancestor directory");
 }
 
 /// The lookup agrees with `id`: an account whose primary group is not named

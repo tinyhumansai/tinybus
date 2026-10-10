@@ -32,7 +32,7 @@ restart.
    is set, and group write is refused unless the group grants nobody else
    (the user's private group on Linux and other Unixes, or `wheel`/`admin`
    on a root-owned macOS directory). A private group is the user's primary
-   group, named after the user, with no other member.
+   group, named after the user, with no other member and no other account using it as its primary group.
 2. Read an adjacent lazy manifest when one is present; otherwise load eagerly
    and locally (`RTLD_NOW | RTLD_LOCAL` on Unix). On Windows, search the
    module's directory first for its dependencies, then System32. An artifact
@@ -196,8 +196,10 @@ reported, not replaced by a download.
 Refusing one artifact does not prevent the host from admitting other artifacts
 in the same directory. The refused artifact's error contains only a sanitized
 basename and fixed reason; a Unix directory refusal ends by naming the one
-ancestor component that failed and its mode (`... at .cache mode 0777`), with
-the filesystem root and home directory named as such rather than by path.
+ancestor and its mode (`... at .cache mode 0777`). Only a dot-directory or a
+fixed system location is named; the filesystem root, the module directory and
+the home directory are named as such, and any other component is reported as
+`an ancestor directory`, so no account name or path reaches the error.
 
 Lifecycle states are `discovered`, `rejected`, `unresolved`, `resolved`,
 `initializing`, `ready`, `serving`, `faulted`, `failed`, `stopped`, and

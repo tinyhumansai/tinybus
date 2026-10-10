@@ -1939,7 +1939,14 @@ fn check_directory(path: &Path) -> Result<()> {
             ));
         }
         let mode = metadata.mode();
-        let private_gid = if mode & 0o020 != 0 {
+        // Only a directory that is group-writable, not sticky, and owned by the
+        // user or root can reach the private-group exception, so everything
+        // else (`/tmp`) skips the account lookup.
+        let needs_private_gid = mode & 0o020 != 0
+            && mode & 0o1000 == 0
+            && (metadata.uid() == uid || metadata.uid() == 0)
+            && !root_equivalent_group(metadata.uid(), metadata.gid());
+        let private_gid = if needs_private_gid {
             *private_gid.get_or_init(|| current_user_private_gid(uid))
         } else {
             None
@@ -1948,13 +1955,13 @@ fn check_directory(path: &Path) -> Result<()> {
             unix_directory_refusal(metadata.uid(), metadata.gid(), mode, uid, private_gid)
         {
             let mode = mode & 0o7777;
+            let label = ancestor_label(component, &absolute);
             tracing::debug!(
-                directory = %component.display(),
+                directory = %label,
                 mode = format_args!("{mode:04o}"),
                 reason,
                 "module directory ancestor refused"
             );
-            let label = ancestor_label(component, &absolute);
             return Err(Error::module_refused(
                 path,
                 format!("{reason} at {label} mode {mode:04o}"),
@@ -1964,14 +1971,46 @@ fn check_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Ancestor names that are safe to report: fixed system locations, never an
+/// account's own directory.
+#[cfg(unix)]
+const REPORTABLE_ANCESTORS: &[&str] = &[
+    "bin",
+    "boot",
+    "etc",
+    "home",
+    "lib",
+    "lib64",
+    "Library",
+    "media",
+    "mnt",
+    "opt",
+    "private",
+    "root",
+    "run",
+    "sbin",
+    "srv",
+    "tmp",
+    "usr",
+    "var",
+    "Users",
+    "Applications",
+    "Volumes",
+    "local",
+    "share",
+    "cache",
+    "lib32",
+    "snap",
+    "nix",
+    "export",
+];
+
 /// How a refusal names the ancestor that failed.
 ///
-/// A refusal reaches telemetry, so it carries one path component rather than
-/// a path, and never the home directory's name, which is usually the account
-/// name.
-#[cfg(unix)]
-const HOME_ROOTS: [&str; 3] = ["/home", "/Users", "/var/home"];
-
+/// A refusal reaches telemetry, so it carries at most one path component and
+/// never a name that could belong to an account. Only a dot-directory
+/// (`.cache`) or a fixed system location is named; any other component, such
+/// as a home directory wherever it lives, is reported generically.
 #[cfg(unix)]
 fn ancestor_label(component: &Path, module_directory: &Path) -> String {
     if component.parent().is_none() {
@@ -1983,19 +2022,15 @@ fn ancestor_label(component: &Path, module_directory: &Path) -> String {
     if std::env::var_os("HOME").is_some_and(|home| Path::new(&home) == component) {
         return "the home directory".to_string();
     }
-    // Another account's home (or ours, when `$HOME` is unset or spelled
-    // differently) is named after that account, so it is not reported.
-    if component
-        .parent()
-        .is_some_and(|parent| HOME_ROOTS.iter().any(|root| parent == Path::new(root)))
-    {
-        return "a home directory".to_string();
+    match component.file_name().and_then(|name| name.to_str()) {
+        Some(name)
+            if (name.starts_with('.') && name.len() > 1 && !name.contains(char::is_whitespace))
+                || REPORTABLE_ANCESTORS.contains(&name) =>
+        {
+            name.to_string()
+        }
+        _ => "an ancestor directory".to_string(),
     }
-    component
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("an unnamed ancestor")
-        .to_string()
 }
 
 /// `private_gid` is the current user's private group (see
@@ -2033,11 +2068,12 @@ fn unix_directory_refusal(
 /// and `~/.cache` are routinely `user:user 0775`. Group write there grants
 /// nobody but the user, and refusing it refused the per-user release cache
 /// for good. The rule is deliberately narrow: the group must be the user's
-/// primary group, carry the user's own name, and list no member other than
-/// the user. Anything else is treated as shared.
+/// primary group, carry the user's own name, list no member other than the
+/// user, and be the primary group of no other account.
 ///
-/// The group database cannot show which *other* accounts take this gid as
-/// their primary group; the name match is what rules that out in practice.
+/// `gr_mem` never lists accounts that use the gid as their primary group, so
+/// `other_primary_accounts` (from the passwd database, `None` when it could
+/// not be enumerated) must be zero. Anything unproven is treated as shared.
 #[cfg(unix)]
 fn is_user_private_group(
     user_name: &str,
@@ -2045,8 +2081,10 @@ fn is_user_private_group(
     group_name: &str,
     group_gid: u32,
     members: &[&str],
+    other_primary_accounts: Option<usize>,
 ) -> bool {
     !user_name.is_empty()
+        && other_primary_accounts == Some(0)
         && group_gid == user_gid
         && group_name == user_name
         && members.iter().all(|member| *member == user_name)
@@ -2118,7 +2156,15 @@ fn current_user_private_gid(uid: u32) -> Option<u32> {
             }
         }
     }
-    let private = is_user_private_group(user_name, user_gid, group_name, group.gr_gid, &members);
+    let others = other_primary_accounts(user_gid, uid);
+    let private = is_user_private_group(
+        user_name,
+        user_gid,
+        group_name,
+        group.gr_gid,
+        &members,
+        others,
+    );
     tracing::debug!(
         uid,
         gid = user_gid,
@@ -2126,6 +2172,36 @@ fn current_user_private_gid(uid: u32) -> Option<u32> {
         "module directory gate checked the user's primary group"
     );
     private.then_some(user_gid)
+}
+
+/// How many accounts other than `uid` have `gid` as their primary group, or
+/// `None` when the passwd database cannot be fully enumerated (the walk is
+/// capped, since a directory service may hold millions of entries).
+#[cfg(unix)]
+fn other_primary_accounts(gid: u32, uid: u32) -> Option<usize> {
+    /// `getpwent` shares one cursor per process, so walks must not interleave.
+    static ENUMERATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    const MAX_ENTRIES: usize = 200_000;
+    let _guard = ENUMERATION.lock().ok()?;
+    let mut others = 0;
+    let mut complete = false;
+    // SAFETY: the mutex serialises use of the process-wide passwd cursor; each
+    // returned pointer is read before the next call and not retained.
+    unsafe {
+        libc::setpwent();
+        for _ in 0..MAX_ENTRIES {
+            let entry = libc::getpwent();
+            if entry.is_null() {
+                complete = true;
+                break;
+            }
+            if (*entry).pw_gid == gid && (*entry).pw_uid != uid {
+                others += 1;
+            }
+        }
+        libc::endpwent();
+    }
+    complete.then_some(others)
 }
 
 /// Run a reentrant `get*_r` lookup, growing `buffer` while it answers
