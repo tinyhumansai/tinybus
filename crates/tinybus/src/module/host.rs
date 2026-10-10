@@ -1975,6 +1975,10 @@ fn check_directory(path: &Path) -> Result<()> {
 /// account's own directory.
 #[cfg(unix)]
 const REPORTABLE_ANCESTORS: &[&str] = &[
+    ".cache",
+    ".local",
+    ".config",
+    ".var",
     "bin",
     "boot",
     "etc",
@@ -2008,8 +2012,8 @@ const REPORTABLE_ANCESTORS: &[&str] = &[
 /// How a refusal names the ancestor that failed.
 ///
 /// A refusal reaches telemetry, so it carries at most one path component and
-/// never a name that could belong to an account. Only a dot-directory
-/// (`.cache`) or a fixed system location is named; any other component, such
+/// never a name that could belong to an account. Only a fixed system or
+/// XDG location (`/usr`, `.cache`) is named; any other component, such
 /// as a home directory wherever it lives, is reported generically.
 #[cfg(unix)]
 fn ancestor_label(component: &Path, module_directory: &Path) -> String {
@@ -2023,12 +2027,7 @@ fn ancestor_label(component: &Path, module_directory: &Path) -> String {
         return "the home directory".to_string();
     }
     match component.file_name().and_then(|name| name.to_str()) {
-        Some(name)
-            if (name.starts_with('.') && name.len() > 1 && !name.contains(char::is_whitespace))
-                || REPORTABLE_ANCESTORS.contains(&name) =>
-        {
-            name.to_string()
-        }
+        Some(name) if REPORTABLE_ANCESTORS.contains(&name) => name.to_string(),
         _ => "an ancestor directory".to_string(),
     }
 }
@@ -2190,9 +2189,13 @@ fn other_primary_accounts(gid: u32, uid: u32) -> Option<usize> {
     unsafe {
         libc::setpwent();
         for _ in 0..MAX_ENTRIES {
+            clear_errno();
             let entry = libc::getpwent();
             if entry.is_null() {
-                complete = true;
+                // End of data leaves errno clear (glibc may set ENOENT); any
+                // other value means the backend failed partway.
+                let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                complete = errno == 0 || errno == libc::ENOENT;
                 break;
             }
             if (*entry).pw_gid == gid && (*entry).pw_uid != uid {
@@ -2202,6 +2205,21 @@ fn other_primary_accounts(gid: u32, uid: u32) -> Option<usize> {
         libc::endpwent();
     }
     complete.then_some(others)
+}
+
+#[cfg(unix)]
+fn clear_errno() {
+    // SAFETY: the errno location is valid and thread-local.
+    unsafe {
+        #[cfg(any(target_os = "linux", target_os = "android", target_os = "emscripten"))]
+        {
+            *libc::__errno_location() = 0;
+        }
+        #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
+        {
+            *libc::__error() = 0;
+        }
+    }
 }
 
 /// Run a reentrant `get*_r` lookup, growing `buffer` while it answers

@@ -1714,6 +1714,10 @@ fn a_refused_ancestor_is_named_without_leaking_a_path() {
     assert_eq!(label("/opt/app"), "an ancestor directory");
     assert_eq!(label("/opt"), "opt");
     assert_eq!(label("/home/someone/.cache"), ".cache");
+    assert_eq!(
+        label("/home/someone/.alice@example.com"),
+        "an ancestor directory"
+    );
     // A home directory is named after an account, wherever it lives.
     assert_eq!(label("/home/someone-else"), "an ancestor directory");
     assert_eq!(label("/Users/someone-else"), "an ancestor directory");
