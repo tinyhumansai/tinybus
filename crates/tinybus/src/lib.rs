@@ -82,6 +82,8 @@ pub mod router;
 pub mod secret;
 pub mod service;
 pub mod stream;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 pub mod transport;
 pub mod version;
 

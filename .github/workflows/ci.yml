@@ -116,6 +116,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build example module
         run: cargo build --locked --example module_clock --example module_clock_two --example module_wrong_target --no-default-features --features modules,macros
+      - name: Test shared module test support
+        run: cargo test --locked --no-default-features --features modules,macros,test-support test_support::tests
       - name: Exercise the real loader (Unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -130,7 +132,18 @@ jobs:
               exit 1
             fi
           done
-          TINYBUS_TEST_MODULE="$PWD/$module" TINYBUS_TEST_MODULE_TWO="$PWD/$module_two" TINYBUS_TEST_WRONG_TARGET="$PWD/$wrong_target" cargo test --locked --no-default-features --features modules,macros -- --ignored
+          private="$PWD/target/private-module-tests/module-clock-two"
+          mkdir -p "$private"
+          chmod 700 "$private"
+          cp "$module_two" "$private/"
+          library="$(basename "$module_two")"
+          if command -v sha256sum >/dev/null 2>&1; then
+            digest="$(sha256sum "$private/$library" | awk '{print $1}')"
+          else
+            digest="$(shasum -a 256 "$private/$library" | awk '{print $1}')"
+          fi
+          printf '"%s" = "%s"\n' "$library" "$digest" > "$private/modules.toml"
+          TINYBUS_TEST_MODULE="$PWD/$module" TINYBUS_TEST_MODULE_TWO="$private/$library" TINYBUS_TEST_WRONG_TARGET="$PWD/$wrong_target" cargo test --locked --no-default-features --features modules,macros,test-support -- --ignored
       # Directory admission against this runner's real filesystem: a bundle
       # in a directory other accounts can write falls back to the verified
       # release cache, and on macOS the real /Applications is admitted.
@@ -164,7 +177,12 @@ jobs:
           $acl.AddAccessRule($rule)
           Set-Acl -LiteralPath $private -AclObject $acl
           Copy-Item target/debug/examples/module_clock.dll $private
-          Copy-Item target/debug/examples/module_clock_two.dll $private
+          $clockTwoDirectory = Join-Path $private module-clock-two
+          New-Item -ItemType Directory -Force $clockTwoDirectory | Out-Null
+          Set-Acl -LiteralPath $clockTwoDirectory -AclObject $acl
+          Copy-Item target/debug/examples/module_clock_two.dll $clockTwoDirectory
+          $clockTwoHash = (Get-FileHash -LiteralPath (Join-Path $clockTwoDirectory module_clock_two.dll) -Algorithm SHA256).Hash.ToLowerInvariant()
+          '"module_clock_two.dll" = "' + $clockTwoHash + '"' | Set-Content -LiteralPath (Join-Path $clockTwoDirectory modules.toml) -NoNewline
           Copy-Item target/debug/examples/module_wrong_target.dll $private
           $mixed = Join-Path $private mixed
           New-Item -ItemType Directory -Force $mixed | Out-Null
@@ -172,7 +190,7 @@ jobs:
           Copy-Item target/debug/examples/module_clock.dll $mixed
           Copy-Item target/debug/examples/module_wrong_target.dll $mixed
           $module = (Get-ChildItem "$private/module_clock.dll" | Select-Object -First 1).FullName
-          $moduleTwo = (Get-ChildItem "$private/module_clock_two.dll" | Select-Object -First 1).FullName
+          $moduleTwo = (Get-ChildItem "$clockTwoDirectory/module_clock_two.dll" | Select-Object -First 1).FullName
           $wrongTarget = (Get-ChildItem "$private/module_wrong_target.dll" | Select-Object -First 1).FullName
           $env:TEMP = $private
           $env:TMP = $private
@@ -180,7 +198,7 @@ jobs:
           $env:TINYBUS_TEST_MODULE_TWO = $moduleTwo
           $env:TINYBUS_TEST_WRONG_TARGET = $wrongTarget
           $env:TINYBUS_TEST_MODULE_DIRECTORY = $mixed
-          cargo test --locked --no-default-features --features modules,macros -- --ignored
+          cargo test --locked --no-default-features --features modules,macros,test-support -- --ignored
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # Directory admission against the real ACLs: a bundle Everyone can
           # write falls back to the verified release cache.
