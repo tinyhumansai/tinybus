@@ -42,6 +42,10 @@ fn rejects_a_missing_or_unpinned_module_artifact() {
     std::fs::write(&artifact, b"fixture bytes").unwrap();
 
     assert!(verify_modules_pin(&artifact).is_err());
+    let host = ModuleHost::new(Broker::new());
+    let load_state = AtomicU8::new(MODULE_UNLOADED);
+    assert!(admit_artifact(&host, &artifact, "clock-module", &load_state).is_err());
+    assert!(LoadReservation::reserve(&load_state).is_ok());
     std::fs::write(
         directory.path().join("modules.toml"),
         "\"another.so\" = \"abc\"\n",
@@ -60,6 +64,37 @@ fn requires_a_dedicated_module_artifact_directory() {
     let other = artifact_path(directory.path(), "another-module");
     std::fs::write(&other, b"another fixture").unwrap();
     assert!(verify_single_artifact(directory.path(), &artifact).is_err());
+    let file_name = artifact.file_name().unwrap().to_str().unwrap();
+    let digest = sha256_file(&artifact).unwrap();
+    std::fs::write(
+        directory.path().join("modules.toml"),
+        format!("\"{file_name}\" = \"{digest}\"\n"),
+    )
+    .unwrap();
+    let load_state = AtomicU8::new(MODULE_UNLOADED);
+    let host = ModuleHost::new(Broker::new());
+    assert!(admit_artifact(&host, &artifact, "clock-module", &load_state).is_err());
+    assert!(LoadReservation::reserve(&load_state).is_ok());
+}
+
+#[test]
+fn a_rejected_library_consumes_the_loader_attempt() {
+    let directory = tempfile::tempdir().unwrap();
+    let artifact = artifact_path(directory.path(), "not-a-module");
+    std::fs::write(&artifact, b"not a dynamic library").unwrap();
+    let file_name = artifact.file_name().unwrap().to_str().unwrap();
+    let digest = sha256_file(&artifact).unwrap();
+    std::fs::write(
+        directory.path().join("modules.toml"),
+        format!("\"{file_name}\" = \"{digest}\"\n"),
+    )
+    .unwrap();
+
+    let host = ModuleHost::new(Broker::new());
+    let load_state = AtomicU8::new(MODULE_UNLOADED);
+    assert!(admit_artifact(&host, &artifact, "not-a-module", &load_state).is_err());
+    assert_eq!(load_state.load(Ordering::Acquire), MODULE_LOAD_CONSUMED);
+    assert!(admit_artifact(&host, &artifact, "not-a-module", &load_state).is_err());
 }
 
 #[tokio::test]
@@ -86,10 +121,11 @@ fn missing_module_environment_variable_is_reported_before_reserving_the_load_slo
     unsafe { std::env::remove_var(&env_var) };
     let host = ModuleHost::new(Broker::new());
     assert!(admit_module(&host, &env_var, "missing").is_err());
+    assert_eq!(MODULE_LOAD_STATE.load(Ordering::Acquire), MODULE_UNLOADED);
 }
 
 #[test]
-fn a_failed_load_reservation_can_be_retried() {
+fn an_uncommitted_load_reservation_can_be_retried() {
     let state = AtomicU8::new(MODULE_UNLOADED);
     {
         let _reservation = LoadReservation::reserve(&state).unwrap();
@@ -98,8 +134,8 @@ fn a_failed_load_reservation_can_be_retried() {
     assert_eq!(state.load(Ordering::Acquire), MODULE_UNLOADED);
 
     let mut reservation = LoadReservation::reserve(&state).unwrap();
-    reservation.admitted();
-    assert_eq!(state.load(Ordering::Acquire), MODULE_ADMITTED);
+    reservation.commit();
+    assert_eq!(state.load(Ordering::Acquire), MODULE_LOAD_CONSUMED);
     assert!(LoadReservation::reserve(&state).is_err());
 }
 
@@ -107,8 +143,20 @@ fn a_failed_load_reservation_can_be_retried() {
 #[ignore = "requires TINYBUS_TEST_MODULE_TWO to point at the built clock fixture"]
 async fn the_shared_helper_loads_an_allowlisted_module_and_calls_it() {
     let (host, client, broker_task) = start_bus().await.unwrap();
-    let module = admit_module(&host, "TINYBUS_TEST_MODULE_TWO", "module-clock-two").unwrap();
+    let artifact = PathBuf::from(std::env::var_os("TINYBUS_TEST_MODULE_TWO").unwrap());
+    let load_state = AtomicU8::new(MODULE_UNLOADED);
+    assert!(admit_artifact(&host, &artifact, "unexpected-module-name", &load_state).is_err());
+    assert_eq!(load_state.load(Ordering::Acquire), MODULE_LOAD_CONSUMED);
+    let module = host
+        .list()
+        .into_iter()
+        .find(|module| module.name == "module-clock-two")
+        .unwrap();
     assert_eq!(module.manifest.module.name, "module-clock-two");
+
+    let empty_state = AtomicU8::new(MODULE_UNLOADED);
+    assert!(admit_artifact(&host, &artifact, "module-clock-two", &empty_state).is_err());
+    assert_eq!(empty_state.load(Ordering::Acquire), MODULE_LOAD_CONSUMED);
 
     let name = "ai.tinyhumans.openhuman.SecondClock";
     wait_until_serving(&client, name, Duration::from_secs(5))

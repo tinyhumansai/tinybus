@@ -22,13 +22,13 @@ use crate::{
 
 const MODULE_UNLOADED: u8 = 0;
 const MODULE_LOADING: u8 = 1;
-const MODULE_ADMITTED: u8 = 2;
+const MODULE_LOAD_CONSUMED: u8 = 2;
 
 static MODULE_LOAD_STATE: AtomicU8 = AtomicU8::new(MODULE_UNLOADED);
 
 struct LoadReservation<'a> {
     state: &'a AtomicU8,
-    admitted: bool,
+    committed: bool,
 }
 
 impl<'a> LoadReservation<'a> {
@@ -45,19 +45,19 @@ impl<'a> LoadReservation<'a> {
             })?;
         Ok(Self {
             state,
-            admitted: false,
+            committed: false,
         })
     }
 
-    fn admitted(&mut self) {
-        self.state.store(MODULE_ADMITTED, Ordering::Release);
-        self.admitted = true;
+    fn commit(&mut self) {
+        self.state.store(MODULE_LOAD_CONSUMED, Ordering::Release);
+        self.committed = true;
     }
 }
 
 impl Drop for LoadReservation<'_> {
     fn drop(&mut self) {
-        if !self.admitted {
+        if !self.committed {
             let _ = self.state.compare_exchange(
                 MODULE_LOADING,
                 MODULE_UNLOADED,
@@ -98,7 +98,8 @@ fn artifact_filename(crate_name: &str) -> String {
 /// The artifact must be in a dedicated directory with an adjacent
 /// `modules.toml` entry whose SHA-256 matches the file. The guard is
 /// process-wide: TinyBus intentionally never unloads a module, so attempting
-/// a second load in the same test process fails before mapping another library.
+/// a second loader attempt in the same test process fails before mapping
+/// another library. Preflight failures happen before the guarded attempt.
 pub fn admit_module(
     host: &ModuleHost,
     env_var: &str,
@@ -107,12 +108,25 @@ pub fn admit_module(
     let artifact = std::env::var_os(env_var)
         .map(PathBuf::from)
         .ok_or_else(|| crate::Error::failed(format!("{env_var} must point to the built module")))?;
-    verify_modules_pin(&artifact)?;
+    admit_artifact(host, &artifact, expected_module_name, &MODULE_LOAD_STATE)
+}
+
+fn admit_artifact(
+    host: &ModuleHost,
+    artifact: &Path,
+    expected_module_name: &str,
+    load_state: &AtomicU8,
+) -> Result<ModuleInfo> {
+    verify_modules_pin(artifact)?;
     let directory = artifact
         .parent()
         .ok_or_else(|| crate::Error::failed("module artifact has no parent directory"))?;
-    verify_single_artifact(directory, &artifact)?;
-    let mut reservation = LoadReservation::reserve(&MODULE_LOAD_STATE)?;
+    verify_single_artifact(directory, artifact)?;
+    let mut reservation = LoadReservation::reserve(load_state)?;
+    // load_dir can map a library before it reports an admission failure. Since
+    // TinyBus cannot unload a mapped module, consume the process slot before
+    // crossing that loader boundary, including when the result is an error.
+    reservation.commit();
     let outcomes = host.load_dir(directory)?;
     let Some(result) = outcomes.into_iter().next() else {
         return Err(crate::Error::failed(format!(
@@ -120,7 +134,6 @@ pub fn admit_module(
         )));
     };
     let info = result?;
-    reservation.admitted();
     if info.name != expected_module_name {
         return Err(crate::Error::failed(format!(
             "expected TinyBus module `{expected_module_name}`, admitted `{}`",
