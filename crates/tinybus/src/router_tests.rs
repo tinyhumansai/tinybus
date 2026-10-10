@@ -244,6 +244,55 @@ fn a_dead_peers_attestation_does_not_survive_it() {
 
 #[cfg(feature = "modules")]
 #[test]
+fn a_name_attestation_does_not_admit_the_unique_connection() {
+    let mut router = Router::default();
+    let (id, unique) = router.attach(outbox());
+    let wallet = BusName::new("ai.tinyhumans.openhuman.Wallet").unwrap();
+    let voice = BusName::new("ai.tinyhumans.openhuman.Voice").unwrap();
+    router.request_name(id, wallet.clone()).unwrap();
+    router.request_name(id, voice.clone()).unwrap();
+    let verified = attestation(wallet.as_str());
+    router.set_attestation(id, verified.clone());
+
+    assert_eq!(router.attestation_of(&wallet), Some(verified));
+    assert!(router.resolve_attested(&wallet).is_ok());
+    assert_eq!(router.attestation_of(&voice), None);
+    assert_eq!(
+        router.resolve_attested(&voice).unwrap_err().wire_name(),
+        Error::NOT_ATTESTED
+    );
+    assert_eq!(router.attestation_of(&unique), None);
+    assert_eq!(
+        router.resolve_attested(&unique).unwrap_err().wire_name(),
+        Error::NOT_ATTESTED
+    );
+}
+
+#[cfg(feature = "modules")]
+#[test]
+fn a_name_attestation_does_not_replace_an_explicitly_admitted_artifact() {
+    let mut router = Router::default();
+    let (id, unique) = router.attach(outbox());
+    let wallet = BusName::new("ai.tinyhumans.openhuman.Wallet").unwrap();
+    let voice = BusName::new("ai.tinyhumans.openhuman.Voice").unwrap();
+    router.request_name(id, wallet.clone()).unwrap();
+    router.request_name(id, voice.clone()).unwrap();
+    let admitted = attestation(wallet.as_str());
+    router.set_attestation_for_unique(&unique, admitted.clone());
+    let mut named = attestation(voice.as_str());
+    named.sha256 = "b".repeat(64);
+    router.set_attestation(id, named.clone());
+
+    assert_eq!(router.attestation_of(&unique), Some(admitted.clone()));
+    assert!(router.resolve_attested(&unique).is_ok());
+    assert_eq!(router.attestation_of(&wallet), Some(admitted));
+    assert!(router.resolve_attested(&wallet).is_ok());
+    assert_eq!(router.attestation_of(&voice), Some(named));
+    assert!(router.resolve_attested(&voice).is_ok());
+}
+
+#[cfg(feature = "modules")]
+#[test]
 fn a_fixed_unique_peer_retains_its_admitted_artifact_across_alias_handover_until_detach() {
     let mut router = Router::default();
     let (tx, mut rx) = tokio::sync::mpsc::channel(4);

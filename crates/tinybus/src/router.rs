@@ -402,7 +402,10 @@ impl Router {
         self.peers.get(id).map(|p| p.unique.clone())
     }
 
-    /// Record what the host verified about the peer owning `name`.
+    /// Record what the host verified for an exact well-known name.
+    ///
+    /// This does not admit an artifact for the peer's unique connection or
+    /// replace an artifact explicitly admitted by the module host.
     ///
     /// Gated with module loading, because that is the only thing that can
     /// produce an attestation. Without it nothing is ever attested and every
@@ -417,14 +420,13 @@ impl Router {
     /// trust to whoever grabs it next.
     pub fn set_attestation(&mut self, id: u64, attestation: Attestation) {
         if let Some(peer) = self.peers.get_mut(&id) {
-            peer.admitted_artifact = Some(attestation.clone());
             peer.attestations
                 .insert(attestation.name.clone(), attestation);
         }
     }
 
-    /// [`Router::set_attestation`] addressed by the peer's unique name, for the
-    /// module host, which holds that rather than the internal peer id.
+    /// Record the module host's verified artifact on its exact unique peer,
+    /// retaining its manifest name and digest for fixed-peer delivery.
     #[cfg(feature = "modules")]
     pub(crate) fn set_attestation_for_unique(
         &mut self,
@@ -432,6 +434,9 @@ impl Router {
         attestation: Attestation,
     ) {
         if let Some(id) = self.names.get(unique).copied() {
+            if let Some(peer) = self.peers.get_mut(&id) {
+                peer.admitted_artifact = Some(attestation.clone());
+            }
             self.set_attestation(id, attestation);
         }
     }
