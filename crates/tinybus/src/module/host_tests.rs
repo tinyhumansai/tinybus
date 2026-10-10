@@ -1377,7 +1377,8 @@ fn a_world_writable_module_directory_is_refused_before_any_dlopen() {
             metadata.uid(),
             metadata.gid(),
             metadata.permissions().mode(),
-            metadata.uid()
+            metadata.uid(),
+            None
         ),
         Some("module directory is writable by another user")
     );
@@ -1484,25 +1485,28 @@ fn a_module_file_writable_by_everyone_is_refused() {
 #[cfg(unix)]
 #[test]
 fn a_sticky_world_writable_module_directory_is_accepted() {
-    assert_eq!(unix_directory_refusal(0, 0, 0o1777, 1_000), None);
-    assert_eq!(unix_directory_refusal(1_000, 1_000, 0o1777, 1_000), None);
+    assert_eq!(unix_directory_refusal(0, 0, 0o1777, 1_000, None), None);
+    assert_eq!(
+        unix_directory_refusal(1_000, 1_000, 0o1777, 1_000, None),
+        None
+    );
 }
 
 #[cfg(unix)]
 #[test]
 fn a_module_directory_owned_by_another_user_is_refused() {
     assert_eq!(
-        unix_directory_refusal(1_001, 1_001, 0o755, 1_000),
+        unix_directory_refusal(1_001, 1_001, 0o755, 1_000, None),
         Some("module directory is owned by another user")
     );
-    assert_eq!(unix_directory_refusal(0, 0, 0o755, 1_000), None);
+    assert_eq!(unix_directory_refusal(0, 0, 0o755, 1_000, None), None);
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 fn a_root_owned_directory_writable_by_wheel_is_accepted_on_macos() {
     // `wheel` holds only root on macOS.
-    assert_eq!(unix_directory_refusal(0, 0, 0o775, 501), None);
+    assert_eq!(unix_directory_refusal(0, 0, 0o775, 501, None), None);
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -1510,7 +1514,7 @@ fn a_root_owned_directory_writable_by_wheel_is_accepted_on_macos() {
 fn group_write_by_gid_zero_is_refused_off_macos() {
     // gid 0 is not guaranteed to be root-only outside macOS.
     assert_eq!(
-        unix_directory_refusal(0, 0, 0o775, 1_000),
+        unix_directory_refusal(0, 0, 0o775, 1_000, None),
         Some("module directory is writable by another user")
     );
 }
@@ -1519,7 +1523,7 @@ fn group_write_by_gid_zero_is_refused_off_macos() {
 #[test]
 fn the_macos_applications_directory_is_accepted() {
     // /Applications ships as `root:admin 0775`.
-    assert_eq!(unix_directory_refusal(0, 80, 0o40775, 501), None);
+    assert_eq!(unix_directory_refusal(0, 80, 0o40775, 501, None), None);
 }
 
 #[cfg(unix)]
@@ -1527,19 +1531,250 @@ fn the_macos_applications_directory_is_accepted() {
 fn group_write_by_an_ordinary_group_is_still_refused() {
     let refused = Some("module directory is writable by another user");
     // A root-owned directory writable by a non-root group.
-    assert_eq!(unix_directory_refusal(0, 20, 0o775, 501), refused);
+    assert_eq!(unix_directory_refusal(0, 20, 0o775, 501, None), refused);
     // The user's own directory writable by a group: the gid alone cannot
     // show the group is private to them.
-    assert_eq!(unix_directory_refusal(1_000, 1_000, 0o775, 1_000), refused);
+    assert_eq!(
+        unix_directory_refusal(1_000, 1_000, 0o775, 1_000, None),
+        refused
+    );
     #[cfg(not(target_os = "macos"))]
-    assert_eq!(unix_directory_refusal(0, 80, 0o775, 1_000), refused);
+    assert_eq!(unix_directory_refusal(0, 80, 0o775, 1_000, None), refused);
+}
+
+/// Ubuntu's user-private-group scheme (umask 002) leaves `$HOME` and
+/// `~/.cache` as `user:user 0775`. Group write there grants nobody but the
+/// user, so the per-user release cache beneath them must stay admissible.
+#[cfg(unix)]
+#[test]
+fn group_write_by_the_users_private_group_is_admitted() {
+    // The user's own directory, group-writable by their private group.
+    assert_eq!(
+        unix_directory_refusal(1_000, 1_000, 0o775, 1_000, Some(1_000)),
+        None
+    );
+    assert_eq!(
+        unix_directory_refusal(1_000, 1_000, 0o40770, 1_000, Some(1_000)),
+        None
+    );
+    // A root-owned directory whose group is the user's private group.
+    assert_eq!(
+        unix_directory_refusal(0, 1_000, 0o775, 1_000, Some(1_000)),
+        None
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn group_write_by_a_shared_group_is_refused_even_with_a_private_group() {
+    let refused = Some("module directory is writable by another user");
+    // `users` (gid 100) is shared, whoever owns the directory.
+    assert_eq!(
+        unix_directory_refusal(1_000, 100, 0o775, 1_000, Some(1_000)),
+        refused
+    );
+    assert_eq!(
+        unix_directory_refusal(0, 100, 0o775, 1_000, Some(1_000)),
+        refused
+    );
+    // Another user's private group is not this user's.
+    assert_eq!(
+        unix_directory_refusal(1_000, 1_001, 0o775, 1_000, Some(1_000)),
+        refused
+    );
+    // A private group never excuses world write.
+    assert_eq!(
+        unix_directory_refusal(1_000, 1_000, 0o777, 1_000, Some(1_000)),
+        refused
+    );
+    // Nor ownership by another account.
+    assert_eq!(
+        unix_directory_refusal(1_001, 1_000, 0o775, 1_000, Some(1_000)),
+        Some("module directory is owned by another user")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_user_private_group_rule_reads_local_accounts_and_proves_exclusivity() {
+    let passwd = "root:x:0:0::/root:/bin/sh\nalice:x:1000:1000::/home/alice:/bin/sh\n";
+    let group = "root:x:0:\nalice:x:1000:\n";
+    assert_eq!(private_group_in(passwd, group, 1_000), Some(1_000));
+    // The user listed in their own group is still private.
+    assert_eq!(
+        private_group_in(passwd, "alice:x:1000:alice\n", 1_000),
+        Some(1_000)
+    );
+    // Another member can write through the group.
+    assert_eq!(
+        private_group_in(passwd, "alice:x:1000:alice,bob\n", 1_000),
+        None
+    );
+    // Another account with this primary gid, absent from the member list.
+    let shared = format!("{passwd}bob:x:1001:1000::/home/bob:/bin/sh\n");
+    assert_eq!(private_group_in(&shared, group, 1_000), None);
+    // A primary group not named after the user is shared (`users`).
+    let users = "alice:x:1000:100::/home/alice:/bin/sh\n";
+    assert_eq!(private_group_in(users, "users:x:100:\n", 1_000), None);
+    // Two accounts under one name are ambiguous.
+    let twin = format!("{passwd}alice:x:1001:1001::/home/twin:/bin/sh\n");
+    assert_eq!(private_group_in(&twin, group, 1_000), None);
+    // A malformed record could be the account that shares the gid.
+    assert_eq!(
+        private_group_in(&format!("{passwd}broken-line\n"), group, 1_000),
+        None
+    );
+    // A malformed group record could share the gid.
+    assert_eq!(
+        private_group_in(passwd, &format!("{group}other:x:1000\n"), 1_000),
+        None
+    );
+    // Unknown account, missing group, or duplicate group entries prove nothing.
+    assert_eq!(private_group_in(passwd, group, 4_242), None);
+    assert_eq!(private_group_in(passwd, "root:x:0:\n", 1_000), None);
+    assert_eq!(
+        private_group_in(passwd, "alice:x:1000:\nother:x:1000:\n", 1_000),
+        None
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_gid_inside_a_subordinate_range_is_delegated() {
+    let subgid = "alice:100000:65536\n# c\n";
+    assert!(gid_is_delegated(subgid, 100_000));
+    assert!(gid_is_delegated(subgid, 165_535));
+    assert!(!gid_is_delegated(subgid, 165_536));
+    assert!(!gid_is_delegated(subgid, 1_000));
+    assert!(!gid_is_delegated("", 1_000));
+    // An unreadable record is assumed to cover the gid.
+    assert!(gid_is_delegated("garbage\n", 1_000));
+}
+
+#[cfg(unix)]
+#[test]
+fn accounts_count_as_local_only_without_a_directory_service() {
+    assert!(accounts_are_local(
+        "passwd: files systemd\ngroup: files systemd\nhosts: dns\n"
+    ));
+    assert!(accounts_are_local("# c\npasswd: files\ngroup: files # x\n"));
+    // `compat` can import NIS entries through `+` lines.
+    assert!(!accounts_are_local("passwd: compat\ngroup: compat\n"));
+    assert!(!accounts_are_local("passwd: files sss\ngroup: files\n"));
+    assert!(!accounts_are_local("passwd: files ldap\ngroup: files\n"));
+    // Supplementary memberships may come from `initgroups`.
+    assert!(!accounts_are_local(
+        "passwd: files\ngroup: files\ninitgroups: files sss\n"
+    ));
+    assert!(accounts_are_local(
+        "passwd: files\ngroup: files\ninitgroups: files\n"
+    ));
+    assert!(!accounts_are_local(
+        "passwd: files\ngroup: files\nsubid: sss\n"
+    ));
+    // Both databases must be stated.
+    assert!(!accounts_are_local("passwd: files\n"));
+    assert!(!accounts_are_local(""));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_directory_counts_as_empty_only_when_missing_or_without_entries() {
+    let directory = tempfile::tempdir().unwrap();
+    assert!(directory_has_no_entries(directory.path()));
+    assert!(directory_has_no_entries(&directory.path().join("missing")));
+    std::fs::write(directory.path().join("alice.user"), "{}").unwrap();
+    assert!(!directory_has_no_entries(directory.path()));
+    // Not a directory: unreadable, so not proven empty.
+    assert!(!directory_has_no_entries(
+        &directory.path().join("alice.user")
+    ));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_plain_directory_has_no_extended_acl() {
+    let directory = tempfile::tempdir().unwrap();
+    // A parent with a default ACL hands it to the new directory; only a
+    // directory without one is a fair subject.
+    let parent_default_acl = directory.path().parent().is_some_and(|parent| {
+        let parent = std::ffi::CString::new(parent.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: valid NUL-terminated strings; null buffer asks for the length.
+        unsafe {
+            libc::getxattr(
+                parent.as_ptr(),
+                c"system.posix_acl_default".as_ptr(),
+                std::ptr::null_mut(),
+                0,
+            ) >= 0
+        }
+    });
+    if !parent_default_acl {
+        assert!(
+            !has_extended_acl(directory.path()),
+            "a plain directory must not be reported as ACL-bearing"
+        );
+    }
+    assert!(has_extended_acl(&directory.path().join("missing")));
+}
+
+/// A refusal names the ancestor that failed: walking to `/` means the culprit
+/// is rarely the module directory itself, and the bare phrase left users
+/// guessing which of a dozen directories to fix.
+#[cfg(unix)]
+#[test]
+fn a_directory_refusal_names_the_ancestor_that_failed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(directory.path()).unwrap();
+    let shared = root.join("shared-parent");
+    let module_dir = shared.join("ubuntu-22.04-x86_64");
+    std::fs::create_dir_all(&module_dir).unwrap();
+    std::fs::set_permissions(&module_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+
+    let refusal = check_directory(&module_dir).unwrap_err();
+    let Error::ModuleRefused { file, reason } = &refusal else {
+        panic!("unexpected error {refusal}");
+    };
+    assert_eq!(file, "ubuntu-22.04-x86_64");
+    assert!(
+        reason.starts_with("module directory is writable by another user"),
+        "{reason}"
+    );
+    // The failing component is not a fixed system name, so it is not echoed.
+    assert!(reason.contains("an ancestor directory"), "{reason}");
+    assert!(!reason.contains("shared-parent"), "{reason}");
+    assert!(is_placement_refusal(&refusal), "{refusal}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_refused_ancestor_is_named_without_leaking_a_path() {
+    let module = Path::new("/opt/app/bundled-modules/x86_64");
+    let label = |ancestor: &str| ancestor_label(Path::new(ancestor), module);
+    assert_eq!(label("/"), "the filesystem root");
+    assert_eq!(
+        label("/opt/app/bundled-modules/x86_64"),
+        "the directory itself"
+    );
+    assert_eq!(label("/opt"), "opt");
+    assert_eq!(label("/opt/app"), "an ancestor directory");
+    // Names are trusted only directly beneath the root.
+    assert_eq!(label("/srv/secret/.cache"), "an ancestor directory");
+    assert_eq!(label("/tmp/private"), "an ancestor directory");
+    assert_eq!(label("/home/someone/.cache"), "an ancestor directory");
+    assert_eq!(label("/home/.alice"), "an ancestor directory");
+    assert_eq!(label("/home/someone-else"), "an ancestor directory");
+    assert_eq!(label("/export/home/bob"), "an ancestor directory");
 }
 
 #[cfg(unix)]
 #[test]
 fn world_write_without_sticky_is_refused_even_for_root_groups() {
     assert_eq!(
-        unix_directory_refusal(0, 0, 0o777, 1_000),
+        unix_directory_refusal(0, 0, 0o777, 1_000, None),
         Some("module directory is writable by another user")
     );
 }

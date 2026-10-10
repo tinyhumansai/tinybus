@@ -210,8 +210,10 @@ pub enum Error {
 
     /// A dynamic module failed a fixed admission rule.
     ///
-    /// `file` is a basename only and `reason` is selected by the host. Neither
-    /// field may contain a path or attacker-controlled descriptor bytes.
+    /// `file` is a basename only and `reason` is selected by the host; a unix
+    /// directory refusal ends by naming the one ancestor component that
+    /// failed. Neither field may contain a full path or attacker-controlled
+    /// descriptor bytes.
     #[error("module `{file}` refused: {reason}")]
     ModuleRefused {
         /// Sanitized artifact basename.

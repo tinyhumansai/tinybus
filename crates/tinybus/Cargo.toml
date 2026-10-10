@@ -41,6 +41,11 @@ zip = { version = "2", optional = true, default-features = false, features = ["d
 tempfile = { version = "3", optional = true }
 toml = { version = "1", optional = true }
 
+# Unix only, for the module directory gate's passwd/group lookups
+# (`getpwuid_r`, `getgrgid_r`), whose struct layouts differ per platform.
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", optional = true }
+
 [features]
 # `uds` and `macros` are on by default because a bus you cannot connect to over
 # a socket, and an interface you have to hand-dispatch, are not what anyone is
@@ -69,7 +74,7 @@ cli = [
 
 # Load trusted, in-process cdylib modules. Off by default because a loaded
 # module shares the host's address space and full privileges.
-modules = ["dep:ureq", "dep:flate2", "dep:tar", "dep:zip", "dep:tempfile", "dep:toml"]
+modules = ["dep:ureq", "dep:flate2", "dep:tar", "dep:zip", "dep:tempfile", "dep:toml", "dep:libc"]
 
 
 [dev-dependencies]
