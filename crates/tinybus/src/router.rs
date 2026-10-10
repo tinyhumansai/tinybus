@@ -190,6 +190,9 @@ struct Peer {
     /// absence of an entry is what refuses a confidential delivery, so an
     /// ordinary out-of-process peer is ineligible by construction.
     attestations: HashMap<BusName, Attestation>,
+    /// The artifact admitted for this exact connection. Its original manifest
+    /// identity survives alias release; unrelated aliases never inherit it.
+    admitted_artifact: Option<Attestation>,
 }
 
 /// Who is attached, what they are called, and what they want to hear.
@@ -227,6 +230,7 @@ impl Router {
                 matches: Vec::new(),
                 manifest: None,
                 attestations: HashMap::new(),
+                admitted_artifact: None,
             },
         );
         self.names.insert(unique.clone(), id);
@@ -413,6 +417,7 @@ impl Router {
     /// trust to whoever grabs it next.
     pub fn set_attestation(&mut self, id: u64, attestation: Attestation) {
         if let Some(peer) = self.peers.get_mut(&id) {
+            peer.admitted_artifact = Some(attestation.clone());
             peer.attestations
                 .insert(attestation.name.clone(), attestation);
         }
@@ -434,11 +439,17 @@ impl Router {
     /// What the broker verified about whoever owns `name`, if anything.
     pub fn attestation_of(&self, name: &BusName) -> Option<Attestation> {
         let id = self.names.get(name)?;
-        self.peers.get(id)?.attestations.get(name).cloned()
+        let peer = self.peers.get(id)?;
+        if name.is_unique() {
+            peer.admitted_artifact.clone()
+        } else {
+            peer.attestations.get(name).cloned()
+        }
     }
 
     /// The outbox of whoever owns `destination`, but only if the host has
-    /// verified that peer's artifact *for that name*.
+    /// verified that peer's artifact for that well-known identity, or admitted
+    /// the artifact on that exact unique connection.
     ///
     /// The lookup and the check are one operation on purpose. Resolving first
     /// and checking after would leave a window in which a caller could hold a
@@ -453,7 +464,12 @@ impl Router {
             .peers
             .get(id)
             .ok_or_else(|| Error::NameHasNoOwner(destination.clone()))?;
-        if !peer.attestations.contains_key(destination) {
+        let attested = if destination.is_unique() {
+            peer.admitted_artifact.is_some()
+        } else {
+            peer.attestations.contains_key(destination)
+        };
+        if !attested {
             return Err(Error::not_attested(
                 destination.clone(),
                 "only a loaded module with a verified artifact may receive a secret",

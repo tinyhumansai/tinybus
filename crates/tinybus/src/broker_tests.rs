@@ -487,9 +487,8 @@ async fn a_confidential_call_to_an_unattested_recipient_is_refused() {
 }
 
 #[tokio::test]
-async fn a_confidential_call_may_not_address_a_unique_name() {
-    // The broker knows which connection `:1.n` is, but not what binary is
-    // behind it, so it cannot answer the question the sender is asking.
+async fn a_confidential_call_to_an_unattested_unique_peer_is_refused() {
+    // An ordinary connection has no admitted artifact, even at its unique name.
     let (_bus, service, client) = bus().await;
     let unique = service.unique_name().unwrap();
     let proxy = client
@@ -563,6 +562,14 @@ async fn a_name_handed_on_to_another_peer_does_not_hand_on_its_attestation() {
     // the real module released it would inherit the right to be handed
     // secrets without a single byte having been hashed.
     let (bus, _broker, service, client) = attested_bus().await;
+    let fixed = client
+        .proxy(
+            service.unique_name().unwrap().as_str(),
+            VOICE_PATH,
+            VOICE_NAME,
+        )
+        .unwrap();
+    let admitted = fixed.attestation().await.unwrap();
     let voice = client.proxy(VOICE_NAME, VOICE_PATH, VOICE_NAME).unwrap();
     assert!(voice.attestation().await.unwrap().is_some());
 
@@ -575,6 +582,43 @@ async fn a_name_handed_on_to_another_peer_does_not_hand_on_its_attestation() {
         .await
         .unwrap();
     impostor.request_name(VOICE_NAME).await.unwrap();
+
+    assert_eq!(fixed.attestation().await.unwrap(), admitted);
+    assert!(
+        fixed
+            .call_confidential::<String>("Transcribe", ("/tmp/secret.wav",))
+            .await
+            .is_ok()
+    );
+    let replacement = client
+        .proxy(
+            impostor.unique_name().unwrap().as_str(),
+            VOICE_PATH,
+            VOICE_NAME,
+        )
+        .unwrap();
+    assert_eq!(replacement.attestation().await.unwrap(), None);
+    assert_eq!(
+        replacement
+            .call_confidential::<String>("Transcribe", ("/tmp/secret.wav",))
+            .await
+            .unwrap_err()
+            .wire_name(),
+        Error::NOT_ATTESTED
+    );
+    service.request_name("org.example.Extra").await.unwrap();
+    let extra = client
+        .proxy("org.example.Extra", VOICE_PATH, VOICE_NAME)
+        .unwrap();
+    assert_eq!(extra.attestation().await.unwrap(), None);
+    assert_eq!(
+        extra
+            .call_confidential::<String>("Transcribe", ("/tmp/secret.wav",))
+            .await
+            .unwrap_err()
+            .wire_name(),
+        Error::NOT_ATTESTED
+    );
 
     // The impostor owns the name and answers ordinary calls...
     assert!(
@@ -590,6 +634,30 @@ async fn a_name_handed_on_to_another_peer_does_not_hand_on_its_attestation() {
         .await
         .unwrap_err();
     assert_eq!(error.wire_name(), Error::NOT_ATTESTED);
+
+    let mut changes = client
+        .add_match(
+            MatchRule::new()
+                .signals()
+                .member(MemberName::new("NameOwnerChanged").unwrap()),
+        )
+        .await
+        .unwrap();
+    service.close().await.unwrap();
+    let detached = tokio::time::timeout(Duration::from_secs(5), changes.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(detached.body[0], "org.example.Extra");
+    assert_eq!(fixed.attestation().await.unwrap(), None);
+    assert_eq!(
+        fixed
+            .call_confidential::<String>("Transcribe", ("/tmp/secret.wav",))
+            .await
+            .unwrap_err()
+            .wire_name(),
+        "ai.tinyhumans.tinybus.Error.NameHasNoOwner"
+    );
 }
 
 #[tokio::test]
@@ -815,4 +883,29 @@ async fn module_control_calls_validate_their_arguments_and_answer_for_unknown_mo
             .unwrap_err();
         assert_eq!(error.wire_name(), bad_arguments, "{member}: {error}");
     }
+}
+
+#[cfg(feature = "modules")]
+#[tokio::test]
+async fn a_confidential_call_reaches_the_fixed_unique_admitted_peer() {
+    let (_bus, _broker, service, client) = attested_bus().await;
+    let proxy = client
+        .proxy(
+            service.unique_name().unwrap().as_str(),
+            VOICE_PATH,
+            VOICE_NAME,
+        )
+        .unwrap();
+    let transcript: String = proxy
+        .call_confidential("Transcribe", ("/tmp/secret.wav",))
+        .await
+        .unwrap();
+    assert_eq!(transcript, "transcript of /tmp/secret.wav");
+    assert_eq!(
+        proxy.attestation().await.unwrap(),
+        client
+            .attestation(BusName::new(VOICE_NAME).unwrap())
+            .await
+            .unwrap()
+    );
 }

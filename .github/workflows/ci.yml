@@ -196,6 +196,13 @@ jobs:
           Copy-Item target/debug/examples/module_clock.dll $private
           Copy-Item target/debug/examples/module_context.dll $private
           Copy-Item target/debug/examples/module_context_eager.dll $private
+          # Context fixtures exercise confidential delivery to the fixed unique
+          # peer, so admission must verify their actual built artifact bytes.
+          $contextAllowlist = @('module_context.dll', 'module_context_eager.dll') | ForEach-Object {
+            $digest = (Get-FileHash -LiteralPath (Join-Path $private $_) -Algorithm SHA256).Hash.ToLowerInvariant()
+            '"' + $_ + '" = "' + $digest + '"'
+          }
+          $contextAllowlist | Set-Content -LiteralPath (Join-Path $private modules.toml)
           $clockTwoDirectory = Join-Path $private module-clock-two
           New-Item -ItemType Directory -Force $clockTwoDirectory | Out-Null
           Set-Acl -LiteralPath $clockTwoDirectory -AclObject $acl

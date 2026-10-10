@@ -26,6 +26,17 @@ digest, and that the operator listed that digest as acceptable.
 The hash is computed by the host over bytes the host read itself. Nothing a
 module claims about itself participates.
 
+An admitted module can receive confidential calls at its original well-known
+name or its fixed unique peer. The unique lookup returns the same attestation,
+including the original manifest name and verified digest. Extra aliases remain
+unattested. Releasing the manifest alias does not retarget a pinned unique peer;
+a successor inherits no attestation, and detach removes the old peer's record.
+Terminal module states refuse unique calls even before transport detach.
+
+Recipient attestation does not authenticate the caller or grant human authority.
+Incoming caller identity still requires broker-proven `CallContext` and a policy
+that binds the trusted peer to its permitted operations.
+
 ```toml
 # modules.toml, beside the artifact — the same file the loader already uses
 "libwallet.so" = "41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3"
@@ -148,8 +159,9 @@ problems with different fixes.
   artifact *as the wallet*, not as everything that module also answers to.
 - A confidential **signal** is refused on ingress. A broadcast has no single
   recipient to attest, so there is nothing the flag could mean.
-- A confidential **call** must address a well-known name. A unique name
-  identifies a connection, not an artifact.
+- A confidential **call** must address the attested well-known name or the
+  unique peer on which the host admitted that artifact. Ordinary unique peers
+  remain ineligible.
 - A confidential **reply** inherits the flag and goes back to the caller. A key
   derivation answers with a key, and a reply that quietly lost the flag would
   leak on the way back what the call protected on the way out.

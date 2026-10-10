@@ -1582,7 +1582,13 @@ impl ModuleControl for ModuleHostInner {
         let loaded = self.loaded.lock().expect("module list lock");
         let loaded_info = loaded
             .iter()
-            .find(|module| &module.info.manifest.bus_name == bus_name)
+            .find(|module| {
+                if bus_name.is_unique() {
+                    &module.unique_name == bus_name
+                } else {
+                    &module.info.manifest.bus_name == bus_name
+                }
+            })
             .map(LoadedModule::snapshot);
         drop(loaded);
         let info = loaded_info.or_else(|| {
