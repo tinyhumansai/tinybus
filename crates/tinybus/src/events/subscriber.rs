@@ -162,8 +162,9 @@ pub(crate) fn spawn<E: Event>(
                 continue;
             };
 
-            if let Some(allowed) = &domains
-                && !allowed.iter().any(|d| d == event.domain())
+            if domains
+                .as_ref()
+                .is_some_and(|allowed| !allowed.iter().any(|d| d == event.domain()))
             {
                 continue;
             }

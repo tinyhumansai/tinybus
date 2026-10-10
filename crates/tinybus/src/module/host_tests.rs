@@ -2383,8 +2383,17 @@ impl crate::Interface for NativeContextCallback {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires TINYBUS_TEST_CONTEXT_MODULE to point at the built cdylib"]
 async fn a_real_cdylib_authenticates_incoming_calls_and_its_host_callback() {
-    let artifact =
-        std::env::var_os("TINYBUS_TEST_CONTEXT_MODULE").expect("TINYBUS_TEST_CONTEXT_MODULE");
+    authenticates_native_context("TINYBUS_TEST_CONTEXT_MODULE").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires TINYBUS_TEST_CONTEXT_EAGER_MODULE to point at the built cdylib"]
+async fn an_eager_cdylib_authenticates_after_its_worker_runs_before_admission() {
+    authenticates_native_context("TINYBUS_TEST_CONTEXT_EAGER_MODULE").await;
+}
+
+async fn authenticates_native_context(variable: &str) {
+    let artifact = std::env::var_os(variable).expect(variable);
     let bus = MemoryBus::new();
     let broker = Broker::new();
     let task = broker.spawn(bus.clone());

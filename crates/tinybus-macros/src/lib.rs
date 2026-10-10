@@ -210,13 +210,15 @@ fn expand(
 /// Read `name = "…"` off the attribute.
 fn interface_name(args: &Punctuated<Meta, Comma>) -> syn::Result<String> {
     for arg in args {
-        if let Meta::NameValue(nv) = arg
-            && nv.path.is_ident("name")
-            && let syn::Expr::Lit(lit) = &nv.value
-            && let syn::Lit::Str(s) = &lit.lit
-        {
-            return Ok(s.value());
+        let Meta::NameValue(nv) = arg else { continue };
+        if !nv.path.is_ident("name") {
+            continue;
         }
+        let syn::Expr::Lit(lit) = &nv.value else {
+            continue;
+        };
+        let syn::Lit::Str(s) = &lit.lit else { continue };
+        return Ok(s.value());
     }
     Err(Error::new(
         proc_macro2::Span::call_site(),

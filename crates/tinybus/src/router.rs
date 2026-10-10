@@ -93,28 +93,34 @@ impl MatchRule {
     /// Whether `message` satisfies every set field.
     pub fn matches(&self, message: &Message) -> bool {
         let h = &message.header;
-        if let Some(kind) = self.kind
-            && kind != h.kind
+        if self.kind.is_some_and(|kind| kind != h.kind) {
+            return false;
+        }
+        if self
+            .sender
+            .as_ref()
+            .is_some_and(|sender| h.sender.as_ref() != Some(sender))
         {
             return false;
         }
-        if let Some(sender) = &self.sender
-            && h.sender.as_ref() != Some(sender)
+        if self
+            .interface
+            .as_ref()
+            .is_some_and(|interface| h.interface.as_ref() != Some(interface))
         {
             return false;
         }
-        if let Some(interface) = &self.interface
-            && h.interface.as_ref() != Some(interface)
+        if self
+            .member
+            .as_ref()
+            .is_some_and(|member| h.member.as_ref() != Some(member))
         {
             return false;
         }
-        if let Some(member) = &self.member
-            && h.member.as_ref() != Some(member)
-        {
-            return false;
-        }
-        if let Some(path) = &self.path
-            && h.path.as_ref() != Some(path)
+        if self
+            .path
+            .as_ref()
+            .is_some_and(|path| h.path.as_ref() != Some(path))
         {
             return false;
         }

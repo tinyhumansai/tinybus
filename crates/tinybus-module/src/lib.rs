@@ -250,9 +250,12 @@ impl tracing::field::Visit for LogVisitor {
     }
 }
 
+// Private envelope captures trusted-host routing before the frame is queued.
+type IncomingFrame = (Vec<u8>, bool);
+
 struct ModuleTransport {
     host: HostCalls,
-    inbound: Mutex<mpsc::Receiver<Vec<u8>>>,
+    inbound: Mutex<mpsc::Receiver<IncomingFrame>>,
     detach_on_panic: bool,
 }
 
@@ -279,11 +282,17 @@ impl Transport for ModuleTransport {
 
     async fn recv(&self) -> Result<Option<Message>> {
         let bytes = self.inbound.lock().await.recv().await;
-        let Some(bytes) = bytes else {
+        let Some((bytes, brokered)) = bytes else {
             return Ok(None);
         };
         self.host.wake();
-        Ok(Some(serde_json::from_slice(&bytes)?))
+        let mut message: Message = serde_json::from_slice(&bytes)?;
+        // Admission is captured at delivery, never when draining the queue:
+        // a pre-admission frame must not acquire authority after admission.
+        if !brokered {
+            message.header.sender = None;
+        }
+        Ok(Some(message))
     }
 
     async fn close(&self) -> Result<()> {
@@ -297,7 +306,8 @@ impl Transport for ModuleTransport {
 }
 
 struct RuntimeState {
-    inbound: StdMutex<Option<mpsc::Sender<Vec<u8>>>>,
+    inbound: StdMutex<Option<mpsc::Sender<IncomingFrame>>>,
+    host: HostCalls,
     runtime: StdMutex<Option<tokio::runtime::Runtime>>,
     reinitialize: Option<Reinitialize>,
 }
@@ -313,10 +323,11 @@ unsafe extern "C" fn deliver(ctx: *mut c_void, ptr: *const u8, len: usize) -> i3
             return TB_BAD_ARGUMENT;
         }
         let state = unsafe { &*(ctx.cast::<RuntimeState>()) };
+        let brokered = state.host.is_broker_routed();
         let bytes = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();
         let sender = state.inbound.lock().expect("module inbound lock").clone();
         match sender {
-            Some(sender) => match sender.try_send(bytes) {
+            Some(sender) => match sender.try_send((bytes, brokered)) {
                 Ok(()) => TB_OK,
                 Err(mpsc::error::TrySendError::Full(_)) => TB_BACKPRESSURE,
                 Err(mpsc::error::TrySendError::Closed(_)) => TB_CLOSED,
@@ -552,10 +563,12 @@ where
         let task_connection_slot = connection_slot.clone();
 
         runtime.spawn(async move {
-            let brokered = host.is_broker_routed();
+            let brokered = host.0.broker_routing.is_some();
             // SAFETY: module initialization requires a trusted host vtable.
-            // Only its size-checked additive callback can assert actual broker
-            // admission; older hosts and absent/false callbacks stay unverified.
+            // The private transport retains sender only for frames whose
+            // size-checked callback asserted routing at delivery. Eager workers
+            // may start before admission; that does not freeze their authority.
+            // Older hosts without the callback stay entirely unverified.
             let connection = if brokered {
                 unsafe { Connection::__attach_brokered_module(transport) }
             } else {
@@ -602,6 +615,7 @@ where
         let supports_reinitialize = reinitializer.is_some();
 
         let state = Box::new(RuntimeState {
+            host,
             inbound: StdMutex::new(Some(inbound_tx)),
             runtime: StdMutex::new(Some(runtime)),
             reinitialize: reinitializer,

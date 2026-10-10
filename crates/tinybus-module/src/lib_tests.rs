@@ -89,8 +89,9 @@ fn message() -> Message {
 #[test]
 fn a_module_whose_queue_is_full_reports_backpressure_rather_than_blocking_the_broker() {
     let (sender, _receiver) = mpsc::channel(1);
-    sender.try_send(vec![1]).unwrap();
+    sender.try_send((vec![1], false)).unwrap();
     let state = RuntimeState {
+        host: HostCalls(host(b"{}")),
         inbound: StdMutex::new(Some(sender)),
         runtime: StdMutex::new(None),
         reinitialize: None,
@@ -109,6 +110,7 @@ fn a_module_whose_queue_is_full_reports_backpressure_rather_than_blocking_the_br
 #[test]
 fn a_frame_over_the_size_cap_is_rejected_rather_than_truncated() {
     let state = RuntimeState {
+        host: HostCalls(host(b"{}")),
         inbound: StdMutex::new(None),
         runtime: StdMutex::new(None),
         reinitialize: None,
@@ -200,6 +202,7 @@ fn a_manifest_declaration_exports_the_declared_surface_and_dependencies() {
 #[test]
 fn a_panicking_shutdown_callback_reports_panicked_not_timed_out() {
     let state = RuntimeState {
+        host: HostCalls(host(b"{}")),
         inbound: StdMutex::new(None),
         runtime: StdMutex::new(None),
         reinitialize: None,
@@ -223,6 +226,7 @@ fn deliver_and_shutdown_validate_their_arguments_and_closed_state() {
         TB_BAD_ARGUMENT
     );
     let state = RuntimeState {
+        host: HostCalls(host(b"{}")),
         inbound: StdMutex::new(None),
         runtime: StdMutex::new(None),
         reinitialize: None,
@@ -276,7 +280,7 @@ async fn module_transport_maps_host_results_and_wakes_after_receiving() {
     assert!(HOST_FAULTED.load(Ordering::Acquire));
     HOST_WAKES.store(0, Ordering::Release);
     sender
-        .send(serde_json::to_vec(&message()).unwrap())
+        .send((serde_json::to_vec(&message()).unwrap(), false))
         .await
         .unwrap();
     assert_eq!(transport.recv().await.unwrap().unwrap(), message());
@@ -592,9 +596,10 @@ fn configured_startup_refuses_a_host_vtable_it_cannot_trust() {
 
 #[test]
 fn deliver_reports_closed_when_the_modules_queue_receiver_is_gone() {
-    let (tx, rx) = mpsc::channel::<Vec<u8>>(1);
+    let (tx, rx) = mpsc::channel::<(Vec<u8>, bool)>(1);
     drop(rx);
     let state = RuntimeState {
+        host: HostCalls(host(b"{}")),
         inbound: StdMutex::new(Some(tx)),
         runtime: StdMutex::new(None),
         reinitialize: None,
@@ -620,6 +625,7 @@ fn reinitialize_validates_its_arguments_and_reports_closed_without_a_handler() {
         TB_BAD_ARGUMENT
     );
     let state = RuntimeState {
+        host: HostCalls(host(b"{}")),
         inbound: StdMutex::new(None),
         runtime: StdMutex::new(None),
         reinitialize: None,
@@ -772,4 +778,53 @@ fn native_routing_requires_an_explicit_affirmative_host_assertion() {
     let affirmative = 1u32;
     table.host_ctx = std::ptr::from_ref(&affirmative).cast_mut().cast();
     assert!(HostCalls(table).is_broker_routed());
+}
+
+unsafe extern "C" fn atomic_routing_assertion(ctx: *mut c_void) -> u32 {
+    unsafe { &*ctx.cast::<AtomicBool>() }.load(Ordering::Acquire) as u32
+}
+
+#[tokio::test]
+async fn admission_never_promotes_a_frame_already_queued_without_provenance() {
+    let _guard = host_state_guard().await;
+    let admitted = AtomicBool::new(false);
+    let mut table = host(b"{}");
+    table.host_ctx = std::ptr::from_ref(&admitted).cast_mut().cast();
+    table.broker_routing = Some(atomic_routing_assertion);
+    let (sender, receiver) = mpsc::channel(2);
+    let state = RuntimeState {
+        host: HostCalls(table),
+        inbound: StdMutex::new(Some(sender)),
+        runtime: StdMutex::new(None),
+        reinitialize: None,
+    };
+    let transport = ModuleTransport {
+        host: HostCalls(table),
+        inbound: Mutex::new(receiver),
+        detach_on_panic: false,
+    };
+    let mut frame = message();
+    frame.header.sender = Some(":1.99".parse().unwrap());
+    let bytes = serde_json::to_vec(&frame).unwrap();
+    let enqueue = || unsafe {
+        deliver(
+            std::ptr::from_ref(&state).cast_mut().cast(),
+            bytes.as_ptr(),
+            bytes.len(),
+        )
+    };
+    assert_eq!(enqueue(), TB_OK);
+    admitted.store(true, Ordering::Release);
+    assert_eq!(enqueue(), TB_OK);
+    assert!(
+        transport
+            .recv()
+            .await
+            .unwrap()
+            .unwrap()
+            .header
+            .sender
+            .is_none()
+    );
+    assert_eq!(transport.recv().await.unwrap().unwrap(), frame);
 }

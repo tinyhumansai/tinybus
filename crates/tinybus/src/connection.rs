@@ -247,10 +247,13 @@ impl Connection {
     /// Attach the module SDK's broker-proven C transport bridge.
     ///
     /// # Safety
-    /// The caller must guarantee every received frame comes exclusively from
-    /// a real TinyBus broker which overwrites sender on ingress. A successful
+    /// The caller must guarantee every received frame with a sender comes
+    /// exclusively from a real TinyBus broker which overwrites it on ingress.
+    /// The SDK captures routing at delivery and removes sender on unverified
+    /// frames, including frames queued before an eager module's admission. A successful
     /// Hello, artifact attestation, or arbitrary C callback is insufficient.
-    /// This boundary is for the SDK after trusted host-vtable admission only.
+    /// This boundary is an unsafe trusted-host contract, not cryptographic
+    /// authentication against a malicious native host.
     #[doc(hidden)]
     pub unsafe fn __attach_brokered_module(transport: Arc<dyn Transport>) -> Self {
         Self::attach_inner(transport, true)

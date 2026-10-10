@@ -2,6 +2,7 @@
 name = "tinybus"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 build = "build.rs"
@@ -121,5 +122,10 @@ workspace = true
 
 [[example]]
 name = "module_context"
+crate-type = ["cdylib"]
+required-features = ["modules"]
+
+[[example]]
+name = "module_context_eager"
 crate-type = ["cdylib"]
 required-features = ["modules"]
