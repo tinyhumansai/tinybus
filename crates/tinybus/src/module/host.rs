@@ -1947,7 +1947,10 @@ fn check_directory(path: &Path) -> Result<()> {
             && (metadata.uid() == uid || metadata.uid() == 0)
             && !root_equivalent_group(metadata.uid(), metadata.gid());
         let private_gid = if needs_private_gid {
-            *private_gid.get_or_init(|| current_user_private_gid(uid))
+            // An ACL can grant another account what the mode does not show.
+            (!has_extended_acl(component))
+                .then(|| *private_gid.get_or_init(|| current_user_private_gid(uid)))
+                .flatten()
         } else {
             None
         };
@@ -1971,50 +1974,20 @@ fn check_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Ancestor names that are safe to report: fixed system locations, never an
-/// account's own directory.
+/// Top-level system directories that are safe to report; matched only
+/// directly beneath the filesystem root, never by basename elsewhere.
 #[cfg(unix)]
-const REPORTABLE_ANCESTORS: &[&str] = &[
-    ".cache",
-    ".local",
-    ".config",
-    ".var",
-    "bin",
-    "boot",
-    "etc",
-    "home",
-    "lib",
-    "lib64",
-    "Library",
-    "media",
-    "mnt",
-    "opt",
-    "private",
-    "root",
-    "run",
-    "sbin",
-    "srv",
-    "tmp",
-    "usr",
-    "var",
-    "Users",
-    "Applications",
-    "Volumes",
-    "local",
-    "share",
-    "cache",
-    "lib32",
-    "snap",
-    "nix",
-    "export",
+const REPORTABLE_ROOT_CHILDREN: &[&str] = &[
+    "bin", "boot", "etc", "home", "lib", "lib64", "Library", "media", "mnt", "opt", "private",
+    "root", "run", "sbin", "srv", "tmp", "usr", "var", "Users", "Applications", "Volumes",
 ];
 
 /// How a refusal names the ancestor that failed.
 ///
-/// A refusal reaches telemetry, so it carries at most one path component and
-/// never a name that could belong to an account. Only a fixed system or
-/// XDG location (`/usr`, `.cache`) is named; any other component, such
-/// as a home directory wherever it lives, is reported generically.
+/// A refusal reaches telemetry, so it never carries a name that could belong
+/// to an account or a user-made directory. Only the filesystem root, the
+/// module directory itself, `$HOME`, and a fixed top-level system directory
+/// are named; every other component is reported as `an ancestor directory`.
 #[cfg(unix)]
 fn ancestor_label(component: &Path, module_directory: &Path) -> String {
     if component.parent().is_none() {
@@ -2026,8 +1999,9 @@ fn ancestor_label(component: &Path, module_directory: &Path) -> String {
     if std::env::var_os("HOME").is_some_and(|home| Path::new(&home) == component) {
         return "the home directory".to_string();
     }
+    let top_level = component.parent() == Some(Path::new("/"));
     match component.file_name().and_then(|name| name.to_str()) {
-        Some(name) if REPORTABLE_ANCESTORS.contains(&name) => name.to_string(),
+        Some(name) if top_level && REPORTABLE_ROOT_CHILDREN.contains(&name) => name.to_string(),
         _ => "an ancestor directory".to_string(),
     }
 }
@@ -2060,187 +2034,141 @@ fn unix_directory_refusal(
     }
 }
 
-/// Whether a group is the user-private group of the account checked for.
+/// Whether `etc/nsswitch.conf` text resolves users and groups from local
+/// files only (`files`, `compat`, `systemd`), the one case where `/etc/passwd`
+/// and `/etc/group` are the whole account database.
+#[cfg(unix)]
+fn accounts_are_local(nsswitch: &str) -> bool {
+    let mut seen = [false; 2];
+    for line in nsswitch.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        let Some((database, sources)) = line.split_once(':') else {
+            continue;
+        };
+        let index = match database.trim() {
+            "passwd" => 0,
+            "group" => 1,
+            _ => continue,
+        };
+        seen[index] = true;
+        // `[NOTFOUND=return]` style actions are not sources.
+        let local = sources
+            .split_whitespace()
+            .filter(|source| !source.starts_with('['))
+            .all(|source| matches!(source, "files" | "compat" | "systemd"));
+        if !local {
+            return false;
+        }
+    }
+    seen == [true, true]
+}
+
+/// The gid of `uid`'s private group, from the text of `/etc/passwd` and
+/// `/etc/group`, or `None`.
 ///
 /// Debian, Ubuntu and Fedora give every account a group of its own, named
 /// after it, as its primary group, and pair that with umask 002, so `$HOME`
 /// and `~/.cache` are routinely `user:user 0775`. Group write there grants
 /// nobody but the user, and refusing it refused the per-user release cache
 /// for good. The rule is deliberately narrow: the group must be the user's
-/// primary group, carry the user's own name, list no member other than the
-/// user, and be the primary group of no other account.
-///
-/// `gr_mem` never lists accounts that use the gid as their primary group, so
-/// `other_primary_accounts` (from the passwd database, `None` when it could
-/// not be enumerated) must be zero. Anything unproven is treated as shared.
+/// primary group, carry the user's own name, list no member, and be the
+/// primary group of no other account. Anything unproven is shared.
 #[cfg(unix)]
-fn is_user_private_group(
-    user_name: &str,
-    user_gid: u32,
-    group_name: &str,
-    group_gid: u32,
-    members: &[&str],
-    other_primary_accounts: Option<usize>,
-) -> bool {
-    !user_name.is_empty()
-        && other_primary_accounts == Some(0)
-        && group_gid == user_gid
-        && group_name == user_name
-        && members.iter().all(|member| *member == user_name)
+fn private_group_in(passwd: &str, group: &str, uid: u32) -> Option<u32> {
+    let mut user = None;
+    let mut others_with_gid = Vec::new();
+    for line in passwd.lines() {
+        let fields: Vec<&str> = line.split(':').collect();
+        if fields.len() < 4 {
+            continue;
+        }
+        let (Ok(entry_uid), Ok(entry_gid)) = (fields[2].parse::<u32>(), fields[3].parse::<u32>())
+        else {
+            continue;
+        };
+        if entry_uid == uid {
+            if user.is_some() {
+                return None;
+            }
+            user = Some((fields[0], entry_gid));
+        } else {
+            others_with_gid.push(entry_gid);
+        }
+    }
+    let (user_name, user_gid) = user?;
+    if user_name.is_empty() || others_with_gid.contains(&user_gid) {
+        return None;
+    }
+    let mut matches = group.lines().filter_map(|line| {
+        let fields: Vec<&str> = line.split(':').collect();
+        (fields.len() >= 4 && fields[2].parse::<u32>().ok() == Some(user_gid)).then_some(fields)
+    });
+    let entry = matches.next()?;
+    if matches.next().is_some() || entry[0] != user_name {
+        return None;
+    }
+    // Supplementary members can write through the group too.
+    let members_ok = entry[3]
+        .split(',')
+        .filter(|member| !member.is_empty())
+        .all(|member| member == user_name);
+    members_ok.then_some(user_gid)
 }
 
-/// The current user's private group, if the passwd and group databases show
-/// one. Any lookup failure answers `None`, which keeps group write refused.
+/// The current user's private group. Reads only the local account files and
+/// only when `nsswitch.conf` shows no directory service, so no NSS call is
+/// made, nothing blocks on the network, and no process-wide libc cursor is
+/// shared. Any doubt answers `None`, which keeps group write refused.
 #[cfg(unix)]
 fn current_user_private_gid(uid: u32) -> Option<u32> {
-    use std::ffi::CStr;
-
-    let mut passwd_buffer = Vec::new();
-    // SAFETY: all-zero is a valid `passwd` (null pointers, zero ids).
-    let mut passwd: libc::passwd = unsafe { std::mem::zeroed() };
-    let found = with_growing_buffer(&mut passwd_buffer, |buffer| {
-        let mut result = std::ptr::null_mut();
-        // SAFETY: every pointer is valid for the call, and the caller keeps
-        // `buffer` alive for as long as it reads `passwd`'s strings.
-        let status = unsafe {
-            libc::getpwuid_r(
-                uid,
-                &mut passwd,
-                buffer.as_mut_ptr().cast(),
-                buffer.len(),
-                &mut result,
-            )
-        };
-        (status, !result.is_null())
-    });
-    if !found || passwd.pw_name.is_null() {
+    let read = |path| std::fs::read_to_string(path).ok();
+    if !accounts_are_local(&read("/etc/nsswitch.conf")?) {
         return None;
     }
-    // SAFETY: a successful lookup leaves `pw_name` NUL-terminated in the buffer.
-    let user_name = unsafe { CStr::from_ptr(passwd.pw_name) }.to_str().ok()?;
-    let user_gid = passwd.pw_gid;
-
-    let mut group_buffer = Vec::new();
-    // SAFETY: all-zero is a valid `group`.
-    let mut group: libc::group = unsafe { std::mem::zeroed() };
-    let found = with_growing_buffer(&mut group_buffer, |buffer| {
-        let mut result = std::ptr::null_mut();
-        // SAFETY: as for `getpwuid_r` above.
-        let status = unsafe {
-            libc::getgrgid_r(
-                user_gid,
-                &mut group,
-                buffer.as_mut_ptr().cast(),
-                buffer.len(),
-                &mut result,
-            )
-        };
-        (status, !result.is_null())
-    });
-    if !found || group.gr_name.is_null() {
-        return None;
-    }
-    // SAFETY: a successful lookup leaves `gr_name` NUL-terminated in the buffer.
-    let group_name = unsafe { CStr::from_ptr(group.gr_name) }.to_str().ok()?;
-    let mut members = Vec::new();
-    if !group.gr_mem.is_null() {
-        // SAFETY: `gr_mem` is a NULL-terminated array of NUL-terminated
-        // strings inside the buffer.
-        unsafe {
-            let mut cursor = group.gr_mem;
-            while !(*cursor).is_null() {
-                // A member whose name is not UTF-8 is not this user.
-                members.push(CStr::from_ptr(*cursor).to_str().unwrap_or("\u{fffd}"));
-                cursor = cursor.add(1);
-            }
-        }
-    }
-    let others = other_primary_accounts(user_gid, uid);
-    let private = is_user_private_group(
-        user_name,
-        user_gid,
-        group_name,
-        group.gr_gid,
-        &members,
-        others,
-    );
+    let gid = private_group_in(&read("/etc/passwd")?, &read("/etc/group")?, uid);
     tracing::debug!(
         uid,
-        gid = user_gid,
-        private,
+        private = gid.is_some(),
         "module directory gate checked the user's primary group"
     );
-    private.then_some(user_gid)
+    gid
 }
 
-/// How many accounts other than `uid` have `gid` as their primary group, or
-/// `None` when the passwd database cannot be fully enumerated (the walk is
-/// capped, since a directory service may hold millions of entries).
-#[cfg(unix)]
-fn other_primary_accounts(gid: u32, uid: u32) -> Option<usize> {
-    /// `getpwent` shares one cursor per process, so walks must not interleave.
-    static ENUMERATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    const MAX_ENTRIES: usize = 200_000;
-    let _guard = ENUMERATION.lock().ok()?;
-    let mut others = 0;
-    let mut complete = false;
-    // SAFETY: the mutex serialises use of the process-wide passwd cursor; each
-    // returned pointer is read before the next call and not retained.
-    unsafe {
-        libc::setpwent();
-        for _ in 0..MAX_ENTRIES {
-            clear_errno();
-            let entry = libc::getpwent();
-            if entry.is_null() {
-                // End of data leaves errno clear (glibc may set ENOENT); any
-                // other value means the backend failed partway.
-                let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-                complete = errno == 0 || errno == libc::ENOENT;
-                break;
-            }
-            if (*entry).pw_gid == gid && (*entry).pw_uid != uid {
-                others += 1;
-            }
-        }
-        libc::endpwent();
+/// Whether a directory carries a POSIX ACL beyond its mode bits, which could
+/// grant another account write access the mode and group do not show. An
+/// unreadable answer counts as an ACL.
+#[cfg(target_os = "linux")]
+fn has_extended_acl(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+
+    let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return true;
+    };
+    // SAFETY: both pointers are valid for the call; a null buffer with size 0
+    // only asks for the attribute's length.
+    let length = unsafe {
+        libc::getxattr(
+            path.as_ptr(),
+            c"system.posix_acl_access".as_ptr(),
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if length >= 0 {
+        return true;
     }
-    complete.then_some(others)
+    !matches!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ENODATA) | Some(libc::ENOTSUP)
+    )
 }
 
-#[cfg(unix)]
-fn clear_errno() {
-    // SAFETY: the errno location is valid and thread-local.
-    unsafe {
-        #[cfg(any(target_os = "linux", target_os = "android", target_os = "emscripten"))]
-        {
-            *libc::__errno_location() = 0;
-        }
-        #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
-        {
-            *libc::__error() = 0;
-        }
-    }
+/// Other unixes: without a probe for ACLs, the private-group exception is off.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn has_extended_acl(_path: &Path) -> bool {
+    true
 }
 
-/// Run a reentrant `get*_r` lookup, growing `buffer` while it answers
-/// `ERANGE`. Returns whether an entry was found.
-#[cfg(unix)]
-fn with_growing_buffer(
-    buffer: &mut Vec<u8>,
-    mut lookup: impl FnMut(&mut [u8]) -> (i32, bool),
-) -> bool {
-    /// Room for a group with thousands of members; past it, give up.
-    const MAX: usize = 1 << 20;
-    let mut size = 1024;
-    loop {
-        buffer.resize(size, 0);
-        match lookup(buffer) {
-            (0, found) => return found,
-            (libc::ERANGE, _) if size < MAX => size *= 2,
-            _ => return false,
-        }
-    }
-}
 
 /// Whether group write on a root-owned directory grants nothing beyond root.
 ///
