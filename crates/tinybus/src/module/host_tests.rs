@@ -1631,9 +1631,9 @@ fn accounts_count_as_local_only_without_a_directory_service() {
     assert!(accounts_are_local(
         "passwd: files systemd\ngroup: files systemd\nhosts: dns\n"
     ));
-    assert!(accounts_are_local(
-        "# c\npasswd: compat\ngroup: compat # x\n"
-    ));
+    assert!(accounts_are_local("# c\npasswd: files\ngroup: files # x\n"));
+    // `compat` can import NIS entries through `+` lines.
+    assert!(!accounts_are_local("passwd: compat\ngroup: compat\n"));
     assert!(!accounts_are_local("passwd: files sss\ngroup: files\n"));
     assert!(!accounts_are_local("passwd: files ldap\ngroup: files\n"));
     // Both databases must be stated.

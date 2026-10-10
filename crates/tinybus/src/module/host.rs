@@ -2054,7 +2054,7 @@ fn unix_directory_refusal(
 }
 
 /// Whether `etc/nsswitch.conf` text resolves users and groups from local
-/// files only (`files`, `compat`, `systemd`), the one case where `/etc/passwd`
+/// files only (`files`, `systemd`; `compat` can import NIS entries, so it is not local), the one case where `/etc/passwd`
 /// and `/etc/group` are the whole account database.
 #[cfg(unix)]
 fn accounts_are_local(nsswitch: &str) -> bool {
@@ -2074,7 +2074,7 @@ fn accounts_are_local(nsswitch: &str) -> bool {
         let local = sources
             .split_whitespace()
             .filter(|source| !source.starts_with('['))
-            .all(|source| matches!(source, "files" | "compat" | "systemd"));
+            .all(|source| matches!(source, "files" | "systemd"));
         if !local {
             return false;
         }
