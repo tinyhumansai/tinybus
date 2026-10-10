@@ -1596,78 +1596,60 @@ fn group_write_by_a_shared_group_is_refused_even_with_a_private_group() {
 
 #[cfg(unix)]
 #[test]
-fn the_user_private_group_rule_needs_a_matching_name_and_no_other_members() {
-    // Ubuntu/Fedora `useradd` default: group named after the user, no members.
-    assert!(is_user_private_group(
-        "alice",
-        1_000,
-        "alice",
-        1_000,
-        &[],
-        Some(0)
-    ));
-    // Some tools list the user as an explicit member of their own group.
-    assert!(is_user_private_group(
-        "alice",
-        1_000,
-        "alice",
-        1_000,
-        &["alice"],
-        Some(0)
-    ));
+fn the_user_private_group_rule_reads_local_accounts_and_proves_exclusivity() {
+    let passwd = "root:x:0:0::/root:/bin/sh\nalice:x:1000:1000::/home/alice:/bin/sh\n";
+    let group = "root:x:0:\nalice:x:1000:\n";
+    assert_eq!(private_group_in(passwd, group, 1_000), Some(1_000));
+    // The user listed in their own group is still private.
+    assert_eq!(
+        private_group_in(passwd, "alice:x:1000:alice\n", 1_000),
+        Some(1_000)
+    );
     // Another member can write through the group.
-    assert!(!is_user_private_group(
-        "alice",
-        1_000,
-        "alice",
-        1_000,
-        &["alice", "bob"],
-        Some(0)
-    ));
-    assert!(!is_user_private_group(
-        "alice",
-        1_000,
-        "alice",
-        1_000,
-        &["bob"],
-        Some(0)
-    ));
-    // Another account whose primary group is this gid (absent from gr_mem).
-    assert!(!is_user_private_group(
-        "alice",
-        1_000,
-        "alice",
-        1_000,
-        &[],
-        Some(1)
-    ));
-    // An unenumerable passwd database proves nothing.
-    assert!(!is_user_private_group(
-        "alice",
-        1_000,
-        "alice",
-        1_000,
-        &[],
+    assert_eq!(
+        private_group_in(passwd, "alice:x:1000:alice,bob\n", 1_000),
         None
+    );
+    // Another account with this primary gid, absent from the member list.
+    let shared = format!("{passwd}bob:x:1001:1000::/home/bob:/bin/sh\n");
+    assert_eq!(private_group_in(&shared, group, 1_000), None);
+    // A primary group not named after the user is shared (`users`).
+    let users = "alice:x:1000:100::/home/alice:/bin/sh\n";
+    assert_eq!(private_group_in(users, "users:x:100:\n", 1_000), None);
+    // Unknown account, missing group, or duplicate group entries prove nothing.
+    assert_eq!(private_group_in(passwd, group, 4_242), None);
+    assert_eq!(private_group_in(passwd, "root:x:0:\n", 1_000), None);
+    assert_eq!(
+        private_group_in(passwd, "alice:x:1000:\nother:x:1000:\n", 1_000),
+        None
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn accounts_count_as_local_only_without_a_directory_service() {
+    assert!(accounts_are_local(
+        "passwd: files systemd\ngroup: files systemd\nhosts: dns\n"
     ));
-    // A primary group not named after the user is a shared group (`users`).
-    assert!(!is_user_private_group(
-        "alice",
-        100,
-        "users",
-        100,
-        &[],
-        Some(0)
+    assert!(accounts_are_local(
+        "# c\npasswd: compat\ngroup: compat # x\n"
     ));
-    // The group must be the user's primary group.
-    assert!(!is_user_private_group(
-        "alice",
-        1_000,
-        "alice",
-        1_001,
-        &[],
-        Some(0)
-    ));
+    assert!(!accounts_are_local("passwd: files sss\ngroup: files\n"));
+    assert!(!accounts_are_local("passwd: files ldap\ngroup: files\n"));
+    // Both databases must be stated.
+    assert!(!accounts_are_local("passwd: files\n"));
+    assert!(!accounts_are_local(""));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_plain_directory_has_no_extended_acl() {
+    let directory = tempfile::tempdir().unwrap();
+    // tmpfs and ext4 answer ENODATA; a filesystem without ACL support answers
+    // ENOTSUP. Either way the probe must not misreport a plain directory,
+    // unless the filesystem refuses the query for another reason.
+    let _ = has_extended_acl(directory.path());
+    assert!(has_extended_acl(&directory.path().join("missing")));
 }
 
 /// A refusal names the ancestor that failed: walking to `/` means the culprit
@@ -1711,40 +1693,15 @@ fn a_refused_ancestor_is_named_without_leaking_a_path() {
         label("/opt/app/bundled-modules/x86_64"),
         "the directory itself"
     );
-    assert_eq!(label("/opt/app"), "an ancestor directory");
     assert_eq!(label("/opt"), "opt");
-    assert_eq!(label("/home/someone/.cache"), ".cache");
-    assert_eq!(
-        label("/home/someone/.alice@example.com"),
-        "an ancestor directory"
-    );
-    // A home directory is named after an account, wherever it lives.
+    assert_eq!(label("/opt/app"), "an ancestor directory");
+    // Names are trusted only directly beneath the root.
+    assert_eq!(label("/srv/secret/.cache"), "an ancestor directory");
+    assert_eq!(label("/tmp/private"), "an ancestor directory");
+    assert_eq!(label("/home/someone/.cache"), "an ancestor directory");
+    assert_eq!(label("/home/.alice"), "an ancestor directory");
     assert_eq!(label("/home/someone-else"), "an ancestor directory");
-    assert_eq!(label("/Users/someone-else"), "an ancestor directory");
     assert_eq!(label("/export/home/bob"), "an ancestor directory");
-}
-
-/// The lookup agrees with `id`: an account whose primary group is not named
-/// after it has no private group, and one that does resolves to that gid
-/// unless the group lists another member.
-#[cfg(unix)]
-#[test]
-fn the_current_users_private_group_matches_the_account_database() {
-    fn id(flag: &str) -> String {
-        let output = std::process::Command::new("id").arg(flag).output().unwrap();
-        String::from_utf8(output.stdout).unwrap().trim().to_string()
-    }
-    let uid = unsafe { libc::getuid() };
-    let private = current_user_private_gid(uid);
-    if id("-un") == id("-gn") {
-        if let Some(gid) = private {
-            assert_eq!(gid.to_string(), id("-g"));
-        }
-    } else {
-        assert_eq!(private, None);
-    }
-    // No account database entry, no private group.
-    assert_eq!(current_user_private_gid(u32::MAX - 7), None);
 }
 
 #[cfg(unix)]

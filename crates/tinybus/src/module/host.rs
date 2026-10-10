@@ -1978,8 +1978,27 @@ fn check_directory(path: &Path) -> Result<()> {
 /// directly beneath the filesystem root, never by basename elsewhere.
 #[cfg(unix)]
 const REPORTABLE_ROOT_CHILDREN: &[&str] = &[
-    "bin", "boot", "etc", "home", "lib", "lib64", "Library", "media", "mnt", "opt", "private",
-    "root", "run", "sbin", "srv", "tmp", "usr", "var", "Users", "Applications", "Volumes",
+    "bin",
+    "boot",
+    "etc",
+    "home",
+    "lib",
+    "lib64",
+    "Library",
+    "media",
+    "mnt",
+    "opt",
+    "private",
+    "root",
+    "run",
+    "sbin",
+    "srv",
+    "tmp",
+    "usr",
+    "var",
+    "Users",
+    "Applications",
+    "Volumes",
 ];
 
 /// How a refusal names the ancestor that failed.
@@ -2168,7 +2187,6 @@ fn has_extended_acl(path: &Path) -> bool {
 fn has_extended_acl(_path: &Path) -> bool {
     true
 }
-
 
 /// Whether group write on a root-owned directory grants nothing beyond root.
 ///

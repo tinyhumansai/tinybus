@@ -196,7 +196,7 @@ reported, not replaced by a download.
 Refusing one artifact does not prevent the host from admitting other artifacts
 in the same directory. The refused artifact's error contains only a sanitized
 basename and fixed reason; a Unix directory refusal ends by naming the one
-ancestor and its mode (`... at .cache mode 0777`). Only a fixed system or XDG
+ancestor and its mode (`... at opt mode 0777`). Only a fixed system or XDG
 location (`/usr`, `.cache`) is named; the filesystem root, the module directory and
 the home directory are named as such, and any other component is reported as
 `an ancestor directory`, so no account name or path reaches the error.
