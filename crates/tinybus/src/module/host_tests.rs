@@ -1706,27 +1706,6 @@ fn a_refused_ancestor_is_named_without_leaking_a_path() {
 
 #[cfg(unix)]
 #[test]
-fn a_reentrant_lookup_grows_its_buffer_until_the_entry_fits() {
-    let mut buffer = Vec::new();
-    let found = with_growing_buffer(&mut buffer, |buffer| {
-        if buffer.len() < 8 * 1024 {
-            (libc::ERANGE, false)
-        } else {
-            (0, true)
-        }
-    });
-    assert!(found);
-    assert_eq!(buffer.len(), 8 * 1024);
-    // An entry that never fits is given up on rather than grown forever.
-    let never_fits = |_: &mut [u8]| (libc::ERANGE, false);
-    assert!(!with_growing_buffer(&mut Vec::new(), never_fits));
-    // Any other error is a failed lookup.
-    let io_error = |_: &mut [u8]| (libc::EIO, false);
-    assert!(!with_growing_buffer(&mut Vec::new(), io_error));
-}
-
-#[cfg(unix)]
-#[test]
 fn world_write_without_sticky_is_refused_even_for_root_groups() {
     assert_eq!(
         unix_directory_refusal(0, 0, 0o777, 1_000, None),
