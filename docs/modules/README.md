@@ -24,6 +24,7 @@ behaviours other modules rely on.
 | `native` | source rustdoc (typed in-process request registry) |
 | `version` | source rustdoc (interface compatibility records) |
 | `module` | [module/README.md](module/README.md) |
+| `test_support` | [test_support/README.md](test_support/README.md) |
 
 See also [protocol.md](../protocol.md) for the wire format as a specification
 rather than as Rust.

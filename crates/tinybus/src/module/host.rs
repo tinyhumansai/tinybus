@@ -664,7 +664,25 @@ impl ModuleHost {
     /// Refusals are returned per artifact so one bad file cannot prevent the
     /// remaining modules from loading.
     pub fn load_dir(&self, directory: impl AsRef<Path>) -> Result<Vec<Result<ModuleInfo>>> {
-        let directory = directory.as_ref();
+        self.load_dir_inner(directory.as_ref(), None)
+    }
+
+    /// Load modules from a directory while requiring each discovered manifest
+    /// to declare `expected_name` before it can be registered with the host.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn load_dir_expected(
+        &self,
+        directory: impl AsRef<Path>,
+        expected_name: &str,
+    ) -> Result<Vec<Result<ModuleInfo>>> {
+        self.load_dir_inner(directory.as_ref(), Some(expected_name))
+    }
+
+    fn load_dir_inner(
+        &self,
+        directory: &Path,
+        expected_name: Option<&str>,
+    ) -> Result<Vec<Result<ModuleInfo>>> {
         check_directory(directory)?;
         let mut directories = self
             .inner
@@ -702,6 +720,16 @@ impl ModuleHost {
                 }
             });
             match inspected {
+                Ok(module)
+                    if expected_name.is_some_and(|expected| {
+                        sanitize_untrusted(&module.manifest().module.name) != expected
+                    }) =>
+                {
+                    outcomes.push(Err(Error::module_refused(
+                        &path,
+                        "module name does not match expected test identity",
+                    )));
+                }
                 Ok(module) => pending.push((path, module)),
                 Err(error) => outcomes.push(Err(error)),
             }

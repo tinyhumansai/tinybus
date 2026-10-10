@@ -76,6 +76,9 @@ cli = [
 # module shares the host's address space and full privileges.
 modules = ["dep:ureq", "dep:flate2", "dep:tar", "dep:zip", "dep:tempfile", "dep:toml", "dep:libc"]
 
+# Shared helpers for integration suites that load a built module cdylib.
+test-support = ["modules", "macros"]
+
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "io-util"] }
