@@ -1616,6 +1616,9 @@ fn the_user_private_group_rule_reads_local_accounts_and_proves_exclusivity() {
     // A primary group not named after the user is shared (`users`).
     let users = "alice:x:1000:100::/home/alice:/bin/sh\n";
     assert_eq!(private_group_in(users, "users:x:100:\n", 1_000), None);
+    // Two accounts under one name are ambiguous.
+    let twin = format!("{passwd}alice:x:1001:1001::/home/twin:/bin/sh\n");
+    assert_eq!(private_group_in(&twin, group, 1_000), None);
     // A malformed record could be the account that shares the gid.
     assert_eq!(
         private_group_in(&format!("{passwd}broken-line\n"), group, 1_000),
@@ -1665,6 +1668,9 @@ fn accounts_count_as_local_only_without_a_directory_service() {
     ));
     assert!(accounts_are_local(
         "passwd: files\ngroup: files\ninitgroups: files\n"
+    ));
+    assert!(!accounts_are_local(
+        "passwd: files\ngroup: files\nsubid: sss\n"
     ));
     // Both databases must be stated.
     assert!(!accounts_are_local("passwd: files\n"));

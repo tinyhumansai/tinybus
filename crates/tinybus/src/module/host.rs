@@ -2058,7 +2058,7 @@ fn unix_directory_refusal(
 /// and `/etc/group` are the whole account database.
 #[cfg(unix)]
 fn accounts_are_local(nsswitch: &str) -> bool {
-    let mut seen = [false; 3];
+    let mut seen = [false; 4];
     for line in nsswitch.lines() {
         let line = line.split('#').next().unwrap_or("").trim();
         let Some((database, sources)) = line.split_once(':') else {
@@ -2071,6 +2071,8 @@ fn accounts_are_local(nsswitch: &str) -> bool {
             // is stated it must be local too, and an absent line follows
             // `group`.
             "initgroups" => 2,
+            // The subordinate id provider must be local too (`/etc/subgid`).
+            "subid" => 3,
             _ => continue,
         };
         seen[index] = true;
@@ -2122,6 +2124,7 @@ fn gid_is_delegated(subgid: &str, gid: u32) -> bool {
 fn private_group_in(passwd: &str, group: &str, uid: u32) -> Option<u32> {
     let mut user = None;
     let mut others_with_gid = Vec::new();
+    let mut names = std::collections::HashSet::new();
     for line in passwd.lines() {
         let fields: Vec<&str> = line.split(':').collect();
         if line.trim().is_empty() || line.starts_with('#') {
@@ -2136,6 +2139,11 @@ fn private_group_in(passwd: &str, group: &str, uid: u32) -> Option<u32> {
         else {
             return None;
         };
+        // A second record under the same name would resolve to this group's
+        // member entry as well.
+        if !names.insert(fields[0]) {
+            return None;
+        }
         if entry_uid == uid {
             if user.is_some() {
                 return None;
