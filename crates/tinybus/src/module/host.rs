@@ -2098,12 +2098,17 @@ fn private_group_in(passwd: &str, group: &str, uid: u32) -> Option<u32> {
     let mut others_with_gid = Vec::new();
     for line in passwd.lines() {
         let fields: Vec<&str> = line.split(':').collect();
-        if fields.len() < 4 {
+        if line.trim().is_empty() || line.starts_with('#') {
             continue;
+        }
+        // A record that cannot be read could be the account that shares the
+        // gid, so any malformed line makes the whole answer unavailable.
+        if fields.len() < 4 {
+            return None;
         }
         let (Ok(entry_uid), Ok(entry_gid)) = (fields[2].parse::<u32>(), fields[3].parse::<u32>())
         else {
-            continue;
+            return None;
         };
         if entry_uid == uid {
             if user.is_some() {
@@ -2139,6 +2144,7 @@ fn private_group_in(passwd: &str, group: &str, uid: u32) -> Option<u32> {
 const SYSTEMD_USER_RECORD_DIRECTORIES: &[&str] = &[
     "/etc/userdb",
     "/run/userdb",
+    "/run/systemd/userdb",
     "/run/host/userdb",
     "/usr/lib/userdb",
     "/var/lib/systemd/home",

@@ -1616,6 +1616,11 @@ fn the_user_private_group_rule_reads_local_accounts_and_proves_exclusivity() {
     // A primary group not named after the user is shared (`users`).
     let users = "alice:x:1000:100::/home/alice:/bin/sh\n";
     assert_eq!(private_group_in(users, "users:x:100:\n", 1_000), None);
+    // A malformed record could be the account that shares the gid.
+    assert_eq!(
+        private_group_in(&format!("{passwd}broken-line\n"), group, 1_000),
+        None
+    );
     // Unknown account, missing group, or duplicate group entries prove nothing.
     assert_eq!(private_group_in(passwd, group, 4_242), None);
     assert_eq!(private_group_in(passwd, "root:x:0:\n", 1_000), None);
@@ -1659,10 +1664,10 @@ fn a_directory_counts_as_empty_only_when_missing_or_without_entries() {
 #[test]
 fn a_plain_directory_has_no_extended_acl() {
     let directory = tempfile::tempdir().unwrap();
-    // tmpfs and ext4 answer ENODATA; a filesystem without ACL support answers
-    // ENOTSUP. Either way the probe must not misreport a plain directory,
-    // unless the filesystem refuses the query for another reason.
-    let _ = has_extended_acl(directory.path());
+    assert!(
+        !has_extended_acl(directory.path()),
+        "a plain directory must not be reported as ACL-bearing"
+    );
     assert!(has_extended_acl(&directory.path().join("missing")));
 }
 
