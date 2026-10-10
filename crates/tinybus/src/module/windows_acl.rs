@@ -44,7 +44,8 @@ pub(super) fn ace_grants_untrusted_write(
 }
 
 /// Whether a directory may be rewritten by the repair pass: it is a real
-/// directory (not a link), this user owns it, and the gate would refuse it.
+/// directory (not a link), this user (or the Administrators group, the owner of
+/// what an elevated administrator creates) owns it, and the gate would refuse it.
 /// Anything else is left for the gate to judge.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(super) fn should_repair(is_real_dir: bool, owned_by_current_user: bool, refused: bool) -> bool {
@@ -308,7 +309,7 @@ mod win32 {
         if !is_real_dir {
             return;
         }
-        let owned = owned_by_current_user(directory);
+        let owned = owned_by_current_user_or_admins(directory);
         let refused = owned
             && super::super::host::windows_path_grants_untrusted_write(directory).unwrap_or(false);
         if !should_repair(is_real_dir, owned, refused) {
@@ -347,7 +348,16 @@ mod win32 {
         }
     }
 
-    fn owned_by_current_user(directory: &Path) -> bool {
+    /// BUILTIN\\Administrators. An elevated administrator's token makes the
+    /// group, not the user, the owner of everything it creates, so a cache that
+    /// user made is owned by this SID.
+    const ADMINISTRATORS_SID: &str = "S-1-5-32-544";
+
+    /// Whether the directory's owner is the current user, or the Administrators
+    /// group (the default owner of what an elevated administrator creates).
+    /// Rewriting the DACL still needs WRITE_DAC, so another account's directory
+    /// stays untouched: the call fails and the gate's verdict stands.
+    fn owned_by_current_user_or_admins(directory: &Path) -> bool {
         let Some((_buffer, user)) = current_user() else {
             return false;
         };
@@ -369,7 +379,9 @@ mod win32 {
         if status != 0 || descriptor.is_null() {
             return false;
         }
-        let same = !owner.is_null() && unsafe { EqualSid(owner, user) } != 0;
+        let same = !owner.is_null()
+            && (unsafe { EqualSid(owner, user) } != 0
+                || sid_string(owner).as_deref() == Some(ADMINISTRATORS_SID));
         unsafe { LocalFree(descriptor) };
         same
     }

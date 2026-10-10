@@ -145,6 +145,15 @@ fn icacls_grant(path: &Path, grant: &str) {
 }
 
 #[cfg(windows)]
+fn icacls_show(path: &Path) -> String {
+    let output = std::process::Command::new("icacls")
+        .arg(path)
+        .output()
+        .expect("icacls is installed on Windows");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[cfg(windows)]
 use super::super::host::windows_path_grants_untrusted_write as refused;
 
 #[cfg(windows)]
@@ -174,7 +183,11 @@ fn a_cache_inheriting_a_group_write_grant_is_repaired() {
 
     secure_release_cache(install.path(), &cache);
 
-    assert!(!refused(&cache).unwrap(), "the repaired cache is accepted");
+    assert!(
+        !refused(&cache).unwrap(),
+        "the repaired cache is accepted; its ACL is now: {}",
+        icacls_show(&cache)
+    );
 }
 
 #[cfg(windows)]
@@ -185,4 +198,17 @@ fn a_directory_outside_the_install_root_is_left_alone() {
     icacls_grant(other.path(), "*S-1-1-0:(OI)(CI)(M)");
     secure_release_cache(install.path(), other.path());
     assert!(refused(other.path()).unwrap(), "the gate still decides it");
+}
+
+#[cfg(not(windows))]
+#[test]
+fn off_windows_private_creation_is_plain_create_dir_all_and_repair_is_a_no_op() {
+    let root = tempfile::tempdir().unwrap();
+    let nested = root.path().join("a").join("b");
+    create_private_dir_all(&nested).unwrap();
+    assert!(nested.is_dir());
+    // Idempotent on an existing tree.
+    create_private_dir_all(&nested).unwrap();
+    secure_release_cache(root.path(), &nested);
+    assert!(nested.is_dir());
 }
