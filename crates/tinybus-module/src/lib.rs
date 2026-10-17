@@ -1013,19 +1013,43 @@ where
 /// Existing `setup = function` and `setup_factory` callbacks retain their behavior.
 #[macro_export]
 macro_rules! module_export {
-    (@linked) => {
+    (@linked $($declaration:tt)*) => {
+        $crate::module_export!(@linked_find_threads [] $($declaration)*);
+    };
+    (@linked_find_threads [$($prefix:tt)*] worker_threads = $threads:expr, $($rest:tt)*) => {
+        $crate::module_export!(@linked_impl $threads);
+    };
+    (@linked_find_threads [$($prefix:tt)*] worker_threads = $threads:expr $(,)?) => {
+        $crate::module_export!(@linked_impl $threads);
+    };
+    (@linked_find_threads [$($prefix:tt)*] $head:tt $($rest:tt)*) => {
+        $crate::module_export!(@linked_find_threads [$($prefix)* $head] $($rest)*);
+    };
+    (@linked_impl $threads:expr) => {
         /// Entry points and parsed manifest for a host that links this module.
         ///
         /// # Errors
         /// Returns an error if the generated manifest is invalid.
         pub fn linked_module() -> ::tinybus::Result<::tinybus::module::LinkedModule> {
             unsafe {
-                ::tinybus::module::LinkedModule::from_exports(
+                ::tinybus::module::LinkedModule::from_exports_with_setup(
                     &TINYBUS_MODULE_ABI_V1,
                     tinybus_module_manifest_v1,
                     tinybus_module_init_v1,
+                    tinybus_module_init_with_setup_v1,
                 )
             }
+        }
+
+        /// Rust-only initializer used when a host supplies per-attachment
+        /// setup state. It replaces this export's default setup callback.
+        #[doc(hidden)]
+        pub unsafe fn tinybus_module_init_with_setup_v1(
+            host: *const ::tinybus::module::abi::TbHostVtable,
+            out: *mut ::tinybus::module::abi::TbModuleVtable,
+            setup: ::tinybus::module::LinkedSetup,
+        ) -> i32 {
+            unsafe { $crate::start_linked_module(host, out, $threads, true, setup) }
         }
     };
     (@common
@@ -1208,7 +1232,7 @@ macro_rules! module_export_static {
             start = $crate::start_linked_terminal_reconfigurable_module_with_factory,
             setup = $factory, config = $config, $($rest)*
         }
-        $crate::module_export! { @linked }
+        $crate::module_export! { @linked $($rest)* }
     };
     (setup_factory = $factory:path, config = $config:ty, $($rest:tt)*) => {
         $crate::module_export! {
@@ -1218,7 +1242,7 @@ macro_rules! module_export_static {
             config = $config,
             $($rest)*
         }
-        $crate::module_export! { @linked }
+        $crate::module_export! { @linked $($rest)* }
     };
     (setup = $setup:path, config = $config:ty, $($rest:tt)*) => {
         $crate::module_export! {
@@ -1228,7 +1252,7 @@ macro_rules! module_export_static {
             config = $config,
             $($rest)*
         }
-        $crate::module_export! { @linked }
+        $crate::module_export! { @linked $($rest)* }
     };
     (setup = $setup:path, $($rest:tt)*) => {
         $crate::module_export! {
@@ -1237,7 +1261,7 @@ macro_rules! module_export_static {
             setup = $setup,
             $($rest)*
         }
-        $crate::module_export! { @linked }
+        $crate::module_export! { @linked $($rest)* }
     };
 }
 
@@ -1263,6 +1287,10 @@ mod tests;
 #[cfg(test)]
 #[path = "static_link_tests.rs"]
 mod static_link_tests;
+
+#[cfg(test)]
+#[path = "lib_linked_setup_tests.rs"]
+mod linked_setup_tests;
 
 #[cfg(test)]
 #[path = "lib_setup_factory_tests.rs"]

@@ -209,11 +209,31 @@ async fn linked_module_is_admitted_without_a_library_file_and_attested_as_host_c
                 descriptor: TbAbiDescriptor::current("clock", "0.1.0"),
                 manifest: module_manifest,
                 init: lazy_echo_init,
+                init_with_setup: None,
             },
             serde_json::json!({}),
         )
         .unwrap();
     assert_eq!(info.state, ModuleState::Resolved);
+
+    // Identity comes from the module's broker-assigned unique peer. A
+    // well-known alias is only a routing name and must never resolve as a
+    // module sender.
+    let unique = host.inner.loaded.lock().unwrap()[0].unique_name.clone();
+    let lookup = host.sender_lookup();
+    let module_id = host
+        .module_for_sender(&unique)
+        .expect("an admitted module resolves from its unique peer");
+    assert_eq!(module_id.as_str(), "clock");
+    assert_eq!(
+        lookup
+            .module_for_sender(&unique)
+            .as_ref()
+            .map(ModuleId::as_str),
+        Some("clock")
+    );
+    assert!(host.module_for_sender(&info.manifest.bus_name).is_none());
+    assert!(lookup.module_for_sender(&info.manifest.bus_name).is_none());
 
     let connection = Connection::connect(bus.connect().await.unwrap())
         .await
@@ -228,7 +248,51 @@ async fn linked_module_is_admitted_without_a_library_file_and_attested_as_host_c
         attestation.sha256,
         crate::module::sha256_file(executable).unwrap()
     );
+
+    let alias: crate::BusName = "ai.tinyhumans.test.ModuleAliasHandover".parse().unwrap();
+    let first_owner = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    first_owner.request_name(alias.as_str()).await.unwrap();
+    assert!(host.module_for_sender(&alias).is_none());
+    drop(first_owner);
+    let replacement_owner = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    replacement_owner
+        .request_name(alias.as_str())
+        .await
+        .unwrap();
+    assert!(host.module_for_sender(&alias).is_none());
+    assert_eq!(
+        host.module_for_sender(&unique)
+            .expect("alias handover does not change module identity")
+            .as_str(),
+        "clock"
+    );
+
+    host.inner
+        .stop(&info.name, Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert!(host.module_for_sender(&unique).is_none());
+    assert!(lookup.module_for_sender(&unique).is_none());
     broker_task.abort();
+}
+
+#[test]
+fn an_owned_sender_lookup_does_not_keep_its_host_alive() {
+    let host = ModuleHost::new(Broker::new());
+    let observed_lifetime = std::sync::Arc::downgrade(&host.inner);
+    let lookup = host.sender_lookup();
+    let peer: crate::BusName = ":1.4242".parse().unwrap();
+
+    assert_eq!(observed_lifetime.strong_count(), 1);
+    assert!(lookup.module_for_sender(&peer).is_none());
+    drop(host);
+
+    assert_eq!(observed_lifetime.strong_count(), 0);
+    assert!(lookup.module_for_sender(&peer).is_none());
 }
 
 #[test]
@@ -251,6 +315,7 @@ fn linked_module_with_an_unmet_required_interface_is_refused_before_init() {
                 descriptor: TbAbiDescriptor::current("clock", "0.1.0"),
                 manifest: module_manifest,
                 init: init_that_must_not_run,
+                init_with_setup: None,
             },
             serde_json::json!({}),
         )

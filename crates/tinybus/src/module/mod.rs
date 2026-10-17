@@ -62,7 +62,7 @@ pub use host::callbacks::{
     HostCallbackSignal,
 };
 #[cfg(feature = "modules")]
-pub use host::{ModuleHost, ModuleInfo, ModuleState, SearchPathConfig};
+pub use host::{ModuleHost, ModuleInfo, ModuleSenderLookup, ModuleState, SearchPathConfig};
 #[cfg(feature = "modules")]
 pub use reconfigure::{ConfigFingerprint, ReconfigurableModule, Reconfigure, ReconfigureGuard};
 pub use release::{ReleaseAsset, ReleaseRecord};
@@ -73,7 +73,30 @@ pub use resolve::{
     resolve_bundled_dir, set_bundled_releases_dir,
 };
 #[cfg(feature = "modules")]
-pub use runtime::{ModuleRuntime, RuntimeNames, RuntimeSetup};
+pub use runtime::{
+    HostObjectGuard, LinkedModuleInitWithSetup, LinkedSetup, ModuleRuntime, RuntimeNames,
+    RuntimeSetup,
+};
+
+/// Stable, validated identifier of one admitted module package.
+///
+/// This is independent of a module's display summary and bus aliases. It is
+/// derived from the canonical module identity in the admitted manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ModuleId(String);
+
+impl ModuleId {
+    #[cfg(feature = "modules")]
+    pub(crate) fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    /// The canonical module package identifier.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 /// Entry points compiled into the host instead of loaded from a shared library.
 ///
@@ -87,6 +110,11 @@ pub struct LinkedModule {
     pub manifest: manifest::ModuleManifest,
     /// Process-lifetime initialization entry point.
     pub init: abi::TbModuleInit,
+    /// Rust-only initializer that accepts a per-attachment setup callback.
+    /// Generated only for statically linked exports. Dynamic modules have no
+    /// such hook and continue through the unchanged C ABI initializer.
+    #[doc(hidden)]
+    pub init_with_setup: Option<LinkedModuleInitWithSetup>,
 }
 
 #[cfg(feature = "modules")]
@@ -118,7 +146,28 @@ impl LinkedModule {
             descriptor: *descriptor,
             manifest,
             init,
+            init_with_setup: None,
         })
+    }
+
+    /// Construct a linked export with a Rust-only per-instance setup entrypoint.
+    ///
+    /// # Errors
+    /// Returns an error for an incompatible descriptor or malformed manifest.
+    ///
+    /// # Safety
+    /// The safety requirements are identical to [`Self::from_exports`], and
+    /// `init_with_setup` must be generated for this exact linked module.
+    #[doc(hidden)]
+    pub unsafe fn from_exports_with_setup(
+        descriptor: &abi::TbAbiDescriptor,
+        manifest: unsafe extern "C" fn() -> abi::TbSlice,
+        init: abi::TbModuleInit,
+        init_with_setup: LinkedModuleInitWithSetup,
+    ) -> crate::Result<Self> {
+        let mut module = unsafe { Self::from_exports(descriptor, manifest, init)? };
+        module.init_with_setup = Some(init_with_setup);
+        Ok(module)
     }
 }
 

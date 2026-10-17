@@ -440,7 +440,7 @@ impl ModuleTransport {
         self.context.admission_closed.load(Ordering::Acquire)
     }
 
-    fn is_stopped(&self) -> bool {
+    pub(crate) fn is_stopped(&self) -> bool {
         self.context.stopped.load(Ordering::Acquire)
     }
 
@@ -695,6 +695,21 @@ impl ModuleTransport {
         init: crate::module::abi::TbModuleInit,
         host: TbHostVtable,
     ) -> Result<()> {
+        self.eager_initialize_with(host, move |host| {
+            let mut module = TbModuleVtable::default();
+            let code = unsafe { init(&host, &mut module) };
+            if code == TB_OK {
+                Ok(module)
+            } else {
+                Err("module initialization failed".to_string())
+            }
+        })
+    }
+
+    pub(crate) fn eager_initialize_with<F>(&self, host: TbHostVtable, initialize: F) -> Result<()>
+    where
+        F: FnOnce(TbHostVtable) -> std::result::Result<TbModuleVtable, String>,
+    {
         let guard = self.lifecycle.clone().try_lock_owned().map_err(|_| {
             self.commit_terminal(true);
             self.context
@@ -710,13 +725,9 @@ impl ModuleTransport {
             .expect("physical state lock")
             .init = InitState::Entered;
         self.context.init_started.store(true, Ordering::Release);
-        let mut module = TbModuleVtable::default();
-        let code = unsafe { init(&host, &mut module) };
-        let result = if code == TB_OK {
-            self.initialize(module)
-        } else {
-            Err(Error::transport("module initialization failed"))
-        };
+        let result = initialize(host)
+            .map_err(Error::transport)
+            .and_then(|module| self.initialize(module));
         self.clear_config();
         {
             let mut state = self.context.physical.lock().expect("physical state lock");

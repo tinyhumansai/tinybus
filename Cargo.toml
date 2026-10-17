@@ -11,16 +11,16 @@ exclude = ["examples"]
 resolver = "3"
 
 [workspace.package]
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
 license = "GPL-3.0-only"
 repository = "https://github.com/tinyhumansai/tinybus"
 
 [workspace.dependencies]
-tinybus = { path = "crates/tinybus", version = "=0.2.2", default-features = false }
-tinybus-macros = { path = "crates/tinybus-macros", version = "=0.2.2" }
-tinybus-module = { path = "crates/tinybus-module", version = "=0.2.2" }
+tinybus = { path = "crates/tinybus", version = "=0.3.0", default-features = false }
+tinybus-macros = { path = "crates/tinybus-macros", version = "=0.3.0" }
+tinybus-module = { path = "crates/tinybus-module", version = "=0.3.0" }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 
 async-trait = "0.1"

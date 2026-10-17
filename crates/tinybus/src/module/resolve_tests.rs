@@ -449,6 +449,7 @@ mod resolver {
                 descriptor: crate::module::abi::TbAbiDescriptor::current("impostor", "1.0.0"),
                 manifest: super::module("Impostor", &[], &[]),
                 init: never_initialised,
+                init_with_setup: None,
             })
         }
         let record = record("resolver-linked-impostor");

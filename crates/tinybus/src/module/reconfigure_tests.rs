@@ -424,6 +424,7 @@ async fn fixture_with_sink(sink: Arc<dyn FailureSink>) -> FixtureAccess {
             descriptor: TbAbiDescriptor::current(ID, "0.0.0"),
             manifest: fixture_manifest(),
             init: fixture_init,
+            init_with_setup: None,
         },
         serde_json::Value::Null,
     )
@@ -512,6 +513,7 @@ async fn lazy_fixture(
             } else {
                 fixture_init
             },
+            init_with_setup: None,
         },
         serde_json::Value::Null,
     )
@@ -673,6 +675,7 @@ async fn fixture_with_unattested_destination() -> (FixtureAccess, Arc<AtomicUsiz
             descriptor: TbAbiDescriptor::current(ID, "0.0.0"),
             manifest: fixture_manifest(),
             init: fixture_init,
+            init_with_setup: None,
         },
         serde_json::Value::Null,
     )
@@ -919,6 +922,7 @@ async fn resolver_reconfigures_a_lazy_linked_module_before_its_first_call() {
                 descriptor: TbAbiDescriptor::current(ID, "0.0.0"),
                 manifest,
                 init: fixture_init,
+                init_with_setup: None,
             },
             serde_json::Value::Null,
         )

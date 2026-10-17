@@ -134,6 +134,7 @@ async fn resolver_access_forwards_runtime_proxy_lifecycle_and_fault_operations()
                 descriptor: TbAbiDescriptor::current(ID, "0.0.0"),
                 manifest: manifest(),
                 init: initialize,
+                init_with_setup: None,
             },
             serde_json::Value::Null,
         )
