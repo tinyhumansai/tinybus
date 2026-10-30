@@ -38,3 +38,10 @@ allocating for it — the length arrives before the bytes do.
 - An error body is the message *without* the dotted name, which lives in
   `error_name`. Including it would make an error accrete a prefix each time it
   crossed the bus.
+- Module lifecycle metadata is an optional closed header field on
+  `MODULE_UNAVAILABLE` errors. `initializing` is preserved as typed state while
+  the dotted error name and body remain unchanged; older peers ignore the field
+  and classify the error as unavailable. Unknown lifecycle values are ignored
+  for lifecycle classification, so a `MODULE_UNAVAILABLE` error keeps its
+  legacy unavailable meaning. Metadata on another error name or message kind
+  never changes that message's classification.

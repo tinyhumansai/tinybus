@@ -156,6 +156,11 @@ struct SlotLease {
     admission: Weak<Admission>,
     index: usize,
 }
+#[cfg(test)]
+pub(super) struct AnchorRemovalGate {
+    pub(super) entered: std::sync::Barrier,
+    pub(super) release: std::sync::Barrier,
+}
 impl Drop for SlotLease {
     fn drop(&mut self) {
         if let Some(admission) = self.admission.upgrade() {
@@ -302,6 +307,10 @@ pub(super) struct TerminalState {
     startup_failure_stage: AtomicU8,
     #[cfg(any(test, feature = "__native-fixture-support"))]
     transport_drop_thread: StdMutex<Option<String>>,
+    #[cfg(test)]
+    before_anchor_removal: StdMutex<Option<Arc<AnchorRemovalGate>>>,
+    #[cfg(test)]
+    initial_future_restored: tokio::sync::Notify,
     lease: SlotLease,
     token: usize,
 }
@@ -402,6 +411,10 @@ impl TerminalState {
             startup_failure_stage: AtomicU8::new(0),
             #[cfg(any(test, feature = "__native-fixture-support"))]
             transport_drop_thread: StdMutex::new(None),
+            #[cfg(test)]
+            before_anchor_removal: StdMutex::new(None),
+            #[cfg(test)]
+            initial_future_restored: tokio::sync::Notify::new(),
             lease: SlotLease {
                 admission: Arc::downgrade(admission),
                 index,
@@ -441,19 +454,10 @@ impl TerminalState {
         self.vtable_published.store(true, Ordering::Release);
     }
     pub fn retain_uncertain_anchor(self: &Arc<Self>) {
-        self.uncertain.store(true, Ordering::Release);
-        if let Some(admission) = self.lease.admission.upgrade() {
-            let mut slots = admission
-                .slots
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let slot = &mut slots[self.lease.index];
-            // This State's still-live lease forbids reuse while a C callback or
-            // retained view performs the final genuine-fault recheck.
-            if slot.generation == self.token >> 8 && slot.anchor.is_none() {
-                slot.anchor = Some(self.clone());
-            }
-        }
+        let mut control = self.lock();
+        self.record_uncertain_locked(&mut control);
+        drop(control);
+        self.changed.notify_all();
     }
     pub fn view(self: &Arc<Self>) -> NativeInstanceLiveness {
         NativeInstanceLiveness {
@@ -468,6 +472,14 @@ impl TerminalState {
     }
     pub fn is_terminal(&self) -> bool {
         self.reason.load(Ordering::Acquire) != 0
+    }
+    #[cfg(test)]
+    pub async fn wait_initial_future_restored_for_test(&self) {
+        self.initial_future_restored.notified().await;
+    }
+    #[cfg(test)]
+    pub(super) fn initial_future_restored_for_test(&self) {
+        self.initial_future_restored.notify_one();
     }
     pub fn is_live(self: &Arc<Self>) -> bool {
         if self.is_terminal() {
@@ -534,20 +546,48 @@ impl TerminalState {
         // Atomic authority fence must precede payload-cell locks and foreign Drop.
         self.host.fault();
         self.commit(TerminalReason::Fault);
-        self.uncertain.store(true, Ordering::Release);
+        self.retain_uncertain_anchor();
         self.keep_payload(kind, payload);
         self.run_request();
         self.schedule();
     }
-    fn lock(&self) -> std::sync::MutexGuard<'_, Control> {
-        self.control.lock().unwrap_or_else(|poison| {
-            self.host.fault();
-            self.commit(TerminalReason::Fault);
-            self.uncertain.store(true, Ordering::Release);
-            poison.into_inner()
-        })
+    fn lock(self: &Arc<Self>) -> std::sync::MutexGuard<'_, Control> {
+        match self.control.lock() {
+            Ok(control) => control,
+            Err(poison) => {
+                let mut control = poison.into_inner();
+                self.record_uncertain_locked(&mut control);
+                drop(control);
+                self.changed.notify_all();
+                // Host callbacks are foreign code and must run after releasing
+                // Control. Uncertainty and its anchor were recorded first.
+                self.host.fault();
+                self.commit(TerminalReason::Fault);
+                self.control
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            }
+        }
     }
-    fn keep_payload(&self, kind: PayloadKind, payload: Payload) {
+    fn record_uncertain_locked(self: &Arc<Self>, control: &mut Control) {
+        self.uncertain.store(true, Ordering::Release);
+        if control.completion == Some(TerminalCompletion::PhysicallyStopped) {
+            control.completion = Some(TerminalCompletion::Uncertain);
+        }
+        if let Some(admission) = self.lease.admission.upgrade() {
+            let mut slots = admission
+                .slots
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let slot = &mut slots[self.lease.index];
+            // This State's still-live lease forbids reuse while a C callback or
+            // retained view performs the final genuine-fault recheck.
+            if slot.generation == self.token >> 8 && slot.anchor.is_none() {
+                slot.anchor = Some(self.clone());
+            }
+        }
+    }
+    fn keep_payload(self: &Arc<Self>, kind: PayloadKind, payload: Payload) {
         let mut control = self.lock();
         let cell = control.payloads.cell(kind);
         // Once/terminal admission prevents a second primary in this category.
@@ -591,8 +631,10 @@ impl TerminalState {
             Err(payload) => {
                 self.host.fault();
                 self.commit(TerminalReason::Fault);
-                self.uncertain.store(true, Ordering::Release);
-                self.lock().request_state = RequestState::Panicked;
+                let mut control = self.lock();
+                self.record_uncertain_locked(&mut control);
+                control.request_state = RequestState::Panicked;
+                drop(control);
                 self.changed.notify_all();
                 self.keep_payload(PayloadKind::Request, payload);
             }
@@ -606,7 +648,7 @@ impl TerminalState {
             self.schedule();
         }
     }
-    pub fn begin_reinit(&self) -> bool {
+    pub fn begin_reinit(self: &Arc<Self>) -> bool {
         let mut control = self.lock();
         if self.is_terminal() || control.active_reinit {
             return false;
@@ -614,7 +656,7 @@ impl TerminalState {
         control.active_reinit = true;
         true
     }
-    pub fn end_reinit(&self) {
+    pub fn end_reinit(self: &Arc<Self>) {
         self.lock().active_reinit = false;
         self.changed.notify_all();
     }
@@ -714,9 +756,26 @@ impl TerminalState {
         self.sdk_owners.load(Ordering::Acquire)
     }
     #[cfg(any(test, feature = "__native-fixture-support"))]
-    pub(super) fn request_done_for_test(&self) -> bool {
+    pub(super) fn request_done_for_test(self: &Arc<Self>) -> bool {
         matches!(
             self.lock().request_state,
+            RequestState::Done | RequestState::Panicked
+        )
+    }
+    #[cfg(test)]
+    pub(super) fn wait_request_done_for_test(self: &Arc<Self>, timeout: Duration) -> bool {
+        let control = self.lock();
+        let (control, _) = self
+            .changed
+            .wait_timeout_while(control, timeout, |control| {
+                !matches!(
+                    control.request_state,
+                    RequestState::Done | RequestState::Panicked
+                )
+            })
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        matches!(
+            control.request_state,
             RequestState::Done | RequestState::Panicked
         )
     }
@@ -750,8 +809,8 @@ impl TerminalState {
                 .spawn(move || job.run(state))
         };
         if submitted.is_err() {
-            self.uncertain.store(true, Ordering::Release);
             let mut control = self.lock();
+            self.record_uncertain_locked(&mut control);
             control.finish_state = FinishState::SpawnFailed;
             control.completion = Some(TerminalCompletion::Uncertain);
             drop(control);
@@ -761,22 +820,33 @@ impl TerminalState {
             self.run_request();
         }
     }
-    fn remove_anchor(&self) {
+    fn take_anchor(&self) -> Option<Arc<Self>> {
         if let Some(admission) = self.lease.admission.upgrade() {
-            let anchor = {
-                let mut slots = admission
-                    .slots
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                slots[self.lease.index].anchor.take()
-            };
-            drop(anchor);
+            let mut slots = admission
+                .slots
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            slots[self.lease.index].anchor.take()
+        } else {
+            None
+        }
+    }
+    #[cfg(test)]
+    fn pause_before_anchor_removal_for_test(&self) {
+        let gate = self
+            .before_anchor_removal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(gate) = gate {
+            gate.entered.wait();
+            gate.release.wait();
         }
     }
     pub fn empty_factory_failure(self: &Arc<Self>) {
         // No callable/controller was transferred. Retained views still hold the permit.
         self.commit(TerminalReason::SetupFailed);
-        self.remove_anchor();
+        drop(self.take_anchor());
     }
     fn run_finish(self: &Arc<Self>) {
         let _scope = self.owner.as_ref().map(ExecutionOwner::enter);
@@ -877,23 +947,36 @@ impl TerminalState {
             false
         };
         self.observe_host();
-        if !released || (self.has_fault() && self.vtable_published.load(Ordering::Acquire)) {
-            self.uncertain.store(true, Ordering::Release);
+        let failed_final_checks =
+            !released || (self.has_fault() && self.vtable_published.load(Ordering::Acquire));
+        // Let a concurrent deadline/fault retain its uncertainty before taking
+        // the finalization lock. The lock below linearizes anchor retirement and
+        // completion publication against that re-anchor operation.
+        #[cfg(test)]
+        if completed == TerminalCompletion::PhysicallyStopped && !failed_final_checks {
+            self.pause_before_anchor_removal_for_test();
+        }
+        let mut control = self.lock();
+        if failed_final_checks {
+            self.record_uncertain_locked(&mut control);
         }
         let completion = if self.uncertain.load(Ordering::Acquire) {
             TerminalCompletion::Uncertain
         } else {
             completed
         };
-        {
-            let mut control = self.lock();
-            control.finish_state = FinishState::Complete;
-            control.completion = Some(completion);
-        }
+        let removed_anchor = if completion == TerminalCompletion::PhysicallyStopped {
+            // Control -> registry is the common order with timeout retention.
+            // Keep the removed strong reference until after both locks are free.
+            self.take_anchor()
+        } else {
+            None
+        };
+        control.finish_state = FinishState::Complete;
+        control.completion = Some(completion);
+        drop(control);
+        drop(removed_anchor);
         self.changed.notify_all();
-        if completion == TerminalCompletion::PhysicallyStopped {
-            self.remove_anchor();
-        }
     }
     fn settle_execution(self: &Arc<Self>) -> bool {
         let (initial, handle) = {
@@ -933,7 +1016,7 @@ impl TerminalState {
         }
         true
     }
-    fn dispose_setup(&self) {
+    fn dispose_setup(self: &Arc<Self>) {
         // The worker already observed active_reinit=false. Every last capture
         // is taken mechanically and destroyed after all bookkeeping unlocks.
         let (reinitialize, future, reinit_future) = {
@@ -1040,10 +1123,10 @@ impl TerminalState {
     pub fn has_fault(&self) -> bool {
         self.reason.load(Ordering::Acquire) >= 3
     }
-    pub fn mark_uncertain(&self) {
-        self.uncertain.store(true, Ordering::Release);
+    pub fn mark_uncertain(self: &Arc<Self>) {
+        self.retain_uncertain_anchor();
     }
-    pub fn wait(&self, deadline: Duration) -> TerminalCompletion {
+    pub fn wait(self: &Arc<Self>, deadline: Duration) -> TerminalCompletion {
         let control = self.lock();
         let (control, _) = self
             .changed

@@ -23,8 +23,8 @@ use tinybus::module::abi::{
     TB_BACKPRESSURE, TB_BAD_ARGUMENT, TB_CLOSED, TB_MODULE_VTABLE_BASE_SIZE, TB_OK, TB_PANICKED,
     TB_TIMEOUT, TbHostVtable, TbModuleVtable, TbModuleVtableV1Prefix,
 };
-use tinybus::{Connection, Error, Result, Transport};
-use tokio::sync::{Mutex, mpsc};
+use tinybus::{BusName, CallContext, Connection, Error, Result, Transport, WeakConnection};
+use tokio::sync::{Mutex, mpsc, watch};
 
 mod terminal;
 pub use terminal::{NativeInstanceLiveness, RuntimeHooks, TerminalCompletion, TerminalReason};
@@ -200,6 +200,87 @@ impl HostCalls {
     fn ready(&self) {
         unsafe { (self.0.ready)(self.0.host_ctx) }
     }
+
+    fn trusted_host_peer(&self) -> Option<BusName> {
+        let query = self.0.trusted_host_binding?;
+        let mut bytes = [0_u8; tinybus::name::MAX_NAME_LEN];
+        let mut len = 0;
+        let code = unsafe { query(self.0.host_ctx, bytes.as_mut_ptr(), bytes.len(), &mut len) };
+        if code != TB_OK || len > bytes.len() {
+            return None;
+        }
+        let sender = std::str::from_utf8(&bytes[..len])
+            .ok()?
+            .parse::<BusName>()
+            .ok()?;
+        sender.is_unique().then_some(sender)
+    }
+}
+
+/// Setup-time connection and the optional SDK-issued migration-host binding.
+///
+/// Constructed only by the module runtime after its broker handshake. A
+/// migration module must reject `None` before registering storage leases or
+/// signaling ready.
+pub struct ModuleSetupContext {
+    connection: Connection,
+    trusted_host: Option<TrustedHost>,
+}
+
+impl ModuleSetupContext {
+    fn new(connection: Connection, grant: Option<TrustedHostGrant>) -> Self {
+        let trusted_host = grant.map(|grant| TrustedHost {
+            host: grant.host,
+            peer: grant.peer,
+            origin: connection.downgrade(),
+        });
+        Self {
+            connection,
+            trusted_host,
+        }
+    }
+
+    /// The module's broker-authenticated connection used for setup.
+    pub fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
+    /// The optional immutable migration-host capability for this attachment.
+    pub fn trusted_host(&self) -> Option<&TrustedHost> {
+        self.trusted_host.as_ref()
+    }
+}
+
+#[derive(Clone)]
+struct TrustedHostGrant {
+    host: HostCalls,
+    peer: BusName,
+}
+
+/// An SDK-issued, attachment-scoped authorization check for migration calls.
+///
+/// The capability has no public constructor or serialized representation. It
+/// stores only the initial unique peer, an opaque weak receiver identity, and
+/// the host callback used to confirm that the same peer remains live.
+#[derive(Clone)]
+pub struct TrustedHost {
+    host: HostCalls,
+    peer: BusName,
+    origin: WeakConnection,
+}
+
+impl TrustedHost {
+    /// Check a confidential call from the pinned controller on this exact
+    /// module connection, refreshing the loader binding on every decision.
+    pub fn authorizes(&self, context: &CallContext) -> bool {
+        if !context.is_confidential()
+            || !context.is_for_connection(&self.origin)
+            || context.authenticated_sender() != Some(&self.peer)
+        {
+            return false;
+        }
+        self.host.trusted_host_peer().as_ref() == Some(&self.peer)
+    }
 }
 
 struct HostSubscriber {
@@ -267,13 +348,21 @@ type IncomingFrame = (Vec<u8>, bool);
 struct ModuleTransport {
     host: HostCalls,
     inbound: Mutex<mpsc::Receiver<IncomingFrame>>,
+    closed: watch::Sender<bool>,
     provenance: Arc<AtomicBool>,
     detach_on_panic: bool,
+}
+
+fn close_signal() -> watch::Sender<bool> {
+    watch::channel(false).0
 }
 
 #[async_trait]
 impl Transport for ModuleTransport {
     async fn send(&self, message: Message) -> Result<()> {
+        if *self.closed.borrow() {
+            return Err(Error::ConnectionClosed);
+        }
         let panicked = message.header.error_name.as_deref() == Some(MODULE_PANIC_ERROR);
         let bytes = serde_json::to_vec(&message)?;
         if bytes.len() > MAX_FRAME_LEN {
@@ -293,20 +382,40 @@ impl Transport for ModuleTransport {
     }
 
     async fn recv(&self) -> Result<Option<Message>> {
-        let bytes = self.inbound.lock().await.recv().await;
-        let Some((bytes, brokered)) = bytes else {
-            return Ok(None);
-        };
-        self.host.wake();
-        let message = serde_json::from_slice(&bytes)?;
-        // The connection is the only reader and samples this slot immediately
-        // after recv. Keep header identity intact for stream ownership/routing;
-        // only contextual dispatch consumes the captured delivery authority.
-        self.provenance.store(brokered, Ordering::Release);
-        Ok(Some(message))
+        // Subscribe before taking the receiver lock, then recheck the current
+        // close intent under that lock. This closes the lost-wakeup window
+        // between a close request and waiting on the channel.
+        let mut closed = self.closed.subscribe();
+        let mut inbound = self.inbound.lock().await;
+        loop {
+            if *closed.borrow_and_update() {
+                inbound.close();
+            }
+            tokio::select! {
+                biased;
+                _ = closed.changed() => inbound.close(),
+                frame = inbound.recv() => {
+                    let Some((bytes, brokered)) = frame else {
+                        return Ok(None);
+                    };
+                    self.host.wake();
+                    let message = serde_json::from_slice(&bytes)?;
+                    // The connection is the only reader and samples this slot
+                    // immediately after recv. Keep header identity intact for
+                    // stream ownership/routing; only contextual dispatch
+                    // consumes the captured delivery authority.
+                    self.provenance.store(brokered, Ordering::Release);
+                    return Ok(Some(message));
+                }
+            }
+        }
     }
 
     async fn close(&self) -> Result<()> {
+        // Signal first: an idle recv owns the receiver mutex while waiting for
+        // a frame. It observes this intent, closes the channel, and releases
+        // the mutex, so close never needs another inbound delivery to proceed.
+        self.closed.send_replace(true);
         self.inbound.lock().await.close();
         Ok(())
     }
@@ -512,6 +621,49 @@ where
     }
 }
 
+/// Initialize the module runtime with its setup connection and loader binding.
+///
+/// This additive entry point leaves [`start_module`] and its
+/// `FnOnce(Connection)` contract unchanged. If the host does not provide a
+/// trusted binding, `ModuleSetupContext::trusted_host()` is `None`.
+///
+/// # Safety
+/// The host vtable must meet [`TbHostVtable::read_compatible`] requirements;
+/// the output buffer must satisfy [`start_module`] requirements.
+#[doc(hidden)]
+pub unsafe fn start_module_with_context<F, Fut>(
+    host: *const TbHostVtable,
+    out: *mut TbModuleVtable,
+    worker_threads: usize,
+    detach_on_panic: bool,
+    setup: F,
+) -> i32
+where
+    F: FnOnce(ModuleSetupContext) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<()>> + Send + 'static,
+{
+    let Some((_, compatible_host)) =
+        (unsafe { validate_start_arguments(host, out, worker_threads) })
+    else {
+        return TB_BAD_ARGUMENT;
+    };
+    let grant = HostCalls(compatible_host)
+        .trusted_host_peer()
+        .map(|peer| TrustedHostGrant {
+            host: HostCalls(compatible_host),
+            peer,
+        });
+    unsafe {
+        start_module(
+            host,
+            out,
+            worker_threads,
+            detach_on_panic,
+            move |connection| setup(ModuleSetupContext::new(connection, grant)),
+        )
+    }
+}
+
 /// Start a linked module without replacing the host's process-global hooks.
 ///
 /// # Safety
@@ -538,6 +690,44 @@ where
             setup,
             None,
             None,
+        )
+    }
+}
+
+/// Linked counterpart to [`start_module_with_context`].
+///
+/// # Safety
+/// The host vtable and output storage must satisfy [`start_module`] requirements.
+#[doc(hidden)]
+pub unsafe fn start_linked_module_with_context<F, Fut>(
+    host: *const TbHostVtable,
+    out: *mut TbModuleVtable,
+    worker_threads: usize,
+    detach_on_panic: bool,
+    setup: F,
+) -> i32
+where
+    F: FnOnce(ModuleSetupContext) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<()>> + Send + 'static,
+{
+    let Some((_, compatible_host)) =
+        (unsafe { validate_start_arguments(host, out, worker_threads) })
+    else {
+        return TB_BAD_ARGUMENT;
+    };
+    let grant = HostCalls(compatible_host)
+        .trusted_host_peer()
+        .map(|peer| TrustedHostGrant {
+            host: HostCalls(compatible_host),
+            peer,
+        });
+    unsafe {
+        start_linked_module(
+            host,
+            out,
+            worker_threads,
+            detach_on_panic,
+            move |connection| setup(ModuleSetupContext::new(connection, grant)),
         )
     }
 }
@@ -604,6 +794,7 @@ where
         let transport = Arc::new(ModuleTransport {
             host,
             inbound: Mutex::new(inbound_rx),
+            closed: close_signal(),
             provenance: Arc::new(AtomicBool::new(false)),
             detach_on_panic,
         });
@@ -807,6 +998,77 @@ where
     }
 }
 
+/// Initialize a configured module whose setup receives the host-bound context.
+///
+/// Reinitialization reuses the original host grant while constructing a fresh
+/// context for the active connection and each new configuration.
+///
+/// # Safety
+/// The caller must uphold the host, output, configuration, and routing contracts
+/// of [`start_module`].
+#[doc(hidden)]
+pub unsafe fn start_reconfigurable_module_with_context<C, F, Fut>(
+    host: *const TbHostVtable,
+    out: *mut TbModuleVtable,
+    worker_threads: usize,
+    detach_on_panic: bool,
+    setup: F,
+) -> i32
+where
+    C: serde::de::DeserializeOwned + Send + 'static,
+    F: Fn(ModuleSetupContext, C) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = Result<()>> + Send + 'static,
+{
+    let Some((_, compatible_host)) =
+        (unsafe { validate_start_arguments(host, out, worker_threads) })
+    else {
+        return TB_BAD_ARGUMENT;
+    };
+    let grant = HostCalls(compatible_host)
+        .trusted_host_peer()
+        .map(|peer| TrustedHostGrant {
+            host: HostCalls(compatible_host),
+            peer,
+        });
+    let setup =
+        move |connection, config| setup(ModuleSetupContext::new(connection, grant.clone()), config);
+    unsafe { start_reconfigurable_module(host, out, worker_threads, detach_on_panic, setup) }
+}
+
+/// Linked counterpart to [`start_reconfigurable_module_with_context`].
+///
+/// # Safety
+/// The caller must uphold the host, output, configuration, and routing contracts
+/// of [`start_module`].
+#[doc(hidden)]
+pub unsafe fn start_linked_reconfigurable_module_with_context<C, F, Fut>(
+    host: *const TbHostVtable,
+    out: *mut TbModuleVtable,
+    worker_threads: usize,
+    detach_on_panic: bool,
+    setup: F,
+) -> i32
+where
+    C: serde::de::DeserializeOwned + Send + 'static,
+    F: Fn(ModuleSetupContext, C) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = Result<()>> + Send + 'static,
+{
+    let Some((_, compatible_host)) =
+        (unsafe { validate_start_arguments(host, out, worker_threads) })
+    else {
+        return TB_BAD_ARGUMENT;
+    };
+    let grant = HostCalls(compatible_host)
+        .trusted_host_peer()
+        .map(|peer| TrustedHostGrant {
+            host: HostCalls(compatible_host),
+            peer,
+        });
+    let setup =
+        move |connection, config| setup(ModuleSetupContext::new(connection, grant.clone()), config);
+    unsafe { start_linked_reconfigurable_module(host, out, worker_threads, detach_on_panic, setup) }
+}
+
 unsafe fn start_reconfigurable_module_mode<C, F, Fut>(
     host: *const TbHostVtable,
     out: *mut TbModuleVtable,
@@ -826,7 +1088,7 @@ where
             out,
             worker_threads,
             detach_on_panic,
-            || setup,
+            |_| setup,
             linked,
         )
     }
@@ -858,7 +1120,7 @@ where
             out,
             worker_threads,
             detach_on_panic,
-            || shared_factory_setup(factory),
+            |_| shared_factory_setup(factory),
             false,
         )
     }
@@ -890,7 +1152,76 @@ where
             out,
             worker_threads,
             detach_on_panic,
-            || shared_factory_setup(factory),
+            |_| shared_factory_setup(factory),
+            true,
+        )
+    }
+}
+
+/// Initialize one configured instance with per-instance state and a fresh
+/// loader-bound setup context for initial setup and every reinitialization.
+///
+/// The host ABI is validated and the initial configuration is parsed before
+/// `factory` runs. The returned callback is shared across reinitialization;
+/// its own `Clone` behavior cannot reset captured state. Each invocation gets
+/// a new [`ModuleSetupContext`] for the active connection and the immutable
+/// trusted-host grant selected for this module instance.
+///
+/// # Safety
+/// Non-null pointers must address readable host ABI prefixes and writable
+/// output storage matching their declared sizes. Host callbacks and context
+/// must remain valid until runtime shutdown. Null pointers and invalid sizes
+/// or worker counts are rejected before configuration or factory evaluation.
+#[doc(hidden)]
+pub unsafe fn start_reconfigurable_module_with_context_factory<C, F, Fut>(
+    host: *const TbHostVtable,
+    out: *mut TbModuleVtable,
+    worker_threads: usize,
+    detach_on_panic: bool,
+    factory: impl FnOnce() -> F,
+) -> i32
+where
+    C: serde::de::DeserializeOwned + Send + 'static,
+    F: Fn(ModuleSetupContext, C) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<()>> + Send + 'static,
+{
+    unsafe {
+        start_reconfigurable_module_factory_mode(
+            host,
+            out,
+            worker_threads,
+            detach_on_panic,
+            |host_calls| shared_context_factory_setup(factory, host_calls),
+            false,
+        )
+    }
+}
+
+/// Linked counterpart to [`start_reconfigurable_module_with_context_factory`].
+///
+/// # Safety
+/// The caller must uphold the host, output, configuration, and routing
+/// contracts of [`start_module`].
+#[doc(hidden)]
+pub unsafe fn start_linked_reconfigurable_module_with_context_factory<C, F, Fut>(
+    host: *const TbHostVtable,
+    out: *mut TbModuleVtable,
+    worker_threads: usize,
+    detach_on_panic: bool,
+    factory: impl FnOnce() -> F,
+) -> i32
+where
+    C: serde::de::DeserializeOwned + Send + 'static,
+    F: Fn(ModuleSetupContext, C) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<()>> + Send + 'static,
+{
+    unsafe {
+        start_reconfigurable_module_factory_mode(
+            host,
+            out,
+            worker_threads,
+            detach_on_panic,
+            |host_calls| shared_context_factory_setup(factory, host_calls),
             true,
         )
     }
@@ -908,12 +1239,31 @@ where
     move |connection, config| setup(connection, config)
 }
 
+fn shared_context_factory_setup<C, F, Fut>(
+    factory: impl FnOnce() -> F,
+    host: HostCalls,
+) -> impl Fn(Connection, C) -> Fut + Clone + Send + Sync + 'static
+where
+    F: Fn(ModuleSetupContext, C) -> Fut + Send + Sync + 'static,
+{
+    let trusted_host = host
+        .trusted_host_peer()
+        .map(|peer| TrustedHostGrant { host, peer });
+    let setup = Arc::new(factory());
+    move |connection, config| {
+        setup(
+            ModuleSetupContext::new(connection, trusted_host.clone()),
+            config,
+        )
+    }
+}
+
 unsafe fn start_reconfigurable_module_factory_mode<C, F, Fut>(
     host: *const TbHostVtable,
     out: *mut TbModuleVtable,
     worker_threads: usize,
     detach_on_panic: bool,
-    factory: impl FnOnce() -> F,
+    factory: impl FnOnce(HostCalls) -> F,
     linked: bool,
 ) -> i32
 where
@@ -926,7 +1276,8 @@ where
     else {
         return TB_BAD_ARGUMENT;
     };
-    let caller_owner = (!linked).then(|| ExecutionOwner::new(HostCalls(compatible_host)));
+    let host_calls = HostCalls(compatible_host);
+    let caller_owner = (!linked).then(|| ExecutionOwner::new(host_calls));
     if caller_owner.is_some() {
         ExecutionOwner::install_panic_hook();
     }
@@ -937,7 +1288,7 @@ where
         Ok(Err(code)) => return code,
         Err(_) => return TB_PANICKED,
     };
-    let setup = match catch_unwind(AssertUnwindSafe(factory)) {
+    let setup = match catch_unwind(AssertUnwindSafe(|| factory(host_calls))) {
         Ok(setup) => setup,
         Err(_) => return TB_PANICKED,
     };
@@ -989,7 +1340,11 @@ where
 
 /// Export a tinybus module's descriptor, manifest and initialization entrypoint.
 ///
-/// ```ignore
+/// ```
+/// async fn setup(_: tinybus::Connection) -> tinybus::Result<()> {
+///     Ok(())
+/// }
+///
 /// tinybus_module::module_export! { setup = setup, worker_threads = 1 }
 /// ```
 ///
@@ -1002,6 +1357,11 @@ where
 /// state is reused for that instance's reinitializations, allowing admission to
 /// remain bound without process-global state. Separate instances receive fresh
 /// state. A factory panic returns `TB_PANICKED` without unwinding into the host.
+/// `setup_factory_with_context = factory, config = Config` combines that
+/// per-instance state with a fresh SDK-issued [`ModuleSetupContext`] for every
+/// setup call. Its factory runs only after host validation and initial config
+/// parsing; the selected-host grant is retained for that instance while the
+/// context's connection is refreshed on reinitialization.
 /// Configured modules may instead use `terminal_setup_factory = factory`. Its
 /// factory receives [`NativeInstanceLiveness`] and returns `Result<(F,
 /// RuntimeHooks)>`, with the same setup callback bounds. A supported, exactly
@@ -1010,22 +1370,53 @@ where
 /// partial-failure cleanup until it returns and must launch independent workers
 /// only from setup after hook registration. See [`RuntimeHooks`] for controller
 /// obligations. Hooks are registered once and never replaced by reinitialization.
-/// Existing `setup = function` and `setup_factory` callbacks retain their behavior.
+/// `setup_with_context = function, config = Config` opts into configured setup
+/// with an SDK-issued [`ModuleSetupContext`] on initial setup and reinitialization.
+/// Existing plain `setup_with_context = function`, `setup = function`, and
+/// `setup_factory` callbacks retain their behavior.
 #[macro_export]
 macro_rules! module_export {
-    (@linked) => {
+    (@linked $($declaration:tt)*) => {
+        $crate::module_export!(@linked_find_threads [] $($declaration)*);
+    };
+    (@linked_find_threads [$($prefix:tt)*] worker_threads = $threads:expr, $($rest:tt)*) => {
+        $crate::module_export!(@linked_impl $threads);
+    };
+    (@linked_find_threads [$($prefix:tt)*] worker_threads = $threads:expr $(,)?) => {
+        $crate::module_export!(@linked_impl $threads);
+    };
+    (@linked_find_threads [$($prefix:tt)*] $head:tt $($rest:tt)*) => {
+        $crate::module_export!(@linked_find_threads [$($prefix)* $head] $($rest)*);
+    };
+    (@linked_impl $threads:expr) => {
         /// Entry points and parsed manifest for a host that links this module.
         ///
         /// # Errors
         /// Returns an error if the generated manifest is invalid.
         pub fn linked_module() -> ::tinybus::Result<::tinybus::module::LinkedModule> {
             unsafe {
-                ::tinybus::module::LinkedModule::from_exports(
+                ::tinybus::module::LinkedModule::from_exports_with_setup(
                     &TINYBUS_MODULE_ABI_V1,
                     tinybus_module_manifest_v1,
                     tinybus_module_init_v1,
+                    tinybus_module_init_with_setup_v1,
                 )
             }
+        }
+
+        /// Rust-only initializer used when a host supplies per-attachment
+        /// setup state. It replaces this export's default setup callback.
+        ///
+        /// # Safety
+        /// `host` and `out` must point to valid TinyBus ABI structures that
+        /// remain readable and writable for the duration of initialization.
+        #[doc(hidden)]
+        pub unsafe fn tinybus_module_init_with_setup_v1(
+            host: *const ::tinybus::module::abi::TbHostVtable,
+            out: *mut ::tinybus::module::abi::TbModuleVtable,
+            setup: ::tinybus::module::LinkedSetup,
+        ) -> i32 {
+            unsafe { $crate::start_linked_module(host, out, $threads, true, setup) }
         }
     };
     (@common
@@ -1039,6 +1430,8 @@ macro_rules! module_export {
         lazy = $lazy:expr $(,)?
     ) => {
         $($export)*
+        #[doc = "The ABI descriptor exported for this TinyBus module."]
+        #[doc = "It identifies the package name, version and compatible host ABI."]
         pub static TINYBUS_MODULE_ABI_V1: ::tinybus::module::abi::TbAbiDescriptor =
             ::tinybus::module::abi::TbAbiDescriptor::current(
                 env!("CARGO_PKG_NAME"),
@@ -1046,6 +1439,8 @@ macro_rules! module_export {
             );
 
         $($export)*
+        #[doc = "Return the retained manifest for this TinyBus module."]
+        #[doc = "The returned byte slice remains valid while this module library remains loaded."]
         pub extern "C" fn tinybus_module_manifest_v1() -> ::tinybus::module::abi::TbSlice {
             static MANIFEST_BYTES: ::std::sync::OnceLock<::std::vec::Vec<u8>> =
                 ::std::sync::OnceLock::new();
@@ -1088,6 +1483,17 @@ macro_rules! module_export {
         }
 
         $($export)*
+        /// Initialize this module through the TinyBus loader.
+        ///
+        /// The loader supplies the host ABI table and output storage used to
+        /// start the module runtime. Applications should initialize modules
+        /// through `ModuleHost`, which validates and retains the artifact.
+        ///
+        /// # Safety
+        /// `host` and `out` must point to readable and writable ABI structures
+        /// that remain valid for the duration of initialization. The host
+        /// context and callbacks referenced by `host` must remain valid until
+        /// the module runtime has shut down.
         pub unsafe extern "C" fn tinybus_module_init_v1(
             host: *const ::tinybus::module::abi::TbHostVtable,
             out: *mut ::tinybus::module::abi::TbModuleVtable,
@@ -1141,6 +1547,17 @@ macro_rules! module_export {
         }
 
         $($export)*
+        /// Initialize this module through the TinyBus loader.
+        ///
+        /// The loader supplies the host ABI table and output storage used to
+        /// start the module runtime. Applications should initialize modules
+        /// through `ModuleHost`, which validates and retains the artifact.
+        ///
+        /// # Safety
+        /// `host` and `out` must point to readable and writable ABI structures
+        /// that remain valid for the duration of initialization. The host
+        /// context and callbacks referenced by `host` must remain valid until
+        /// the module runtime has shut down.
         pub unsafe extern "C" fn tinybus_module_init_v1(
             host: *const ::tinybus::module::abi::TbHostVtable,
             out: *mut ::tinybus::module::abi::TbModuleVtable,
@@ -1173,6 +1590,19 @@ macro_rules! module_export {
         }
     };
     (
+        setup_factory_with_context = $factory:path,
+        config = $config:ty,
+        $($rest:tt)*
+    ) => {
+        $crate::module_export! {
+            @configured export = {#[unsafe(no_mangle)]},
+            start = $crate::start_reconfigurable_module_with_context_factory,
+            setup = $factory,
+            config = $config,
+            $($rest)*
+        }
+    };
+    (
         setup = $setup:path,
         config = $config:ty,
         $($rest:tt)*
@@ -1182,6 +1612,27 @@ macro_rules! module_export {
             start = $crate::start_reconfigurable_module,
             setup = $setup,
             config = $config,
+            $($rest)*
+        }
+    };
+    (
+        setup_with_context = $setup:path,
+        config = $config:ty,
+        $($rest:tt)*
+    ) => {
+        $crate::module_export! {
+            @configured export = {#[unsafe(no_mangle)]},
+            start = $crate::start_reconfigurable_module_with_context,
+            setup = $setup,
+            config = $config,
+            $($rest)*
+        }
+    };
+    (setup_with_context = $setup:path, $($rest:tt)*) => {
+        $crate::module_export! {
+            @plain export = {#[unsafe(no_mangle)]},
+            start = $crate::start_module_with_context,
+            setup = $setup,
             $($rest)*
         }
     };
@@ -1197,8 +1648,9 @@ macro_rules! module_export {
 
 /// Generate Rust-addressable entry points for linking several modules into a
 /// single executable. The entry points have no shared C linker symbol names.
-/// Configured `setup`, per-instance `setup_factory`, and opted-in
-/// `terminal_setup_factory` forms are supported; see [`module_export`].
+/// Configured `setup`, per-instance `setup_factory`, context-bearing
+/// `setup_factory_with_context`, and opted-in `terminal_setup_factory` forms
+/// are supported; see [`module_export`].
 /// Terminal factories require the supplied host's native query even when linked.
 #[macro_export]
 macro_rules! module_export_static {
@@ -1208,7 +1660,7 @@ macro_rules! module_export_static {
             start = $crate::start_linked_terminal_reconfigurable_module_with_factory,
             setup = $factory, config = $config, $($rest)*
         }
-        $crate::module_export! { @linked }
+        $crate::module_export! { @linked $($rest)* }
     };
     (setup_factory = $factory:path, config = $config:ty, $($rest:tt)*) => {
         $crate::module_export! {
@@ -1218,7 +1670,17 @@ macro_rules! module_export_static {
             config = $config,
             $($rest)*
         }
-        $crate::module_export! { @linked }
+        $crate::module_export! { @linked $($rest)* }
+    };
+    (setup_factory_with_context = $factory:path, config = $config:ty, $($rest:tt)*) => {
+        $crate::module_export! {
+            @configured export = {},
+            start = $crate::start_linked_reconfigurable_module_with_context_factory,
+            setup = $factory,
+            config = $config,
+            $($rest)*
+        }
+        $crate::module_export! { @linked $($rest)* }
     };
     (setup = $setup:path, config = $config:ty, $($rest:tt)*) => {
         $crate::module_export! {
@@ -1228,7 +1690,26 @@ macro_rules! module_export_static {
             config = $config,
             $($rest)*
         }
-        $crate::module_export! { @linked }
+        $crate::module_export! { @linked $($rest)* }
+    };
+    (setup_with_context = $setup:path, config = $config:ty, $($rest:tt)*) => {
+        $crate::module_export! {
+            @configured export = {},
+            start = $crate::start_linked_reconfigurable_module_with_context,
+            setup = $setup,
+            config = $config,
+            $($rest)*
+        }
+        $crate::module_export! { @linked $($rest)* }
+    };
+    (setup_with_context = $setup:path, $($rest:tt)*) => {
+        $crate::module_export! {
+            @plain export = {},
+            start = $crate::start_linked_module_with_context,
+            setup = $setup,
+            $($rest)*
+        }
+        $crate::module_export! { @linked $($rest)* }
     };
     (setup = $setup:path, $($rest:tt)*) => {
         $crate::module_export! {
@@ -1237,7 +1718,7 @@ macro_rules! module_export_static {
             setup = $setup,
             $($rest)*
         }
-        $crate::module_export! { @linked }
+        $crate::module_export! { @linked $($rest)* }
     };
 }
 
@@ -1263,6 +1744,10 @@ mod tests;
 #[cfg(test)]
 #[path = "static_link_tests.rs"]
 mod static_link_tests;
+
+#[cfg(test)]
+#[path = "lib_linked_setup_tests.rs"]
+mod linked_setup_tests;
 
 #[cfg(test)]
 #[path = "lib_setup_factory_tests.rs"]
@@ -1460,10 +1945,16 @@ impl Future for TerminalSetupPoll {
                 |future| future.as_mut().poll(cx),
             )
         }));
-        *self
-            .slot
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = future;
+        {
+            *self
+                .slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = future;
+        }
+        #[cfg(test)]
+        if matches!(self.kind, terminal::PayloadKind::Initial) {
+            self.state.initial_future_restored_for_test();
+        }
         match outcome {
             Ok(std::task::Poll::Ready(Err(error))) => {
                 self.state.signal(TerminalReason::SetupFailed);
@@ -1720,6 +2211,7 @@ where
             inner: ModuleTransport {
                 host: state.host,
                 inbound: Mutex::new(inbound_rx),
+                closed: close_signal(),
                 provenance: Arc::new(AtomicBool::new(false)),
                 detach_on_panic: false,
             },

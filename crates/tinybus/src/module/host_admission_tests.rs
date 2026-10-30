@@ -87,6 +87,7 @@ async fn a_bundle_others_can_write_falls_back_to_the_verified_release_cache() {
         host_key: "test-host",
         archive: "clock-test-host.tar.gz",
         sha256: &pin,
+        library_sha256: None,
     };
 
     // The bundle: a marker equal to the pin and an admissible extraction, in

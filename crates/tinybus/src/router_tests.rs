@@ -128,16 +128,48 @@ fn detaching_frees_the_names_and_reports_the_change() {
     router.request_name(a, name.clone()).unwrap();
 
     let changes = router.detach(a);
-    assert_eq!(changes.len(), 1, "only the well-known name is announced");
-    assert_eq!(changes[0].name, name);
-    assert_eq!(changes[0].old_owner, Some(a_unique));
-    assert!(changes[0].new_owner.is_none());
+    assert_eq!(
+        changes.len(),
+        2,
+        "the alias and unique peer name are announced"
+    );
+    let alias_change = changes.iter().find(|change| change.name == name).unwrap();
+    assert_eq!(alias_change.old_owner, Some(a_unique.clone()));
+    assert!(alias_change.new_owner.is_none());
+    let unique_change = changes
+        .iter()
+        .find(|change| change.name == a_unique)
+        .unwrap();
+    assert_eq!(unique_change.old_owner, Some(a_unique));
+    assert!(unique_change.new_owner.is_none());
     assert!(router.list_names().is_empty());
 
     // ...and a call to the dead integration now names it, rather than
     // hanging or reporting a generic failure.
     let err = router.resolve(&name).unwrap_err();
     assert!(err.to_string().contains("no peer owns"), "{err}");
+}
+
+#[test]
+fn detaching_reports_the_unique_name_as_peer_death() {
+    let mut router = Router::default();
+    let (peer, unique) = router.attach(outbox());
+
+    let changes = router.detach(peer);
+
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].name, unique);
+    assert_eq!(changes[0].old_owner, Some(unique));
+    assert!(changes[0].new_owner.is_none());
+}
+
+#[test]
+fn a_live_peer_cannot_release_its_unique_name() {
+    let mut router = Router::default();
+    let (peer, unique) = router.attach(outbox());
+
+    assert!(router.release_name(peer, &unique).is_err());
+    assert_eq!(router.owner_of(&unique), Some(unique));
 }
 
 #[test]
@@ -202,6 +234,7 @@ fn attestation(name: &str) -> Attestation {
     Attestation {
         name: BusName::new(name).unwrap(),
         sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
+        library_sha256: None,
     }
 }
 

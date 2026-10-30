@@ -213,7 +213,9 @@ does `RequestName` for a unique name.
 
 When ownership changes, the bus emits `NameOwnerChanged`, with body
 `[name, old_owner, new_owner]`, either owner being `null`. Unchanged ownership
-emits no signal. This is how a peer learns a service died without polling it.
+emits no signal. On peer detach, this includes the peer's unique name as well
+as every well-known name it owned, so observers can detect a peer that never
+claimed an alias without polling it.
 
 An embedded module host also exposes the additive module members above. A
 broker built without the `modules` feature returns `UnknownMethod`; a

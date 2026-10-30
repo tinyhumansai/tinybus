@@ -3,8 +3,11 @@
 //! The ABI and manifest types are always compiled so a module can depend on
 //! tinybus with no default features. Loading is behind `modules`: in-process
 //! modules are trusted code with the host's full address-space privileges.
+//! The coarse `Availability` status is available even when loading is disabled.
 
 pub mod abi;
+mod availability;
+pub use availability::Availability;
 #[cfg(feature = "modules")]
 mod cache;
 pub mod client;
@@ -14,11 +17,27 @@ mod first_admitted;
 #[cfg(feature = "modules")]
 mod github;
 mod hash;
+pub mod lease;
+#[cfg(feature = "modules")]
+pub use lease::RuntimeLease;
+pub use lease::{
+    LeaseError, LeasePhase, LeaseReport, LeaseReportOutcome, RetryPolicy, RetryPolicyError,
+    RuntimeLeaseDriver, StartOutcome, StopOutcome,
+};
 pub mod manifest;
 pub mod platform;
+#[cfg(feature = "modules")]
+pub mod reconfigure;
 mod release;
 #[cfg(feature = "modules")]
 pub mod resolution;
+pub mod service_slot;
+#[cfg(any(feature = "modules", feature = "cli"))]
+mod zip_deflate;
+#[cfg(any(feature = "modules", feature = "cli"))]
+mod zip_descriptor;
+#[cfg(any(feature = "modules", feature = "cli"))]
+mod zip_extract;
 
 #[cfg(feature = "modules")]
 pub(crate) mod host;
@@ -38,8 +57,10 @@ mod windows_acl;
 #[cfg(feature = "modules")]
 pub use cache::{artifact_dir, is_safe_path_component, prune_stale_versions};
 pub use client::{
-    AccessFuture, ModuleAccess, ModuleCallError, ModuleClient, ModuleObjectClient, ProxyFailure,
-    classify,
+    AccessFuture, BoundModuleClient, ModuleAccess, ModuleCallError, ModuleCallFailure,
+    ModuleClient, ModuleObjectClient, PinnedModuleClient, PinnedModuleObjectClient, ProxyFailure,
+    ReadinessFailure, ReconfigureFailure, UnloadedAccess, classify, report_proxy_failure,
+    wire_kind,
 };
 pub use failure::{FailureReport, FailureReporter, FailureSink, Reason};
 #[cfg(feature = "modules")]
@@ -52,15 +73,44 @@ pub use host::callbacks::{
     HostCallbackSignal, HostStreamCallbackEndpoint,
 };
 #[cfg(feature = "modules")]
-pub use host::{ModuleHost, ModuleInfo, ModuleState};
+pub use host::{
+    ModuleHost, ModuleInfo, ModuleSenderLookup, ModuleState, PreReadyConfidentialRoute,
+    SearchPathConfig,
+};
+#[cfg(feature = "modules")]
+pub use reconfigure::{ConfigFingerprint, ReconfigurableModule, Reconfigure, ReconfigureGuard};
 pub use release::{ReleaseAsset, ReleaseRecord};
 #[cfg(feature = "modules")]
 pub use resolve::{
-    Availability, LinkedFactory, LoadError, ModuleConfigProvider, ModuleGate, ModuleSource,
-    ResolvedHook, Resolver, ResolverInputs, RuntimeFuture, RuntimeProvider,
+    AsyncModuleConfigProvider, LinkedFactory, LinkedRegistry, LoadError, ModuleConfigProvider,
+    ModuleGate, ModuleSource, ResolvedHook, Resolver, ResolverInputs, RuntimeFuture,
+    RuntimeProvider, resolve_bundled_dir, set_bundled_releases_dir,
 };
 #[cfg(feature = "modules")]
-pub use runtime::{ModuleRuntime, RuntimeNames, RuntimeOptions, RuntimeSetup};
+pub use runtime::{
+    HostObjectGuard, LinkedModuleInitWithSetup, LinkedSetup, ModuleRuntime, RuntimeNames,
+    RuntimeOptions, RuntimeSetup,
+};
+
+/// Stable, validated identifier of one admitted module package.
+///
+/// This is independent of a module's display summary and bus aliases. It is
+/// derived from the canonical module identity in the admitted manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ModuleId(String);
+
+impl ModuleId {
+    #[cfg(feature = "modules")]
+    pub(crate) fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    /// The canonical module package identifier.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 /// Entry points compiled into the host instead of loaded from a shared library.
 ///
@@ -74,6 +124,11 @@ pub struct LinkedModule {
     pub manifest: manifest::ModuleManifest,
     /// Process-lifetime initialization entry point.
     pub init: abi::TbModuleInit,
+    /// Rust-only initializer that accepts a per-attachment setup callback.
+    /// Generated only for statically linked exports. Dynamic modules have no
+    /// such hook and continue through the unchanged C ABI initializer.
+    #[doc(hidden)]
+    pub init_with_setup: Option<LinkedModuleInitWithSetup>,
 }
 
 #[cfg(feature = "modules")]
@@ -105,7 +160,28 @@ impl LinkedModule {
             descriptor: *descriptor,
             manifest,
             init,
+            init_with_setup: None,
         })
+    }
+
+    /// Construct a linked export with a Rust-only per-instance setup entrypoint.
+    ///
+    /// # Errors
+    /// Returns an error for an incompatible descriptor or malformed manifest.
+    ///
+    /// # Safety
+    /// The safety requirements are identical to [`Self::from_exports`], and
+    /// `init_with_setup` must be generated for this exact linked module.
+    #[doc(hidden)]
+    pub unsafe fn from_exports_with_setup(
+        descriptor: &abi::TbAbiDescriptor,
+        manifest: unsafe extern "C" fn() -> abi::TbSlice,
+        init: abi::TbModuleInit,
+        init_with_setup: LinkedModuleInitWithSetup,
+    ) -> crate::Result<Self> {
+        let mut module = unsafe { Self::from_exports(descriptor, manifest, init)? };
+        module.init_with_setup = Some(init_with_setup);
+        Ok(module)
     }
 }
 
@@ -126,3 +202,16 @@ mod requirements;
 /// Host-selected activation requirements.
 #[cfg(feature = "modules")]
 pub use requirements::{ModuleRequirements, RequiredInterface};
+
+/// Return a ZIP module archive's library digest using the bounded release
+/// extractor. The CLI uses this when producing cross-platform release
+/// checksums, including Windows `.dll` assets on a Unix host.
+#[cfg(feature = "cli")]
+pub fn sha256_zip_module_library(path: impl AsRef<std::path::Path>) -> crate::Result<String> {
+    zip_extract::library_sha256(path.as_ref())
+}
+
+#[cfg(any(feature = "modules", feature = "cli"))]
+pub(crate) fn refused(reason: impl Into<String>) -> crate::Error {
+    crate::Error::module_refused(std::path::Path::new("github-release"), reason)
+}

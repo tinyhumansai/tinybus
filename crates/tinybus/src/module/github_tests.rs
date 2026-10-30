@@ -17,7 +17,9 @@ fn checksum_manifests_accept_the_documented_toml_and_json_shapes() {
     let expected = "a".repeat(64);
     let toml = format!("[sha256]\n\"module.tar.gz\" = \"{expected}\"\n");
     assert_eq!(
-        parse_checksums("checksum.toml", toml.as_bytes()).unwrap()["module.tar.gz"],
+        parse_checksums("checksum.toml", toml.as_bytes())
+            .unwrap()
+            .sha256["module.tar.gz"],
         expected
     );
     let json = format!(
@@ -25,7 +27,9 @@ fn checksum_manifests_accept_the_documented_toml_and_json_shapes() {
         "b".repeat(64)
     );
     assert_eq!(
-        parse_checksums("checksum.json", json.as_bytes()).unwrap()["module.tar.gz"],
+        parse_checksums("checksum.json", json.as_bytes())
+            .unwrap()
+            .sha256["module.tar.gz"],
         "b".repeat(64)
     );
 }
@@ -69,12 +73,34 @@ fn the_manifest_digest_must_agree_with_the_host_pin() {
 }
 
 #[test]
+fn a_library_digest_is_correlated_to_its_archive_and_host_pin() {
+    let archive = "a".repeat(64);
+    let library = "b".repeat(64);
+    let located = Located {
+        manifest_name: "checksum.toml".to_string(),
+        manifest: format!(
+            "[sha256]\n\"module.tar.gz\" = \"{archive}\"\n\
+             [library_sha256]\n\"module.tar.gz\" = \"{library}\"\n"
+        )
+        .into_bytes(),
+        archive_url: String::new(),
+    };
+    assert_eq!(
+        manifest_library_digest(&located, "module.tar.gz", Some(&library)).unwrap(),
+        Some(library.clone())
+    );
+    assert!(manifest_library_digest(&located, "module.tar.gz", Some(&"c".repeat(64))).is_err());
+    assert!(manifest_library_digest(&located, "missing.tar.gz", Some(&library)).is_err());
+}
+
+#[test]
 fn a_cache_miss_with_downloads_disabled_is_refused_without_the_network() {
     let directory = tempfile::tempdir().unwrap();
     let error = acquire_cached(&CachedRelease {
         release_url: "https://github.com/tinyhumansai/demo/releases/tag/v1.0.0",
         asset_name: "demo-1.0.0.tar.gz",
         expected_sha256: None,
+        expected_library_sha256: None,
         cache_dir: &directory.path().join("demo").join("1.0.0"),
         allow_download: false,
     })
@@ -105,6 +131,7 @@ fn an_asset_name_that_leaves_the_cache_directory_is_refused() {
         release_url: "https://github.com/tinyhumansai/demo/releases/tag/v1.0.0",
         asset_name: "../escape.tar.gz",
         expected_sha256: Some(&digest),
+        expected_library_sha256: None,
         cache_dir: &cache_dir,
         allow_download: false,
     })
@@ -136,6 +163,7 @@ fn a_concurrent_fill_that_verifies_is_kept_rather_than_replaced() {
         release_url: "https://github.com/tinyhumansai/demo/releases/tag/v1.0.0",
         asset_name: "demo-1.0.0.tar.gz",
         expected_sha256: Some(&digest),
+        expected_library_sha256: None,
         cache_dir: &cache_dir,
         allow_download: true,
     };
@@ -159,11 +187,13 @@ fn a_verified_cache_answers_without_the_network() {
     let module = cache_dir.join(format!("libdemo_module.{}", cache::library_extension()));
     std::fs::write(&module, b"library").unwrap();
     let digest = crate::module::sha256_file(cache_dir.join("demo-1.0.0.tar.gz")).unwrap();
+    let library_digest = crate::module::sha256_file(&module).unwrap();
 
     let (found, sha256) = acquire_cached(&CachedRelease {
         release_url: "https://github.com/tinyhumansai/demo/releases/tag/v1.0.0",
         asset_name: "demo-1.0.0.tar.gz",
         expected_sha256: Some(&digest),
+        expected_library_sha256: Some(&library_digest),
         cache_dir: &cache_dir,
         // Downloads are off, so a hit is the only way this can succeed.
         allow_download: false,
@@ -174,7 +204,31 @@ fn a_verified_cache_answers_without_the_network() {
 }
 
 #[test]
+fn a_cached_archive_cannot_vouch_for_a_different_extracted_library() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache_dir = directory.path().join("demo").join("1.0.0");
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    let archive = cache_dir.join("demo-1.0.0.tar.gz");
+    std::fs::write(&archive, b"archive").unwrap();
+    let module = cache_dir.join(format!("libdemo_module.{}", cache::library_extension()));
+    std::fs::write(&module, b"library").unwrap();
+    let archive_digest = crate::module::sha256_file(&archive).unwrap();
+    let wrong_library_digest = "c".repeat(64);
+
+    let error = acquire_cached(&CachedRelease {
+        release_url: "https://github.com/tinyhumansai/demo/releases/tag/v1.0.0",
+        asset_name: "demo-1.0.0.tar.gz",
+        expected_sha256: Some(&archive_digest),
+        expected_library_sha256: Some(&wrong_library_digest),
+        cache_dir: &cache_dir,
+        allow_download: false,
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("extracted library hash"));
+}
+
 /// Extracts a valid archive while preserving its directory structure and bytes.
+#[test]
 fn zip_archives_extract_only_enclosed_regular_files_and_directories() {
     let directory = tempfile::tempdir().unwrap();
     let archive_path = directory.path().join("release.zip");
@@ -249,8 +303,8 @@ fn tar_root_entry_cannot_widen_release_extraction_directory() {
     );
 }
 
-#[test]
 /// Rejects traversal entries without writing outside the extraction directory.
+#[test]
 fn zip_archives_refuse_paths_outside_the_destination() {
     let directory = tempfile::tempdir().unwrap();
     let archive_path = directory.path().join("release.zip");
@@ -270,9 +324,9 @@ fn zip_archives_refuse_paths_outside_the_destination() {
     assert!(!directory.path().join("outside").exists());
 }
 
+/// Rejects symlink entries without creating a link or following its target.
 #[cfg(unix)]
 #[test]
-/// Rejects symlink entries without creating a link or following its target.
 fn zip_archives_refuse_symlink_entries() {
     let directory = tempfile::tempdir().unwrap();
     let archive_path = directory.path().join("release.zip");
@@ -299,9 +353,9 @@ fn zip_archives_refuse_symlink_entries() {
     assert!(!destination.join("module.so").exists());
 }
 
+/// Rejects Unix special-file entries instead of materializing them.
 #[cfg(unix)]
 #[test]
-/// Rejects Unix special-file entries instead of materializing them.
 fn zip_archives_refuse_special_file_entries() {
     let directory = tempfile::tempdir().unwrap();
     let archive_path = directory.path().join("release.zip");
@@ -327,9 +381,9 @@ fn zip_archives_refuse_special_file_entries() {
     assert!(!destination.join("module.so").exists());
 }
 
+/// Extracts regular files without applying archived executable or setuid bits.
 #[cfg(unix)]
 #[test]
-/// Extracts regular files without applying archived executable or setuid bits.
 fn zip_archives_do_not_apply_setuid_or_executable_permissions() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -515,6 +569,7 @@ fn a_download_that_disagrees_with_its_manifest_is_refused_and_cleaned_up() {
         release_url: "https://github.com/o/r/releases/tag/v1",
         asset_name: "m.tar.gz",
         expected_sha256: Some(&pinned),
+        expected_library_sha256: None,
         cache_dir: &cache_dir,
         allow_download: true,
     })

@@ -50,6 +50,29 @@ pub enum MessageKind {
     DirectedSignal,
 }
 
+/// Closed lifecycle metadata accompanying a module availability error.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModuleLifecycle {
+    /// The module has not finished its current initialization attempt.
+    Initializing,
+    /// A future lifecycle state this version cannot classify safely.
+    Unknown,
+}
+
+impl<'de> Deserialize<'de> for ModuleLifecycle {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "initializing" => Self::Initializing,
+            _ => Self::Unknown,
+        })
+    }
+}
+
 /// Everything the router and the dispatcher need, and nothing else.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Header {
@@ -90,6 +113,10 @@ pub struct Header {
     /// For [`MessageKind::Error`]: the stable dotted error name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_name: Option<String>,
+    /// Closed lifecycle metadata for module availability errors. Older peers
+    /// ignore this optional field and continue to classify by `error_name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_lifecycle: Option<ModuleLifecycle>,
     /// This body is a secret: deliver it to the attested destination, an exact
     /// active SDK-created local host callback capability, or nobody.
     ///
@@ -158,6 +185,7 @@ impl Message {
                 interface: Some(interface),
                 member: Some(member),
                 error_name: None,
+                module_lifecycle: None,
                 confidential: false,
                 sensitive: false,
                 stream_reply: false,
@@ -231,6 +259,7 @@ impl Message {
                 interface: None,
                 member: None,
                 error_name: None,
+                module_lifecycle: None,
                 // A reply inherits the call's confidentiality. A secret asked
                 // for confidentially is usually answered with another one — a
                 // key derivation returns a key — and a reply that quietly lost
@@ -260,6 +289,14 @@ impl Message {
                 interface: None,
                 member: None,
                 error_name: Some(error.wire_name().to_string()),
+                module_lifecycle: match error {
+                    Error::ModuleUnavailable { state, .. }
+                        if state.eq_ignore_ascii_case("initializing") =>
+                    {
+                        Some(ModuleLifecycle::Initializing)
+                    }
+                    _ => None,
+                },
                 // Not inherited. Errors never carry the value that caused them,
                 // so an error reply has no secret to protect — and marking it
                 // confidential would make it undeliverable exactly when the
@@ -293,6 +330,7 @@ impl Message {
                 interface: Some(interface),
                 member: Some(member),
                 error_name: None,
+                module_lifecycle: None,
                 // Structurally impossible to set: a signal is a broadcast, and
                 // `validate` refuses the combination on ingress.
                 confidential: false,
@@ -346,6 +384,7 @@ impl Message {
                 interface: Some(interface),
                 member: Some(member),
                 error_name: None,
+                module_lifecycle: None,
                 confidential: false,
                 sensitive: false,
                 stream_reply: false,
@@ -356,14 +395,24 @@ impl Message {
 
     /// Reconstruct the [`Error`] an [`MessageKind::Error`] message carries.
     ///
-    /// The variant's structure does not survive the wire — only its name and
-    /// message do — so this always returns [`Error::MethodFailed`]. Callers
-    /// match on [`Error::wire_name`], which does survive.
+    /// Most error structure does not survive the wire — only its name and
+    /// message do. The optional closed module lifecycle metadata reconstructs
+    /// the typed initializing state while retaining the stable error name.
     pub fn into_error(self) -> Error {
         let name = self
             .header
             .error_name
             .unwrap_or_else(|| Error::FAILED.to_string());
+        if self.header.kind == MessageKind::Error
+            && name == Error::MODULE_UNAVAILABLE
+            && self.header.module_lifecycle == Some(ModuleLifecycle::Initializing)
+        {
+            return Error::ModuleUnavailable {
+                module: "module".to_owned(),
+                state: "initializing".to_owned(),
+                detail: "module initialization is still in progress".to_owned(),
+            };
+        }
         let message = match self.body {
             Value::String(s) => s,
             other => other.to_string(),

@@ -1,4 +1,8 @@
 use super::*;
+#[cfg(feature = "static-link")]
+use std::future::Future;
+#[cfg(feature = "static-link")]
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize};
 use std::sync::{OnceLock, mpsc::SyncSender};
 
@@ -8,6 +12,14 @@ static HOST_LOGS: AtomicUsize = AtomicUsize::new(0);
 static HOST_READY: AtomicBool = AtomicBool::new(false);
 static HOST_FAULTED: AtomicBool = AtomicBool::new(false);
 static START_OUTGOING: OnceLock<StdMutex<Option<SyncSender<Vec<u8>>>>> = OnceLock::new();
+static TRUSTED_HOST_REPLY: AtomicUsize = AtomicUsize::new(0);
+static CAPTURED_TRUSTED_HOST: OnceLock<StdMutex<Option<TrustedHost>>> = OnceLock::new();
+static CAPTURED_MODULE_NAME: OnceLock<StdMutex<Option<BusName>>> = OnceLock::new();
+static CAPTURED_MODULE_CONTEXT: OnceLock<StdMutex<Option<CallContext>>> = OnceLock::new();
+#[cfg(feature = "static-link")]
+static FOREIGN_CONTEXT_SENDER: OnceLock<
+    StdMutex<Option<tokio::sync::oneshot::Sender<CallContext>>>,
+> = OnceLock::new();
 // These tests share host callbacks and the module's process-global runtime
 // capture, so overlapping tests would make their assertions order-dependent.
 static HOST_STATE_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
@@ -75,7 +87,549 @@ fn host(config: &[u8]) -> TbHostVtable {
         ready: host_ready,
         broker_routing: None,
         native_terminal_state: None,
+        trusted_host_binding: None,
     }
+}
+
+unsafe extern "C" fn test_trusted_host_binding(
+    _: *mut c_void,
+    out: *mut u8,
+    capacity: usize,
+    out_len: *mut usize,
+) -> i32 {
+    if out_len.is_null() {
+        return TB_BAD_ARGUMENT;
+    }
+    let (code, bytes): (i32, &[u8]) = match TRUSTED_HOST_REPLY.load(Ordering::Acquire) {
+        0 => (TB_OK, b":1.2"),
+        1 => (TB_OK, b":1.3"),
+        2 => (TB_CLOSED, b""),
+        3 => {
+            unsafe { out_len.write(capacity + 1) };
+            return TB_OK;
+        }
+        4 => (TB_OK, b"\xff"),
+        5 => (TB_OK, b"org.example.Controller"),
+        _ => (91, b""),
+    };
+    unsafe { out_len.write(bytes.len()) };
+    if code != TB_OK {
+        return code;
+    }
+    if bytes.len() > capacity || (out.is_null() && !bytes.is_empty()) {
+        return TB_BAD_ARGUMENT;
+    }
+    if !bytes.is_empty() {
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), out, bytes.len()) };
+    }
+    TB_OK
+}
+
+unsafe extern "C" fn assert_test_broker_routed(_: *mut c_void) -> u32 {
+    1
+}
+
+async fn setup_with_context(context: ModuleSetupContext) -> Result<()> {
+    let trusted_host = context.trusted_host().cloned();
+    *CAPTURED_TRUSTED_HOST
+        .get_or_init(|| StdMutex::new(None))
+        .lock()
+        .expect("captured trusted host lock") = trusted_host.clone();
+    *CAPTURED_MODULE_NAME
+        .get_or_init(|| StdMutex::new(None))
+        .lock()
+        .expect("captured module name lock") = context.connection().unique_name();
+    context
+        .connection()
+        .serve_at(
+            "/authorization".parse().unwrap(),
+            ContextAuthorizationProbe { trusted_host },
+        )
+        .await?;
+    Ok(())
+}
+
+struct ContextAuthorizationProbe {
+    trusted_host: Option<TrustedHost>,
+}
+
+#[async_trait::async_trait]
+impl tinybus::service::Interface for ContextAuthorizationProbe {
+    fn name(&self) -> tinybus::InterfaceName {
+        "org.example.TrustedHostProbe".parse().unwrap()
+    }
+
+    fn members(&self) -> Vec<tinybus::MemberName> {
+        vec!["Authorize".parse().unwrap()]
+    }
+
+    async fn call(
+        &self,
+        _: &tinybus::MemberName,
+        _: serde_json::Value,
+    ) -> tinybus::Result<serde_json::Value> {
+        Err(Error::failed("context-aware dispatch required"))
+    }
+
+    async fn call_with_context(
+        &self,
+        _: &tinybus::MemberName,
+        _: serde_json::Value,
+        context: &CallContext,
+    ) -> tinybus::Result<serde_json::Value> {
+        *CAPTURED_MODULE_CONTEXT
+            .get_or_init(|| StdMutex::new(None))
+            .lock()
+            .expect("captured module context lock") = Some(context.clone());
+        Ok(serde_json::json!(self.trusted_host.as_ref().is_some_and(
+            |trusted_host| trusted_host.authorizes(context)
+        )))
+    }
+}
+
+#[cfg(feature = "static-link")]
+async fn setup_foreign_context_capture(connection: Connection) -> Result<()> {
+    connection
+        .serve_at("/capture".parse().unwrap(), ForeignContextCapture)
+        .await?;
+    Ok(())
+}
+
+#[cfg(feature = "static-link")]
+struct ForeignContextCapture;
+
+#[cfg(feature = "static-link")]
+#[async_trait::async_trait]
+impl tinybus::service::Interface for ForeignContextCapture {
+    fn name(&self) -> tinybus::InterfaceName {
+        "org.example.ForeignContext".parse().unwrap()
+    }
+
+    fn members(&self) -> Vec<tinybus::MemberName> {
+        vec!["Capture".parse().unwrap()]
+    }
+
+    async fn call(
+        &self,
+        _: &tinybus::MemberName,
+        _: serde_json::Value,
+    ) -> tinybus::Result<serde_json::Value> {
+        Err(Error::failed("context-aware dispatch required"))
+    }
+
+    async fn call_with_context(
+        &self,
+        _: &tinybus::MemberName,
+        _: serde_json::Value,
+        context: &CallContext,
+    ) -> tinybus::Result<serde_json::Value> {
+        FOREIGN_CONTEXT_SENDER
+            .get_or_init(|| StdMutex::new(None))
+            .lock()
+            .expect("foreign context sender lock")
+            .take()
+            .expect("one foreign context capture")
+            .send(context.clone())
+            .map_err(|_| Error::failed("foreign context receiver closed"))?;
+        Ok(serde_json::Value::Null)
+    }
+}
+
+#[cfg(feature = "static-link")]
+mod dynamic_context_export {
+    crate::module_export! {
+        setup_factory_with_context = super::setup_context_factory,
+        config = super::ContextFactoryConfig,
+        worker_threads = 1,
+        provides = ["org.example.DynamicContext"],
+        methods = ["Authorize"],
+        signals = [],
+        requires = [],
+        optional = [],
+        lazy = false,
+    }
+}
+
+#[cfg(feature = "static-link")]
+unsafe extern "C" fn plain_context_setup_entry(
+    host: *const TbHostVtable,
+    out: *mut TbModuleVtable,
+) -> i32 {
+    unsafe { start_module_with_context(host, out, 1, true, setup_with_context) }
+}
+
+#[cfg(feature = "static-link")]
+static CONTEXT_FACTORY_CREATIONS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "static-link")]
+static CONTEXT_FACTORY_SETUPS: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(feature = "static-link")]
+#[derive(serde::Deserialize)]
+struct ContextFactoryConfig {}
+
+#[cfg(feature = "static-link")]
+type ContextFactorySetupFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+
+#[cfg(feature = "static-link")]
+fn setup_context_factory()
+-> impl Fn(ModuleSetupContext, ContextFactoryConfig) -> ContextFactorySetupFuture + Send + Sync + 'static
+{
+    CONTEXT_FACTORY_CREATIONS.fetch_add(1, Ordering::SeqCst);
+    let setups = Arc::new(AtomicUsize::new(0));
+    move |context, _config| {
+        let setups = Arc::clone(&setups);
+        Box::pin(async move {
+            setups.fetch_add(1, Ordering::SeqCst);
+            CONTEXT_FACTORY_SETUPS.fetch_add(1, Ordering::SeqCst);
+            setup_with_context(context).await
+        })
+    }
+}
+
+#[allow(dead_code)]
+mod static_context_export {
+    crate::module_export_static! {
+        setup_with_context = super::setup_with_context,
+        worker_threads = 1,
+        provides = ["org.example.StaticContext"],
+        methods = ["Authorize"],
+        signals = [],
+        requires = [],
+        optional = [],
+        lazy = false,
+    }
+}
+
+#[cfg(feature = "static-link")]
+mod foreign_context_export {
+    crate::module_export_static! {
+        setup = super::setup_foreign_context_capture,
+        worker_threads = 1,
+        provides = ["org.example.ForeignContext"],
+        methods = ["Capture"],
+        signals = [],
+        requires = [],
+        optional = [],
+        lazy = false,
+    }
+}
+
+fn start_context_export(
+    init: unsafe extern "C" fn(*const TbHostVtable, *mut TbModuleVtable) -> i32,
+    include_binding: bool,
+    include_routing: bool,
+) -> (TbModuleVtable, std::sync::mpsc::Receiver<Vec<u8>>) {
+    HOST_READY.store(false, Ordering::Release);
+    HOST_FAULTED.store(false, Ordering::Release);
+    let (outgoing_tx, outgoing_rx) = std::sync::mpsc::sync_channel(8);
+    *START_OUTGOING
+        .get_or_init(|| StdMutex::new(None))
+        .lock()
+        .expect("startup capture lock") = Some(outgoing_tx);
+    let mut host = host(b"{}");
+    host.send = capture_host_send;
+    if include_binding {
+        host.trusted_host_binding = Some(test_trusted_host_binding);
+    }
+    if include_routing {
+        host.broker_routing = Some(assert_test_broker_routed);
+    }
+    if !include_binding && !include_routing {
+        host.size = tinybus::module::abi::TB_HOST_VTABLE_BASE_SIZE;
+    }
+    let mut out = TbModuleVtable::default();
+    assert_eq!(unsafe { init(&host, &mut out) }, TB_OK);
+    let hello_bytes = outgoing_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("contextual module sends Hello");
+    let hello: Message = serde_json::from_slice(&hello_bytes).unwrap();
+    let reply = Message::method_return(&hello.header, serde_json::json!(":1.1"));
+    let reply_bytes = serde_json::to_vec(&reply).unwrap();
+    assert_eq!(
+        unsafe { (out.deliver)(out.module_ctx, reply_bytes.as_ptr(), reply_bytes.len()) },
+        TB_OK
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while !HOST_READY.load(Ordering::Acquire) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "contextual setup did not become ready"
+        );
+        std::thread::yield_now();
+    }
+    (out, outgoing_rx)
+}
+
+fn send_context_probe_call(
+    out: &TbModuleVtable,
+    receiver: &BusName,
+    sender: &str,
+    confidential: bool,
+    outgoing: &std::sync::mpsc::Receiver<Vec<u8>>,
+) -> serde_json::Value {
+    let destination = receiver.clone();
+    let path = "/authorization".parse().unwrap();
+    let interface = "org.example.TrustedHostProbe".parse().unwrap();
+    let member = "Authorize".parse().unwrap();
+    let mut call = if confidential {
+        Message::confidential_call(
+            destination,
+            path,
+            interface,
+            member,
+            serde_json::Value::Null,
+        )
+    } else {
+        Message::method_call(
+            destination,
+            path,
+            interface,
+            member,
+            serde_json::Value::Null,
+        )
+    };
+    call.header.sender = Some(sender.parse().unwrap());
+    call.header.serial = 42;
+    let bytes = serde_json::to_vec(&call).unwrap();
+    assert_eq!(
+        unsafe { (out.deliver)(out.module_ctx, bytes.as_ptr(), bytes.len()) },
+        TB_OK
+    );
+    let reply = outgoing
+        .recv_timeout(Duration::from_secs(1))
+        .expect("contextual call reply");
+    let reply: Message = serde_json::from_slice(&reply).unwrap();
+    assert_eq!(reply.header.reply_serial, Some(42));
+    reply.body
+}
+
+#[tokio::test]
+async fn trusted_host_binding_parser_fails_closed_for_missing_or_malformed_callbacks() {
+    let _host_state = host_state_guard().await;
+    let missing = HostCalls(host(b"{}"));
+    assert!(missing.trusted_host_peer().is_none());
+
+    let mut table = host(b"{}");
+    table.trusted_host_binding = Some(test_trusted_host_binding);
+    let calls = HostCalls(table);
+
+    TRUSTED_HOST_REPLY.store(0, Ordering::Release);
+    assert_eq!(calls.trusted_host_peer().unwrap().as_str(), ":1.2");
+    TRUSTED_HOST_REPLY.store(1, Ordering::Release);
+    assert_eq!(calls.trusted_host_peer().unwrap().as_str(), ":1.3");
+    for invalid in [2, 3, 4, 5, 6] {
+        TRUSTED_HOST_REPLY.store(invalid, Ordering::Release);
+        assert!(calls.trusted_host_peer().is_none(), "reply mode {invalid}");
+    }
+}
+
+#[cfg(feature = "static-link")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn contextual_dynamic_export_pins_and_revalidates_the_broker_controller() {
+    let _host_state = host_state_guard().await;
+    let before_factory = CONTEXT_FACTORY_CREATIONS.load(Ordering::SeqCst);
+    let before_setups = CONTEXT_FACTORY_SETUPS.load(Ordering::SeqCst);
+    TRUSTED_HOST_REPLY.store(0, Ordering::Release);
+    *CAPTURED_TRUSTED_HOST
+        .get_or_init(|| StdMutex::new(None))
+        .lock()
+        .unwrap() = None;
+    *CAPTURED_MODULE_CONTEXT
+        .get_or_init(|| StdMutex::new(None))
+        .lock()
+        .unwrap() = None;
+
+    let init: unsafe extern "C" fn(*const TbHostVtable, *mut TbModuleVtable) -> i32 =
+        dynamic_context_export::tinybus_module_init_v1;
+    let (out, outgoing) = start_context_export(init, true, true);
+    assert_eq!(
+        CONTEXT_FACTORY_CREATIONS.load(Ordering::SeqCst) - before_factory,
+        1,
+        "the context factory runs once for this ABI instance"
+    );
+    assert_eq!(
+        CONTEXT_FACTORY_SETUPS.load(Ordering::SeqCst) - before_setups,
+        1
+    );
+    let receiver = CAPTURED_MODULE_NAME
+        .get_or_init(|| StdMutex::new(None))
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("setup connection has its handshake name");
+    let trusted_host = CAPTURED_TRUSTED_HOST
+        .get_or_init(|| StdMutex::new(None))
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("valid host callback issues a trusted capability");
+
+    assert_eq!(
+        send_context_probe_call(&out, &receiver, ":1.2", true, &outgoing),
+        serde_json::json!(true),
+        "the confidential call from the selected peer on the setup connection is authorized"
+    );
+    assert_eq!(
+        send_context_probe_call(&out, &receiver, ":1.2", false, &outgoing),
+        serde_json::json!(false),
+        "a non-confidential call cannot use the migration capability"
+    );
+    assert_eq!(
+        send_context_probe_call(&out, &receiver, ":1.3", true, &outgoing),
+        serde_json::json!(false),
+        "a different authenticated sender cannot use the cached controller identity"
+    );
+
+    TRUSTED_HOST_REPLY.store(1, Ordering::Release);
+    assert_eq!(
+        send_context_probe_call(&out, &receiver, ":1.2", true, &outgoing),
+        serde_json::json!(false),
+        "a fresh callback that names a replacement controller revokes the cached binding"
+    );
+    TRUSTED_HOST_REPLY.store(2, Ordering::Release);
+    assert_eq!(
+        send_context_probe_call(&out, &receiver, ":1.2", true, &outgoing),
+        serde_json::json!(false),
+        "a disconnected controller revokes the cached binding"
+    );
+
+    TRUSTED_HOST_REPLY.store(0, Ordering::Release);
+    let (foreign_context, _foreign_caller, _foreign_host, _foreign_broker) =
+        capture_foreign_confidential_context().await;
+    assert_eq!(
+        foreign_context.authenticated_sender().unwrap().as_str(),
+        ":1.2"
+    );
+    assert!(foreign_context.is_confidential());
+    assert!(
+        !trusted_host.authorizes(&foreign_context),
+        "a confidential context from another live receiver cannot match even with the same sender name"
+    );
+
+    let captured = CAPTURED_MODULE_CONTEXT
+        .get_or_init(|| StdMutex::new(None))
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("authorization probe retained an actual routed context");
+    let shutdown = out.shutdown;
+    let context = out.module_ctx as usize;
+    let shutdown_code =
+        tokio::task::spawn_blocking(move || unsafe { shutdown(context as *mut c_void, 1000) })
+            .await
+            .unwrap();
+    assert_eq!(shutdown_code, TB_OK, "contextual module shutdown code");
+    assert!(
+        !trusted_host.authorizes(&captured),
+        "the cloned capability cannot outlive its module connection"
+    );
+}
+
+#[cfg(feature = "static-link")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plain_context_setup_entry_receives_the_selected_controller_binding() {
+    let _host_state = host_state_guard().await;
+    TRUSTED_HOST_REPLY.store(0, Ordering::Release);
+    let (out, outgoing) = start_context_export(plain_context_setup_entry, true, true);
+    let receiver = CAPTURED_MODULE_NAME
+        .get_or_init(|| StdMutex::new(None))
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("plain context setup receives its attachment connection");
+    assert_eq!(
+        send_context_probe_call(&out, &receiver, ":1.2", true, &outgoing),
+        serde_json::json!(true)
+    );
+    let shutdown = out.shutdown;
+    let context = out.module_ctx as usize;
+    assert_eq!(
+        tokio::task::spawn_blocking(move || unsafe { shutdown(context as *mut c_void, 1000) })
+            .await
+            .unwrap(),
+        TB_OK
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn contextual_static_export_accepts_an_old_host_without_the_optional_binding_tail() {
+    let _host_state = host_state_guard().await;
+    *CAPTURED_TRUSTED_HOST
+        .get_or_init(|| StdMutex::new(None))
+        .lock()
+        .unwrap() = None;
+
+    let init: unsafe extern "C" fn(*const TbHostVtable, *mut TbModuleVtable) -> i32 =
+        static_context_export::tinybus_module_init_v1;
+    let (out, outgoing) = start_context_export(init, false, false);
+    let receiver = CAPTURED_MODULE_NAME
+        .get_or_init(|| StdMutex::new(None))
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("old host still completes ordinary setup");
+    assert!(
+        CAPTURED_TRUSTED_HOST
+            .get_or_init(|| StdMutex::new(None))
+            .lock()
+            .unwrap()
+            .is_none(),
+        "an old host with no trusted-binding tail gives setup no capability"
+    );
+    assert_eq!(
+        send_context_probe_call(&out, &receiver, ":1.2", true, &outgoing),
+        serde_json::json!(false)
+    );
+    let shutdown = out.shutdown;
+    let context = out.module_ctx as usize;
+    assert_eq!(
+        tokio::task::spawn_blocking(move || unsafe { shutdown(context as *mut c_void, 1000) })
+            .await
+            .unwrap(),
+        TB_OK
+    );
+}
+
+#[cfg(feature = "static-link")]
+async fn capture_foreign_confidential_context() -> (
+    CallContext,
+    Connection,
+    tinybus::module::ModuleHost,
+    tokio::task::JoinHandle<Result<()>>,
+) {
+    let bus = tinybus::transport::memory::MemoryBus::new();
+    let broker = tinybus::broker::Broker::new();
+    let broker_task = broker.clone().spawn(bus.clone());
+    let module_host = tinybus::module::ModuleHost::new(broker);
+    let linked = foreign_context_export::linked_module().unwrap();
+    let info = module_host
+        .attach_linked_with_config(linked, serde_json::json!({}))
+        .unwrap();
+    module_host
+        .ensure_ready(info.manifest.bus_name.as_str())
+        .await
+        .unwrap();
+    let (captured_tx, captured_rx) = tokio::sync::oneshot::channel();
+    *FOREIGN_CONTEXT_SENDER
+        .get_or_init(|| StdMutex::new(None))
+        .lock()
+        .expect("foreign context sender lock") = Some(captured_tx);
+    let caller = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let expected_sender = BusName::new(":1.2").unwrap();
+    assert_eq!(caller.unique_name(), Some(expected_sender));
+    caller
+        .proxy(
+            info.manifest.bus_name.as_str(),
+            "/capture",
+            "org.example.ForeignContext",
+        )
+        .unwrap()
+        .call_confidential::<serde_json::Value>("Capture", ())
+        .await
+        .unwrap();
+    (captured_rx.await.unwrap(), caller, module_host, broker_task)
 }
 
 fn message() -> Message {
@@ -260,6 +814,7 @@ async fn module_transport_maps_host_results_and_wakes_after_receiving() {
     let transport = ModuleTransport {
         host: HostCalls(host(&[])),
         inbound: Mutex::new(receiver),
+        closed: close_signal(),
         provenance: Arc::new(AtomicBool::new(false)),
         detach_on_panic: true,
     };
@@ -294,6 +849,145 @@ async fn module_transport_maps_host_results_and_wakes_after_receiving() {
     transport.close().await.unwrap();
     assert!(transport.recv().await.unwrap().is_none());
     assert_eq!(transport.describe(), "module");
+}
+
+#[tokio::test]
+async fn module_transport_close_wakes_an_idle_pending_receive() {
+    let _host_state = host_state_guard().await;
+    let (sender, receiver) = mpsc::channel(1);
+    let transport = Arc::new(ModuleTransport {
+        host: HostCalls(host(&[])),
+        inbound: Mutex::new(receiver),
+        closed: close_signal(),
+        provenance: Arc::new(AtomicBool::new(false)),
+        detach_on_panic: false,
+    });
+    let receiving_transport = transport.clone();
+    let (receive_started, receive_started_rx) = tokio::sync::oneshot::channel();
+    let receiving = tokio::spawn(async move {
+        let _ = receive_started.send(());
+        receiving_transport.recv().await
+    });
+    receive_started_rx.await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if transport.inbound.try_lock().is_err() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the module receive is pending while it owns the receiver");
+
+    let closing_transport = transport.clone();
+    let (close_started, close_started_rx) = tokio::sync::oneshot::channel();
+    let mut closing = tokio::spawn(async move {
+        let _ = close_started.send(());
+        closing_transport.close().await
+    });
+    close_started_rx.await.unwrap();
+    match tokio::time::timeout(Duration::from_secs(2), &mut closing).await {
+        Ok(result) => assert!(result.unwrap().is_ok()),
+        Err(_) => {
+            // Negative control for the old implementation: one inbound frame
+            // releases the receiver mutex that close is incorrectly waiting on.
+            let frame = serde_json::to_vec(&message()).unwrap();
+            sender.send((frame, false)).await.unwrap();
+            assert!(receiving.await.unwrap().unwrap().is_some());
+            assert!(closing.await.unwrap().is_ok());
+            panic!("close must wake an idle module receive without another frame");
+        }
+    }
+    assert!(receiving.await.unwrap().unwrap().is_none());
+    transport.close().await.unwrap();
+    assert!(
+        sender
+            .try_send((serde_json::to_vec(&message()).unwrap(), false))
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn module_transport_close_before_recv_drains_queued_frames_and_rejects_new_ones() {
+    let _host_state = host_state_guard().await;
+    let (sender, receiver) = mpsc::channel(2);
+    let transport = ModuleTransport {
+        host: HostCalls(host(&[])),
+        inbound: Mutex::new(receiver),
+        closed: close_signal(),
+        provenance: Arc::new(AtomicBool::new(false)),
+        detach_on_panic: false,
+    };
+    let first = message();
+    let mut second = message();
+    second.header.serial = 2;
+    for frame in [&first, &second] {
+        sender
+            .send((serde_json::to_vec(frame).unwrap(), false))
+            .await
+            .unwrap();
+    }
+
+    transport.close().await.unwrap();
+    transport.close().await.unwrap();
+    assert_eq!(transport.recv().await.unwrap(), Some(first));
+    assert_eq!(transport.recv().await.unwrap(), Some(second));
+    assert!(transport.recv().await.unwrap().is_none());
+    assert!(
+        sender
+            .try_send((serde_json::to_vec(&message()).unwrap(), false))
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn module_transport_send_after_close_is_refused_before_host_delivery() {
+    let _host_state = host_state_guard().await;
+    let (_sender, receiver) = mpsc::channel(1);
+    let transport = ModuleTransport {
+        host: HostCalls(host(&[])),
+        inbound: Mutex::new(receiver),
+        closed: close_signal(),
+        provenance: Arc::new(AtomicBool::new(false)),
+        detach_on_panic: false,
+    };
+    HOST_SEND_CODE.store(TB_OK, Ordering::Release);
+    transport.close().await.unwrap();
+
+    assert!(matches!(
+        transport.send(message()).await,
+        Err(Error::ConnectionClosed)
+    ));
+}
+
+#[tokio::test]
+async fn a_cancelled_module_transport_close_leaves_a_persistent_wakeup() {
+    let _host_state = host_state_guard().await;
+    let (sender, receiver) = mpsc::channel(1);
+    let transport = Arc::new(ModuleTransport {
+        host: HostCalls(host(&[])),
+        inbound: Mutex::new(receiver),
+        closed: close_signal(),
+        provenance: Arc::new(AtomicBool::new(false)),
+        detach_on_panic: false,
+    });
+    let receiver_lock = transport.inbound.lock().await;
+    let closing_transport = transport.clone();
+    let closing = tokio::spawn(async move { closing_transport.close().await });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !*transport.closed.borrow() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("close publishes its wakeup before waiting for the receiver lock");
+    closing.abort();
+    let _ = closing.await;
+    drop(receiver_lock);
+
+    assert!(transport.recv().await.unwrap().is_none());
+    assert!(sender.is_closed());
 }
 
 #[tokio::test]
@@ -814,6 +1508,7 @@ async fn admission_never_promotes_a_frame_already_queued_without_provenance() {
     let transport = ModuleTransport {
         host: HostCalls(table),
         inbound: Mutex::new(receiver),
+        closed: close_signal(),
         provenance: Arc::new(AtomicBool::new(false)),
         detach_on_panic: false,
     };
@@ -843,6 +1538,7 @@ async fn old_hosts_retain_sender_headers_without_authenticating_them() {
     let transport = ModuleTransport {
         host: HostCalls(host(b"{}")),
         inbound: Mutex::new(receiver),
+        closed: close_signal(),
         provenance: Arc::new(AtomicBool::new(false)),
         detach_on_panic: false,
     };
@@ -911,6 +1607,7 @@ async fn unverified_native_frames_preserve_distinct_stream_owners_and_unverified
         let transport = Arc::new(ModuleTransport {
             host: HostCalls(table),
             inbound: Mutex::new(receiver),
+            closed: close_signal(),
             provenance: Arc::new(AtomicBool::new(false)),
             detach_on_panic: false,
         });

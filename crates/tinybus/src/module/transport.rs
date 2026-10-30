@@ -9,13 +9,16 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::{Mutex, Notify, mpsc};
 
+use crate::broker::RestrictedModuleControllerBinding;
 use crate::error::{Error, Result};
 use crate::message::codec::MAX_FRAME_LEN;
 use crate::message::{Message, MessageKind};
 use crate::module::abi::{
-    TB_BACKPRESSURE, TB_BAD_ARGUMENT, TB_CLOSED, TB_MODULE_VTABLE_BASE_SIZE, TB_OK, TB_PANICKED,
-    TB_TIMEOUT, TbHostVtable, TbModuleVtable,
+    TB_BACKPRESSURE, TB_BAD_ARGUMENT, TB_BUFFER_TOO_SMALL, TB_CLOSED, TB_MODULE_VTABLE_BASE_SIZE,
+    TB_NATIVE_TERMINAL_LIVE, TB_OK, TB_PANICKED, TB_TIMEOUT, TB_UNSUPPORTED, TbHostVtable,
+    TbModuleVtable, TbSlice,
 };
+use crate::module::host::PreReadyConfidentialRoute;
 use crate::ports::Transport;
 
 const HOST_QUEUE_CAPACITY: usize = 256;
@@ -45,6 +48,8 @@ struct HostContext {
     ready: AtomicBool,
     ready_gate: StdMutex<()>,
     broker_routing: AtomicBool,
+    trusted_host_binding: Option<RestrictedModuleControllerBinding>,
+    pre_ready_confidential_routes: Arc<[PreReadyConfidentialRoute]>,
     ready_notify: Notify,
     inflight: AtomicUsize,
 }
@@ -250,7 +255,17 @@ impl ModuleTransport {
         self.context.broker_routing.store(true, Ordering::Release);
     }
 
+    #[cfg(test)]
     pub(crate) fn new(label: String, config: Vec<u8>) -> (Arc<Self>, TbHostVtable) {
+        Self::new_with_controller_binding(label, config, None, Arc::from([]))
+    }
+
+    pub(crate) fn new_with_controller_binding(
+        label: String,
+        config: Vec<u8>,
+        trusted_host_binding: Option<RestrictedModuleControllerBinding>,
+        pre_ready_confidential_routes: Arc<[PreReadyConfidentialRoute]>,
+    ) -> (Arc<Self>, TbHostVtable) {
         let (inbound_tx, inbound_rx) = mpsc::channel(HOST_QUEUE_CAPACITY);
         let context = Box::leak(Box::new(HostContext {
             inbound: StdMutex::new(Some(inbound_tx)),
@@ -276,6 +291,8 @@ impl ModuleTransport {
             ready: AtomicBool::new(false),
             ready_gate: StdMutex::new(()),
             broker_routing: AtomicBool::new(false),
+            trusted_host_binding,
+            pre_ready_confidential_routes,
             ready_notify: Notify::new(),
             inflight: AtomicUsize::new(0),
         }));
@@ -325,6 +342,10 @@ impl ModuleTransport {
             ready: host_ready,
             broker_routing: Some(host_broker_routing),
             native_terminal_state: Some(host_native_terminal_state),
+            trusted_host_binding: context.trusted_host_binding.as_ref().map(|_| {
+                host_trusted_host_binding
+                    as unsafe extern "C" fn(*mut c_void, *mut u8, usize, *mut usize) -> i32
+            }),
         };
         (transport, vtable)
     }
@@ -440,7 +461,7 @@ impl ModuleTransport {
         self.context.admission_closed.load(Ordering::Acquire)
     }
 
-    fn is_stopped(&self) -> bool {
+    pub(crate) fn is_stopped(&self) -> bool {
         self.context.stopped.load(Ordering::Acquire)
     }
 
@@ -695,6 +716,21 @@ impl ModuleTransport {
         init: crate::module::abi::TbModuleInit,
         host: TbHostVtable,
     ) -> Result<()> {
+        self.eager_initialize_with(host, move |host| {
+            let mut module = TbModuleVtable::default();
+            let code = unsafe { init(&host, &mut module) };
+            if code == TB_OK {
+                Ok(module)
+            } else {
+                Err("module initialization failed".to_string())
+            }
+        })
+    }
+
+    pub(crate) fn eager_initialize_with<F>(&self, host: TbHostVtable, initialize: F) -> Result<()>
+    where
+        F: FnOnce(TbHostVtable) -> std::result::Result<TbModuleVtable, String>,
+    {
         let guard = self.lifecycle.clone().try_lock_owned().map_err(|_| {
             self.commit_terminal(true);
             self.context
@@ -710,13 +746,9 @@ impl ModuleTransport {
             .expect("physical state lock")
             .init = InitState::Entered;
         self.context.init_started.store(true, Ordering::Release);
-        let mut module = TbModuleVtable::default();
-        let code = unsafe { init(&host, &mut module) };
-        let result = if code == TB_OK {
-            self.initialize(module)
-        } else {
-            Err(Error::transport("module initialization failed"))
-        };
+        let result = initialize(host)
+            .map_err(Error::transport)
+            .and_then(|module| self.initialize(module));
         self.clear_config();
         {
             let mut state = self.context.physical.lock().expect("physical state lock");
@@ -799,6 +831,87 @@ impl ModuleTransport {
         self.context.ready.load(Ordering::Acquire) && !self.is_faulted() && !self.is_stopped()
     }
 
+    fn authorized_pre_ready_peer(&self, message: &Message) -> Option<crate::BusName> {
+        if message.header.kind != MessageKind::MethodCall || !message.header.confidential {
+            return None;
+        }
+
+        // Serialize the authorization point with READY publication. A call
+        // that passes this gate is admitted while initialization is active;
+        // READY and terminal transitions prevent later calls from using it.
+        let _ready = self.context.ready_gate.lock().expect("module ready lock");
+        if self.context.ready.load(Ordering::Acquire)
+            || !self.context.init_started.load(Ordering::Acquire)
+            || self.admission_closed()
+            || self.is_faulted()
+            || self.context.init_failed.load(Ordering::Acquire)
+            || self.is_stopped()
+            || !self.context.broker_routing.load(Ordering::Acquire)
+            || self.context.native_terminal_state.load(Ordering::Acquire)
+                != crate::module::abi::TB_NATIVE_TERMINAL_LIVE
+        {
+            return None;
+        }
+
+        let binding = self.context.trusted_host_binding.as_ref()?;
+        if message.header.sender.as_ref() != Some(binding.peer()) || !binding.is_live() {
+            return None;
+        }
+
+        self.context
+            .pre_ready_confidential_routes
+            .iter()
+            .any(|route| {
+                message.header.path.as_ref() == Some(&route.path)
+                    && message.header.interface.as_ref() == Some(&route.interface)
+                    && message.header.member.as_ref() == Some(&route.member)
+            })
+            .then(|| binding.peer().clone())
+    }
+
+    /// Whether a lazy initializer is still available for a pre-init config update.
+    pub(crate) fn has_deferred_initializer(&self) -> bool {
+        let state = self.context.physical.lock().expect("physical state lock");
+        !self.admission_closed()
+            && !self.is_faulted()
+            && state.init == InitState::Deferred
+            && state.cleanup == CleanupState::Idle
+            && self
+                .initializer
+                .lock()
+                .expect("module initializer lock")
+                .is_some()
+    }
+
+    /// Replace the configuration a deferred initializer will read, if it has
+    /// not been scheduled. The physical-state lock is held through pointer
+    /// replacement so `schedule_initializer` cannot take the old host vtable.
+    fn replace_deferred_config(&self, bytes: &crate::Secret) -> Result<bool> {
+        let state = self.context.physical.lock().expect("physical state lock");
+        if self.admission_closed() || self.is_faulted() {
+            return Err(Error::ConnectionClosed);
+        }
+        if state.init != InitState::Deferred || state.cleanup != CleanupState::Idle {
+            return Ok(false);
+        }
+        let mut initializer = self.initializer.lock().expect("module initializer lock");
+        let Some(initializer) = initializer.as_mut() else {
+            return Ok(false);
+        };
+        let replacement = bytes.expose_secret().to_vec();
+        let mut config = self.context.config.lock().expect("module config lock");
+        config.fill(0);
+        *config = replacement;
+        initializer.host.config = TbSlice {
+            ptr: config.as_ptr(),
+            len: config.len(),
+        };
+        if self.admission_closed() || self.is_faulted() {
+            return Err(Error::ConnectionClosed);
+        }
+        Ok(true)
+    }
+
     pub(crate) fn clear_config(&self) {
         let mut config = self.context.config.lock().expect("module config lock");
         config.fill(0);
@@ -811,7 +924,7 @@ impl ModuleTransport {
             return Err(Error::ConnectionClosed);
         }
         let started = std::time::Instant::now();
-        let lifecycle =
+        let mut lifecycle =
             tokio::time::timeout(MODULE_INIT_DEADLINE, self.lifecycle.clone().lock_owned())
                 .await
                 .map_err(|_| Error::Timeout {
@@ -821,6 +934,77 @@ impl ModuleTransport {
                 })?;
         if self.admission_closed() || self.is_faulted() {
             return Err(Error::ConnectionClosed);
+        }
+        if self.replace_deferred_config(&bytes)? {
+            return Ok(());
+        }
+        if self.module.lock().expect("module vtable lock").is_none() {
+            let initialization_in_progress = matches!(
+                self.context
+                    .physical
+                    .lock()
+                    .expect("physical state lock")
+                    .init,
+                InitState::Scheduled | InitState::Entered
+            );
+            if !initialization_in_progress {
+                return Err(Error::transport("module is not initialized"));
+            }
+            // An ordinary bus call may have scheduled lazy initialization
+            // before this reconfiguration acquired the lifecycle lock. Let the
+            // physical initializer run without holding either lifecycle or
+            // physical-state locks, then use only the original deadline for
+            // reacquisition and the native callback.
+            drop(lifecycle);
+            let remaining = MODULE_INIT_DEADLINE.saturating_sub(started.elapsed());
+            tokio::time::timeout(remaining, self.ensure_initialized())
+                .await
+                .map_err(|_| Error::Timeout {
+                    member: crate::MemberName::new("ReinitializeModule")
+                        .expect("static member name is valid"),
+                    timeout_ms: MODULE_INIT_DEADLINE.as_millis() as u64,
+                })??;
+            let remaining = MODULE_INIT_DEADLINE.saturating_sub(started.elapsed());
+            lifecycle = tokio::time::timeout(remaining, self.lifecycle.clone().lock_owned())
+                .await
+                .map_err(|_| Error::Timeout {
+                    member: crate::MemberName::new("ReinitializeModule")
+                        .expect("static member name is valid"),
+                    timeout_ms: MODULE_INIT_DEADLINE.as_millis() as u64,
+                })?;
+            if self.admission_closed() || self.is_faulted() {
+                return Err(Error::ConnectionClosed);
+            }
+        }
+        if !self.is_ready() {
+            // The C initializer only publishes its vtable. SDK setup is
+            // asynchronous and installs the reinitialization connection slot
+            // immediately before host.ready, so invoking the callback earlier
+            // can reject a valid replacement as closed. Readiness may wait on
+            // module code; never retain the lifecycle lock across that wait.
+            drop(lifecycle);
+            let remaining = MODULE_INIT_DEADLINE.saturating_sub(started.elapsed());
+            tokio::time::timeout(remaining, self.wait_ready())
+                .await
+                .map_err(|_| Error::Timeout {
+                    member: crate::MemberName::new("ReinitializeModule")
+                        .expect("static member name is valid"),
+                    timeout_ms: MODULE_INIT_DEADLINE.as_millis() as u64,
+                })?;
+            if !self.is_ready() {
+                return Err(Error::ConnectionClosed);
+            }
+            let remaining = MODULE_INIT_DEADLINE.saturating_sub(started.elapsed());
+            lifecycle = tokio::time::timeout(remaining, self.lifecycle.clone().lock_owned())
+                .await
+                .map_err(|_| Error::Timeout {
+                    member: crate::MemberName::new("ReinitializeModule")
+                        .expect("static member name is valid"),
+                    timeout_ms: MODULE_INIT_DEADLINE.as_millis() as u64,
+                })?;
+            if self.admission_closed() || self.is_faulted() || !self.is_ready() {
+                return Err(Error::ConnectionClosed);
+            }
         }
         let module = self
             .module
@@ -890,6 +1074,14 @@ impl ModuleTransport {
     }
 
     async fn deliver_now(&self, message: Message) -> Result<()> {
+        self.deliver_now_with_pre_ready_peer(message, None).await
+    }
+
+    async fn deliver_now_with_pre_ready_peer(
+        &self,
+        message: Message,
+        required_controller: Option<&crate::BusName>,
+    ) -> Result<()> {
         if self.is_faulted() || self.admission_closed() {
             return Err(Error::ConnectionClosed);
         }
@@ -908,6 +1100,15 @@ impl ModuleTransport {
                 return Err(Error::ConnectionClosed);
             };
             let lease = self.callbacks.enter()?;
+            if required_controller.is_some_and(|required| {
+                self.context
+                    .trusted_host_binding
+                    .as_ref()
+                    .is_none_or(|binding| binding.peer() != required || !binding.is_live())
+            }) {
+                drop(lease);
+                return Err(Error::ConnectionClosed);
+            }
             // Stop closes this gate and drains reservations before teardown;
             // a caller disappearing cannot refund a running native callback.
             let code = unsafe { (module.deliver)(module.module_ctx, bytes.as_ptr(), bytes.len()) };
@@ -1388,6 +1589,61 @@ unsafe extern "C" fn host_native_terminal_state(ctx: *mut c_void) -> u32 {
     )
 }
 
+unsafe extern "C" fn host_trusted_host_binding(
+    ctx: *mut c_void,
+    out: *mut u8,
+    capacity: usize,
+    out_len: *mut usize,
+) -> i32 {
+    if out_len.is_null() {
+        return TB_BAD_ARGUMENT;
+    }
+    unsafe { out_len.write(0) };
+    if capacity > crate::name::MAX_NAME_LEN || (out.is_null() && capacity != 0) {
+        return TB_BAD_ARGUMENT;
+    }
+
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let Some(context) = (unsafe { ctx.cast::<HostContext>().as_ref() }) else {
+            return TB_CLOSED;
+        };
+        let Some(binding) = context.trusted_host_binding.as_ref() else {
+            return TB_UNSUPPORTED;
+        };
+        let owner = context.owner.lock().ok().and_then(|owner| owner.upgrade());
+        let Some(owner) = owner else {
+            return TB_CLOSED;
+        };
+        if context.native_terminal_state.load(Ordering::Acquire) != TB_NATIVE_TERMINAL_LIVE
+            || !owner.init_started()
+            || owner.init_failed()
+            || owner.is_stopped()
+            || owner.is_faulted()
+            || owner.admission_closed()
+            || !binding.is_live()
+        {
+            return TB_CLOSED;
+        }
+
+        let peer = binding.peer().as_str().as_bytes();
+        if peer.len() > crate::name::MAX_NAME_LEN {
+            return TB_BAD_ARGUMENT;
+        }
+        if capacity < peer.len() {
+            unsafe { out_len.write(peer.len()) };
+            return TB_BUFFER_TOO_SMALL;
+        }
+        if !peer.is_empty() {
+            unsafe { std::ptr::copy_nonoverlapping(peer.as_ptr(), out, peer.len()) };
+        }
+        unsafe { out_len.write(peer.len()) };
+        TB_OK
+    })) {
+        Ok(code) => code,
+        Err(_) => TB_PANICKED,
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum StopError {
     NotStarted(Error),
@@ -1443,6 +1699,12 @@ impl Transport for ModuleTransport {
             return Err(Error::ConnectionClosed);
         }
         let is_call = message.header.kind == MessageKind::MethodCall;
+        let pre_ready_bypass_peer = if is_call {
+            self.authorized_pre_ready_peer(&message)
+                .filter(|_| !self.is_ready())
+        } else {
+            None
+        };
         {
             let mut pending = self.pending.lock().expect("module pending lock");
             if self.admission_closed() {
@@ -1451,7 +1713,7 @@ impl Transport for ModuleTransport {
             if is_call {
                 self.context.inflight.fetch_add(1, Ordering::AcqRel);
             }
-            if is_call && !self.is_ready() {
+            if is_call && !self.is_ready() && pre_ready_bypass_peer.is_none() {
                 pending.push_back(message);
                 if !self.drain_started.swap(true, Ordering::AcqRel) {
                     let transport = self.self_ref.upgrade().ok_or(Error::ConnectionClosed)?;
@@ -1460,7 +1722,9 @@ impl Transport for ModuleTransport {
                 return Ok(());
             }
         }
-        let result = self.deliver_now(message).await;
+        let result = self
+            .deliver_now_with_pre_ready_peer(message, pre_ready_bypass_peer.as_ref())
+            .await;
         if result.is_err() && is_call {
             self.context.inflight.fetch_sub(1, Ordering::AcqRel);
         }

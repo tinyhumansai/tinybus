@@ -275,6 +275,287 @@ async fn factory_callback_with_copying_clone_keeps_initial_admission_on_reinitia
     assert!(proxy.call::<bool>("Mode", ()).await.unwrap());
 }
 
+mod context_factory_export {
+    #![deny(missing_docs)]
+
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    /// Counts constructions so the test can distinguish instances from setups.
+    pub(super) static FACTORIES: AtomicUsize = AtomicUsize::new(0);
+
+    #[derive(serde::Deserialize)]
+    struct Config {
+        restricted: bool,
+    }
+
+    struct Service {
+        mode: bool,
+        generation: usize,
+        trusted_host: TrustedHost,
+    }
+
+    #[async_trait::async_trait]
+    impl tinybus::service::Interface for Service {
+        fn name(&self) -> tinybus::InterfaceName {
+            "org.example.ContextFactory".parse().unwrap()
+        }
+
+        fn members(&self) -> Vec<tinybus::MemberName> {
+            vec!["Inspect".parse().unwrap()]
+        }
+
+        fn requires_confidential(&self, _: &tinybus::MemberName) -> bool {
+            true
+        }
+
+        async fn call(
+            &self,
+            _: &tinybus::MemberName,
+            _: serde_json::Value,
+        ) -> tinybus::Result<serde_json::Value> {
+            Err(tinybus::Error::failed("context-aware dispatch required"))
+        }
+
+        async fn call_with_context(
+            &self,
+            member: &tinybus::MemberName,
+            args: serde_json::Value,
+            context: &tinybus::CallContext,
+        ) -> tinybus::Result<serde_json::Value> {
+            if !self.trusted_host.authorizes(context) {
+                return Err(tinybus::Error::failed(
+                    "factory context authority unavailable",
+                ));
+            }
+            if member.as_str() != "Inspect" {
+                return Err(tinybus::Error::failed("unknown method"));
+            }
+            if args != serde_json::json!([]) {
+                return Err(tinybus::Error::failed("expected no arguments"));
+            }
+            Ok(serde_json::json!({
+                "restricted": self.mode,
+                "generation": self.generation,
+            }))
+        }
+    }
+
+    fn factory() -> impl Fn(ModuleSetupContext, Config) -> SetupFuture + Send + Sync + 'static {
+        FACTORIES.fetch_add(1, Ordering::SeqCst);
+        let mode = Arc::new(tokio::sync::Mutex::new(None));
+        let generation = Arc::new(AtomicUsize::new(0));
+        move |context, config: Config| {
+            let mode = Arc::clone(&mode);
+            let generation = Arc::clone(&generation);
+            Box::pin(async move {
+                let mut admitted = mode.lock().await;
+                if admitted.is_some_and(|initial| initial != config.restricted) {
+                    return Err(tinybus::Error::failed("immutable mode"));
+                }
+                *admitted = Some(config.restricted);
+                drop(admitted);
+                let trusted_host = context
+                    .trusted_host()
+                    .cloned()
+                    .ok_or_else(|| tinybus::Error::failed("trusted host unavailable"))?;
+                let generation = generation.fetch_add(1, Ordering::SeqCst) + 1;
+                context
+                    .connection()
+                    .serve_at(
+                        "/context_factory".parse()?,
+                        Service {
+                            mode: config.restricted,
+                            generation,
+                            trusted_host,
+                        },
+                    )
+                    .await?;
+                context
+                    .connection()
+                    .request_name("org.example.ContextFactory")
+                    .await
+            })
+        }
+    }
+
+    crate::module_export_static! {
+        setup_factory_with_context = factory,
+        config = Config,
+        worker_threads = 1,
+        provides = ["org.example.ContextFactory"],
+        methods = ["Inspect"],
+        signals = [],
+        requires = [],
+        optional = [],
+        lazy = false,
+    }
+
+    #[test]
+    fn invalid_initial_configuration_does_not_construct_context_factory_state() {
+        let _guard = TEST_LOCK.blocking_lock();
+        let before = FACTORIES.load(Ordering::SeqCst);
+        let host = ModuleHost::new(Broker::new());
+        assert!(
+            host.attach_linked_with_config(
+                linked_module().unwrap(),
+                serde_json::json!({"restricted":"invalid"}),
+            )
+            .is_err()
+        );
+        assert_eq!(FACTORIES.load(Ordering::SeqCst), before);
+    }
+
+    #[test]
+    fn invalid_host_is_rejected_before_context_factory_construction() {
+        let _guard = TEST_LOCK.blocking_lock();
+        let before = FACTORIES.load(Ordering::SeqCst);
+        let result = unsafe {
+            start_linked_reconfigurable_module_with_context_factory::<Config, _, _>(
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                1,
+                true,
+                factory,
+            )
+        };
+        assert_eq!(result, TB_BAD_ARGUMENT);
+        assert_eq!(FACTORIES.load(Ordering::SeqCst), before);
+    }
+}
+
+async fn contextual_factory_instance(
+    restricted: bool,
+) -> (ModuleHost, Broker, Connection, tinybus::Proxy) {
+    use tinybus::transport::memory::MemoryTransport;
+
+    let broker = Broker::new_restricted_module_control();
+    let (broker_transport, controller_transport) = MemoryTransport::pair();
+    let selected_controller = broker
+        .attach_module_controller(Arc::new(broker_transport))
+        .unwrap();
+    let controller = Connection::connect(Box::new(controller_transport))
+        .await
+        .unwrap();
+    assert_eq!(
+        controller.unique_name().as_ref(),
+        Some(&selected_controller)
+    );
+    let host = ModuleHost::new(broker.clone());
+    host.attach_linked_with_config(
+        context_factory_export::linked_module().unwrap(),
+        serde_json::json!({"restricted":restricted}),
+    )
+    .unwrap();
+    let proxy = controller
+        .proxy(
+            "org.example.ContextFactory",
+            "/context_factory",
+            "org.example.ContextFactory",
+        )
+        .unwrap();
+    (host, broker, controller, proxy)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn contextual_factory_is_per_instance_authorized_confidential_and_reinit_stable() {
+    let _guard = TEST_LOCK.lock().await;
+    use tinybus::transport::memory::MemoryTransport;
+
+    let before = context_factory_export::FACTORIES.load(Ordering::SeqCst);
+    let ((first, broker, controller, first_proxy), (_second, _, _, second_proxy)) = tokio::join!(
+        contextual_factory_instance(true),
+        contextual_factory_instance(false)
+    );
+    assert_eq!(
+        context_factory_export::FACTORIES.load(Ordering::SeqCst) - before,
+        2,
+        "the context factory must run once for each ABI instance"
+    );
+    assert!(first_proxy.attestation().await.unwrap().is_some());
+    assert!(
+        first_proxy
+            .call::<serde_json::Value>("Inspect", ())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        first_proxy
+            .call_confidential::<serde_json::Value>("Inspect", ())
+            .await
+            .unwrap(),
+        serde_json::json!({"restricted":true,"generation":1})
+    );
+    assert_eq!(
+        second_proxy
+            .call_confidential::<serde_json::Value>("Inspect", ())
+            .await
+            .unwrap(),
+        serde_json::json!({"restricted":false,"generation":1})
+    );
+
+    let (outsider_server, outsider_client) = MemoryTransport::pair();
+    broker.attach(Arc::new(outsider_server));
+    let outsider = Connection::connect(Box::new(outsider_client))
+        .await
+        .unwrap();
+    let outsider_proxy = outsider
+        .proxy(
+            "org.example.ContextFactory",
+            "/context_factory",
+            "org.example.ContextFactory",
+        )
+        .unwrap();
+    let denied = outsider_proxy
+        .call_confidential::<serde_json::Value>("Inspect", serde_json::json!("malformed"))
+        .await
+        .unwrap_err();
+    assert!(
+        denied
+            .to_string()
+            .contains("factory context authority unavailable")
+    );
+    let malformed = first_proxy
+        .call_confidential::<serde_json::Value>("Inspect", serde_json::json!("malformed"))
+        .await
+        .unwrap_err();
+    assert!(malformed.to_string().contains("expected no arguments"));
+
+    first
+        .reinitialize("tinybus-module", serde_json::json!({"restricted":true}))
+        .await
+        .unwrap();
+    assert_eq!(
+        first_proxy
+            .call_confidential::<serde_json::Value>("Inspect", ())
+            .await
+            .unwrap(),
+        serde_json::json!({"restricted":true,"generation":2})
+    );
+    assert!(
+        first
+            .reinitialize("tinybus-module", serde_json::json!({"restricted":false}))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        first_proxy
+            .call_confidential::<serde_json::Value>("Inspect", ())
+            .await
+            .unwrap(),
+        serde_json::json!({"restricted":true,"generation":2}),
+        "a refused reinitialization must leave the live service and its trusted context intact"
+    );
+    assert_eq!(
+        second_proxy
+            .call_confidential::<serde_json::Value>("Inspect", ())
+            .await
+            .unwrap(),
+        serde_json::json!({"restricted":false,"generation":1})
+    );
+    controller.close().await.unwrap();
+}
+
 mod failed_setup {
     use super::*;
     pub(super) static DROPPED: AtomicUsize = AtomicUsize::new(0);

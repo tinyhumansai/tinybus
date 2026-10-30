@@ -371,6 +371,42 @@ async fn replacing_module_host_does_not_relax_broker_controller_admission() {
     assert_eq!(*replacement.0.lock().unwrap(), vec!["LoadModule"]);
 }
 
+#[tokio::test]
+async fn a_module_binding_snapshot_is_fixed_to_a_live_selected_controller() {
+    let permissive = Broker::new();
+    assert!(permissive.restricted_module_controller_binding().is_none());
+
+    let broker = Broker::new_restricted_module_control();
+    assert!(broker.restricted_module_controller_binding().is_none());
+    let (server, client) = MemoryTransport::pair();
+    let selected = broker.attach_module_controller(Arc::new(server)).unwrap();
+    let controller = Connection::connect(Box::new(client)).await.unwrap();
+    assert_eq!(controller.unique_name().as_ref(), Some(&selected));
+
+    let binding = broker
+        .restricted_module_controller_binding()
+        .expect("live selected controller is snapshotted");
+    assert_eq!(binding.peer(), &selected);
+    assert!(binding.is_live());
+
+    controller.close().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while binding.is_live() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("disconnect removes the selected unique peer");
+    assert!(broker.restricted_module_controller_binding().is_none());
+    let (replacement_server, _replacement_client) = MemoryTransport::pair();
+    assert!(
+        broker
+            .attach_module_controller(Arc::new(replacement_server))
+            .is_err(),
+        "a dead selection cannot be rebound on the same broker"
+    );
+}
+
 /// The default test runtime has one thread: a load that blocks it would hold
 /// every other connection's call until the load returned.
 #[tokio::test]

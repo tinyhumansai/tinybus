@@ -72,6 +72,27 @@ unsafe extern "C" fn fault(_: *mut c_void, _: *const u8, _: usize) {}
 unsafe extern "C" fn query(ctx: *mut c_void) -> u32 {
     unsafe { ctx.cast::<u32>().read() }
 }
+unsafe extern "C" fn trusted_host_query(
+    _: *mut c_void,
+    out: *mut u8,
+    capacity: usize,
+    out_len: *mut usize,
+) -> i32 {
+    if out_len.is_null() || (out.is_null() && capacity != 0) {
+        return TB_BAD_ARGUMENT;
+    }
+    let sender = b":1.42";
+    unsafe { out_len.write(0) };
+    if capacity < sender.len() {
+        unsafe { out_len.write(sender.len()) };
+        return TB_BUFFER_TOO_SMALL;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(sender.as_ptr(), out, sender.len());
+        out_len.write(sender.len());
+    }
+    TB_OK
+}
 
 fn frozen_prefix(size: usize) -> FrozenHostPrefix {
     FrozenHostPrefix {
@@ -194,6 +215,69 @@ fn terminal_tail_requires_its_complete_field() {
                     TB_NATIVE_TERMINAL_LIVE
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn trusted_host_tail_requires_its_complete_field_and_preserves_older_tails() {
+    let terminal_end = std::mem::offset_of!(TbHostVtable, native_terminal_state)
+        + size_of::<Option<unsafe extern "C" fn(*mut c_void) -> u32>>();
+    let trusted_host_end = std::mem::offset_of!(TbHostVtable, trusted_host_binding)
+        + size_of::<Option<unsafe extern "C" fn(*mut c_void, *mut u8, usize, *mut usize) -> i32>>();
+    for size in terminal_end..=trusted_host_end {
+        let layout = std::alloc::Layout::from_size_align(size, align_of::<TbHostVtable>()).unwrap();
+        let storage = unsafe { std::alloc::alloc_zeroed(layout) };
+        assert!(!storage.is_null());
+        unsafe {
+            storage
+                .cast::<FrozenHostPrefix>()
+                .write(frozen_prefix(size))
+        };
+        unsafe {
+            storage
+                .add(std::mem::offset_of!(TbHostVtable, broker_routing))
+                .cast::<Option<unsafe extern "C" fn(*mut c_void) -> u32>>()
+                .write(Some(query));
+            storage
+                .add(std::mem::offset_of!(TbHostVtable, native_terminal_state))
+                .cast::<Option<unsafe extern "C" fn(*mut c_void) -> u32>>()
+                .write(Some(query));
+        }
+        if size >= trusted_host_end {
+            unsafe {
+                storage
+                    .add(std::mem::offset_of!(TbHostVtable, trusted_host_binding))
+                    .cast::<Option<
+                        unsafe extern "C" fn(*mut c_void, *mut u8, usize, *mut usize) -> i32,
+                    >>()
+                    .write(Some(trusted_host_query));
+            }
+        }
+        let normalized = unsafe { TbHostVtable::read_compatible(storage.cast()) }.unwrap();
+        unsafe { std::alloc::dealloc(storage, layout) };
+        assert!(normalized.broker_routing.is_some());
+        assert!(normalized.native_terminal_state.is_some());
+        assert_eq!(
+            normalized.trusted_host_binding.is_some(),
+            size >= trusted_host_end,
+            "declared host vtable size {size}"
+        );
+        if let Some(query) = normalized.trusted_host_binding {
+            let mut bytes = [0; 8];
+            let mut len = usize::MAX;
+            assert_eq!(
+                unsafe {
+                    query(
+                        normalized.host_ctx,
+                        bytes.as_mut_ptr(),
+                        bytes.len(),
+                        &mut len,
+                    )
+                },
+                TB_OK
+            );
+            assert_eq!(&bytes[..len], b":1.42");
         }
     }
 }

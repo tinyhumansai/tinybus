@@ -9,6 +9,32 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  host-core-msrv:
+    name: Host core and client Rust 1.85
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.85.0
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check default host core features at the declared MSRV
+        run: cargo check --locked --manifest-path crates/tinybus/Cargo.toml --lib
+
+      - name: Check minimal host core features at the declared MSRV
+        run: cargo check --locked --manifest-path crates/tinybus/Cargo.toml --lib --no-default-features
+
+      - name: Check all host core features at the declared MSRV
+        run: cargo check --locked --manifest-path crates/tinybus/Cargo.toml --lib --all-features
+
+      - name: Exercise the public client from an isolated consumer without SDK dev fixtures
+        run: cargo test --locked --all-targets --all-features --manifest-path proof-workspaces/msrv-185-client/Cargo.toml
+
   module-ci:
     uses: tinyhumansai/.github/.github/workflows/module-ci.yml@4adc1080fb495098e7af1aade82ed7e6e3c69bb7
     with:

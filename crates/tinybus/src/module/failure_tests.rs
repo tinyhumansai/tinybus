@@ -61,6 +61,39 @@ fn unknown_modules_share_one_anonymous_key() {
 }
 
 #[test]
+fn report_for_uses_only_a_matching_registry_record() {
+    let (sink, reporter) = reporter();
+    let records = [crate::module::ReleaseRecord {
+        id: "registry-module",
+        bus_name: "ai.tinyhumans.test.RegistryModule",
+        object_path: "/ai/tinyhumans/test/RegistryModule",
+        version: "1.2.3",
+        release_url: "https://github.com/tinyhumansai/tinybus/releases/tag/v1.2.3",
+        assets: &[],
+    }];
+    reporter.report_for(&records, "registry-module", Reason::ModuleFault);
+    reporter.report_for(&records, "registry-module", Reason::ModuleFault);
+    reporter.report_for(&records, "attacker-controlled-id", Reason::ModuleFault);
+    assert_eq!(
+        sink.reports.lock().unwrap().as_slice(),
+        &[
+            (
+                "registry-module".to_string(),
+                "1.2.3".to_string(),
+                Reason::ModuleFault,
+                format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+            ),
+            (
+                "unregistered".to_string(),
+                "unknown".to_string(),
+                Reason::UnknownModule,
+                format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+            ),
+        ]
+    );
+}
+
+#[test]
 fn a_sink_that_is_not_ready_does_not_spend_the_key() {
     let (sink, reporter) = reporter();
     sink.unready.store(true, Ordering::SeqCst);

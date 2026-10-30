@@ -3,7 +3,8 @@
 use super::*;
 use crate::Connection;
 use crate::module::abi::TbAbiDescriptor;
-use crate::transport::memory::MemoryBus;
+use crate::module::runtime::{ModuleRuntime, RuntimeNames};
+use crate::transport::memory::{MemoryBus, MemoryTransport};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex as StdMutex, OnceLock};
 
@@ -18,6 +19,13 @@ static REINIT_CONFIG: OnceLock<StdMutex<Vec<u8>>> = OnceLock::new();
 static BLOCKING_REINIT_RECEIVER: OnceLock<StdMutex<Option<std::sync::mpsc::Receiver<()>>>> =
     OnceLock::new();
 static BLOCKING_REINIT_STARTED: AtomicBool = AtomicBool::new(false);
+
+#[test]
+fn module_host_is_send_and_sync() {
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    assert_send_sync::<ModuleHost>();
+}
 
 #[cfg(unix)]
 fn make_private_tree(root: &Path, path: &Path) {
@@ -185,6 +193,47 @@ pub(super) fn manifest() -> ModuleManifest {
     named_manifest("clock", "Clock")
 }
 
+#[tokio::test]
+async fn pre_ready_route_policy_is_bounded_unique_and_fixed_before_admission() {
+    let host = ModuleHost::new(Broker::new());
+    let route = PreReadyConfidentialRoute {
+        path: ObjectPath::new("/ai/tinyhumans/storage").unwrap(),
+        interface: crate::InterfaceName::new("ai.tinyhumans.Storage").unwrap(),
+        member: crate::MemberName::new("GetSchema").unwrap(),
+    };
+
+    host.set_pre_ready_confidential_routes(vec![route.clone()])
+        .expect("one exact route is valid");
+    assert!(
+        host.set_pre_ready_confidential_routes(vec![route.clone(), route.clone()])
+            .is_err()
+    );
+    assert!(
+        host.set_pre_ready_confidential_routes(
+            (0..=MAX_PRE_READY_CONFIDENTIAL_ROUTES)
+                .map(|index| PreReadyConfidentialRoute {
+                    path: ObjectPath::new(format!("/ai/tinyhumans/storage/item{index}")).unwrap(),
+                    interface: crate::InterfaceName::new("ai.tinyhumans.Storage").unwrap(),
+                    member: crate::MemberName::new("GetSchema").unwrap(),
+                })
+                .collect(),
+        )
+        .is_err()
+    );
+
+    host.attach_linked_with_config(
+        LinkedModule {
+            descriptor: TbAbiDescriptor::current("clock", "0.1.0"),
+            manifest: manifest(),
+            init: lazy_echo_init,
+            init_with_setup: None,
+        },
+        serde_json::json!({}),
+    )
+    .expect("fixture module is admitted");
+    assert!(host.set_pre_ready_confidential_routes(Vec::new()).is_err());
+}
+
 fn named_manifest(module_name: &str, surface_name: &str) -> ModuleManifest {
     ModuleManifest {
         schema: MANIFEST_SCHEMA,
@@ -221,11 +270,38 @@ async fn linked_module_is_admitted_without_a_library_file_and_attested_as_host_c
                 descriptor: TbAbiDescriptor::current("clock", "0.1.0"),
                 manifest: module_manifest,
                 init: lazy_echo_init,
+                init_with_setup: None,
             },
             serde_json::json!({}),
         )
         .unwrap();
     assert_eq!(info.state, ModuleState::Resolved);
+
+    // Identity comes from the module's broker-assigned unique peer. A
+    // well-known alias is only a routing name and must never resolve as a
+    // module sender.
+    let unique = host.inner.loaded.lock().unwrap()[0].unique_name.clone();
+    let lookup = host.sender_lookup();
+    let module_id = host
+        .module_for_sender(&unique)
+        .expect("an admitted module resolves from its unique peer");
+    assert_eq!(module_id.as_str(), "clock");
+    assert!(host.sender_for_module("clock").is_none());
+    assert!(lookup.sender_for_module("clock").is_none());
+    assert_eq!(host.list()[0].state, ModuleState::Resolved);
+    assert_eq!(
+        lookup
+            .module_for_sender(&unique)
+            .as_ref()
+            .map(ModuleId::as_str),
+        Some("clock")
+    );
+    assert!(host.module_for_sender(&info.manifest.bus_name).is_none());
+    assert!(
+        host.sender_for_module("ai.tinyhumans.module.Clock")
+            .is_none()
+    );
+    assert!(lookup.module_for_sender(&info.manifest.bus_name).is_none());
 
     let connection = Connection::connect(bus.connect().await.unwrap())
         .await
@@ -240,7 +316,54 @@ async fn linked_module_is_admitted_without_a_library_file_and_attested_as_host_c
         attestation.sha256,
         crate::module::sha256_file(executable).unwrap()
     );
+
+    let alias: crate::BusName = "ai.tinyhumans.test.ModuleAliasHandover".parse().unwrap();
+    let first_owner = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    first_owner.request_name(alias.as_str()).await.unwrap();
+    assert!(host.module_for_sender(&alias).is_none());
+    drop(first_owner);
+    let replacement_owner = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    replacement_owner
+        .request_name(alias.as_str())
+        .await
+        .unwrap();
+    assert!(host.module_for_sender(&alias).is_none());
+    assert_eq!(
+        host.module_for_sender(&unique)
+            .expect("alias handover does not change module identity")
+            .as_str(),
+        "clock"
+    );
+
+    host.inner
+        .stop(&info.name, Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert!(host.module_for_sender(&unique).is_none());
+    assert!(host.sender_for_module("clock").is_none());
+    assert!(lookup.module_for_sender(&unique).is_none());
     broker_task.abort();
+}
+
+#[test]
+fn an_owned_sender_lookup_does_not_keep_its_host_alive() {
+    let host = ModuleHost::new(Broker::new());
+    let observed_lifetime = std::sync::Arc::downgrade(&host.inner);
+    let lookup = host.sender_lookup();
+    let peer: crate::BusName = ":1.4242".parse().unwrap();
+
+    assert_eq!(observed_lifetime.strong_count(), 1);
+    assert!(lookup.module_for_sender(&peer).is_none());
+    assert!(lookup.sender_for_module("clock").is_none());
+    drop(host);
+
+    assert_eq!(observed_lifetime.strong_count(), 0);
+    assert!(lookup.module_for_sender(&peer).is_none());
+    assert!(lookup.sender_for_module("clock").is_none());
 }
 
 #[test]
@@ -263,6 +386,7 @@ fn linked_module_with_an_unmet_required_interface_is_refused_before_init() {
                 descriptor: TbAbiDescriptor::current("clock", "0.1.0"),
                 manifest: module_manifest,
                 init: init_that_must_not_run,
+                init_with_setup: None,
             },
             serde_json::json!({}),
         )
@@ -565,7 +689,7 @@ async fn a_lazy_manifest_registers_an_unmapped_library_and_the_first_call_loads_
         let discovered = read_lazy_manifest(&artifact).unwrap().unwrap();
         // No pin: this stands in for a directory scan, which vouches for an
         // artifact with the `modules.toml` beside it or not at all.
-        host.register_lazy(&artifact, discovered, serde_json::json!({}), None)
+        host.register_lazy(&artifact, discovered, serde_json::json!({}), None, None)
             .unwrap()
     };
     assert_eq!(info.state, ModuleState::Resolved);
@@ -594,15 +718,19 @@ async fn a_lazy_manifest_registers_an_unmapped_library_and_the_first_call_loads_
 /// real library, as above, so admission runs without mapping anything.
 #[cfg(not(windows))]
 #[tokio::test]
-async fn a_bundle_marker_equal_to_the_pin_admits_the_extraction_without_its_archive() {
+async fn a_bundle_marker_uses_the_post_sign_allowlist_when_the_release_library_pin_differs() {
     use crate::module::{ReleaseAsset, ReleasePlan, artifact_dir, load_first_admitted};
 
     let bundled = tempfile::tempdir().unwrap();
     let user_cache = tempfile::tempdir().unwrap();
+    // Code signing can rewrite the bundled library after the release archive
+    // was hashed. The sealed local allowlist carries the final library digest.
+    let release_library_sha256 = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
     let asset = ReleaseAsset {
         host_key: "macos-15-arm64",
         archive: "clock-macos-15-arm64.tar.gz",
         sha256: "abababababababababababababababababababababababababababababababab",
+        library_sha256: Some(release_library_sha256),
     };
     let dir = artifact_dir(bundled.path(), "clock", "0.1.0", asset.host_key).unwrap();
     std::fs::create_dir_all(&dir).unwrap();
@@ -663,11 +791,14 @@ async fn a_bundle_marker_equal_to_the_pin_admits_the_extraction_without_its_arch
         .await
         .unwrap()
         .expect("the allowlisted extraction is attested");
+    let signed_library_sha256 = crate::module::sha256_file(&artifact).unwrap();
+    assert_eq!(attestation.sha256, signed_library_sha256);
     assert_eq!(
-        attestation.sha256,
-        crate::module::sha256_file(&artifact).unwrap()
+        attestation.library_sha256.as_deref(),
+        Some(signed_library_sha256.as_str())
     );
     assert_ne!(attestation.sha256, asset.sha256);
+    assert_ne!(attestation.library_sha256.as_deref(), asset.library_sha256);
     broker_task.abort();
 }
 
@@ -682,6 +813,7 @@ async fn a_bundle_marker_without_an_allowlist_is_refused_rather_than_loaded_unha
         host_key: "macos-15-arm64",
         archive: "clock-macos-15-arm64.tar.gz",
         sha256: "abababababababababababababababababababababababababababababababab",
+        library_sha256: None,
     };
     let dir = artifact_dir(bundled.path(), "clock", "0.1.0", asset.host_key).unwrap();
     std::fs::create_dir_all(&dir).unwrap();
@@ -1942,20 +2074,6 @@ fn module_host_helpers_preserve_safe_names_states_and_allowlist_decisions() {
     })));
     assert!(!has_library_extension(Path::new("clock.txt")));
 
-    #[cfg(windows)]
-    let _local_app_data = {
-        let directory = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("LOCALAPPDATA", directory.path()) };
-        directory
-    };
-    let search_paths = ModuleHost::search_paths();
-    assert!(
-        search_paths
-            .iter()
-            .any(|path| path.ends_with("openhuman/modules"))
-    );
-    let _ = ModuleHost::new(Broker::new()).load_search_paths();
-
     let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
     let directory = root.path().join("private");
     // Protect the artifact parent before files inherit the checkout's DACL.
@@ -2397,7 +2515,7 @@ async fn a_module_from_a_pinned_release_becomes_an_attested_recipient_without_an
     broker.spawn(bus.clone());
     let host = ModuleHost::new(broker.clone());
     let info = host
-        .load_file_pinned(&staged, serde_json::json!({}), Some(pinned.clone()))
+        .load_file_pinned(&staged, serde_json::json!({}), Some(pinned.clone()), None)
         .unwrap();
 
     let client = Connection::connect(bus.connect().await.unwrap())
@@ -2490,9 +2608,404 @@ async fn a_real_cdylib_authenticates_incoming_calls_and_its_host_callback() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires TINYBUS_TEST_CONFIGURED_CONTEXT_MODULE to point at the built cdylib"]
+async fn a_configured_context_cdylib_preserves_binding_through_reinitialize() {
+    let artifact =
+        PathBuf::from(std::env::var_os("TINYBUS_TEST_CONFIGURED_CONTEXT_MODULE").unwrap());
+    let hash = crate::module::hash::file_hex(std::fs::File::open(&artifact).unwrap()).unwrap();
+    let (_dir, artifact) = staged_module(&artifact, &hash);
+
+    let broker = Broker::new_restricted_module_control();
+    let (broker_transport, controller_transport) = MemoryTransport::pair();
+    let selected_controller = broker
+        .attach_module_controller(Arc::new(broker_transport))
+        .unwrap();
+    let controller = Connection::connect(Box::new(controller_transport))
+        .await
+        .unwrap();
+    assert_eq!(
+        controller.unique_name().as_ref(),
+        Some(&selected_controller)
+    );
+
+    let modules = ModuleHost::new(broker.clone());
+    let info = modules.load_file(&artifact).unwrap();
+    modules
+        .ensure_ready(info.manifest.bus_name.as_str())
+        .await
+        .expect("configured setup receives the selected controller context");
+    let proxy = controller
+        .proxy(
+            info.manifest.bus_name.as_str(),
+            "/context",
+            "org.example.Context",
+        )
+        .unwrap();
+    assert!(proxy.attestation().await.unwrap().is_some());
+    assert_eq!(
+        proxy.call::<String>("Configuration", ()).await.unwrap(),
+        "initial"
+    );
+    let initial: serde_json::Value = proxy.call_confidential("TrustedContext", ()).await.unwrap();
+    assert_eq!(initial["authorized"], true);
+    assert_eq!(initial["previousAuthorized"], false);
+
+    modules
+        .reinitialize(
+            info.manifest.module.name.as_str(),
+            serde_json::json!({"marker": "reconfigured"}),
+        )
+        .await
+        .expect("reconfigure receives a fresh context with the same binding");
+    assert_eq!(
+        proxy.call::<String>("Configuration", ()).await.unwrap(),
+        "reconfigured"
+    );
+    let after_reinitialize: serde_json::Value =
+        proxy.call_confidential("TrustedContext", ()).await.unwrap();
+    assert_eq!(after_reinitialize["authorized"], true);
+
+    controller.close().await.unwrap();
+    let (other_server, other_transport) = MemoryTransport::pair();
+    broker.attach(Arc::new(other_server));
+    let other = Connection::connect(Box::new(other_transport))
+        .await
+        .unwrap();
+    let other_proxy = other
+        .proxy(
+            info.manifest.bus_name.as_str(),
+            "/context",
+            "org.example.Context",
+        )
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let authorization: serde_json::Value = other_proxy
+                .call_confidential("TrustedContext", ())
+                .await
+                .expect("the attested module remains reachable by another peer");
+            if authorization["previousAuthorized"] == false {
+                assert_eq!(authorization["authorized"], false);
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the previously selected controller's binding is revoked on disconnect");
+
+    // Exercise the same context-bearing artifact through TinyBus's public
+    // process-lifetime runtime, not only through a hand-built ModuleHost.
+    let runtime = ModuleRuntime::start(&RuntimeNames::default(), None).unwrap();
+    let (_runtime_dir, runtime_artifact) = staged_module(&artifact, &hash);
+    let runtime_info = runtime.host().load_file(&runtime_artifact).unwrap();
+    runtime
+        .host()
+        .ensure_ready(runtime_info.manifest.bus_name.as_str())
+        .await
+        .expect("public ModuleRuntime provides the selected trusted controller");
+    let runtime_proxy = runtime
+        .connection()
+        .proxy(
+            runtime_info.manifest.bus_name.as_str(),
+            "/context",
+            "org.example.Context",
+        )
+        .unwrap();
+    assert!(runtime_proxy.attestation().await.unwrap().is_some());
+    let initial: serde_json::Value = runtime_proxy
+        .call_confidential("TrustedContext", ())
+        .await
+        .unwrap();
+    assert_eq!(initial["authorized"], true);
+    assert_eq!(initial["previousAuthorized"], false);
+    runtime
+        .host()
+        .reinitialize(
+            runtime_info.manifest.module.name.as_str(),
+            serde_json::json!({"marker": "runtime-reconfigured"}),
+        )
+        .await
+        .expect("public runtime reinitialization retains the selected host binding");
+    let after_reinitialize: serde_json::Value = runtime_proxy
+        .call_confidential("TrustedContext", ())
+        .await
+        .unwrap();
+    assert_eq!(after_reinitialize["authorized"], true);
+    assert_eq!(after_reinitialize["previousAuthorized"], false);
+
+    // An ordinary linked module still starts through the same public runtime.
+    let mut ordinary_manifest = manifest();
+    ordinary_manifest.lazy_init = true;
+    let ordinary_info = runtime
+        .host()
+        .attach_linked_with_config(
+            crate::module::LinkedModule {
+                descriptor: TbAbiDescriptor::current("clock", "0.1.0"),
+                manifest: ordinary_manifest,
+                init: lazy_echo_init,
+                init_with_setup: None,
+            },
+            serde_json::json!({}),
+        )
+        .unwrap();
+    runtime
+        .host()
+        .ensure_ready(ordinary_info.manifest.bus_name.as_str())
+        .await
+        .expect("ordinary setup remains compatible with a selected runtime host");
+    let ordinary_proxy = runtime
+        .connection()
+        .proxy(
+            ordinary_info.manifest.bus_name.as_str(),
+            ordinary_info.manifest.object_path.as_str(),
+            ordinary_info.manifest.bus_name.as_str(),
+        )
+        .unwrap();
+    let echoed: String = ordinary_proxy
+        .call("Echo", ("ordinary-runtime".to_owned(),))
+        .await
+        .unwrap();
+    assert_eq!(echoed, "ordinary-runtime");
+}
+
+async fn contextual_factory_cdylib_instance(
+    artifact: &Path,
+    restricted: bool,
+) -> (ModuleHost, Broker, Connection, crate::Proxy, String) {
+    let broker = Broker::new_restricted_module_control();
+    let (broker_transport, controller_transport) = MemoryTransport::pair();
+    let selected_controller = broker
+        .attach_module_controller(Arc::new(broker_transport))
+        .unwrap();
+    let controller = Connection::connect(Box::new(controller_transport))
+        .await
+        .unwrap();
+    assert_eq!(
+        controller.unique_name().as_ref(),
+        Some(&selected_controller)
+    );
+
+    let modules = ModuleHost::new(broker.clone());
+    let info = modules
+        .load_file_with_config(artifact, serde_json::json!({"restricted":restricted}))
+        .unwrap();
+    modules
+        .ensure_ready(info.manifest.bus_name.as_str())
+        .await
+        .expect("compiled context factory must receive the selected controller binding");
+    let proxy = controller
+        .proxy(
+            info.manifest.bus_name.as_str(),
+            "/context_factory",
+            "org.example.ContextFactory",
+        )
+        .unwrap();
+    (
+        modules,
+        broker,
+        controller,
+        proxy,
+        info.manifest.module.name,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires TINYBUS_TEST_CONTEXT_FACTORY_MODULE to point at the built cdylib"]
+async fn a_context_factory_cdylib_keeps_instance_state_and_refreshes_trusted_context() {
+    let artifact = PathBuf::from(
+        std::env::var_os("TINYBUS_TEST_CONTEXT_FACTORY_MODULE")
+            .expect("TINYBUS_TEST_CONTEXT_FACTORY_MODULE"),
+    );
+    let hash = crate::module::hash::file_hex(std::fs::File::open(&artifact).unwrap()).unwrap();
+    let (_staging, staged) = staged_module(&artifact, &hash);
+
+    let (
+        (first, broker, controller, first_proxy, module_name),
+        (_second, _, _, second_proxy, second_module_name),
+    ) = tokio::join!(
+        contextual_factory_cdylib_instance(&staged, true),
+        contextual_factory_cdylib_instance(&staged, false),
+    );
+    assert_eq!(module_name, second_module_name);
+    assert!(first_proxy.attestation().await.unwrap().is_some());
+    assert!(
+        first_proxy
+            .call::<serde_json::Value>("Inspect", ())
+            .await
+            .is_err()
+    );
+    let first_initial: serde_json::Value =
+        first_proxy.call_confidential("Inspect", ()).await.unwrap();
+    assert_eq!(first_initial["restricted"], true);
+    assert_eq!(first_initial["generation"], 1);
+    assert!(first_initial["factory_id"].as_u64().is_some());
+
+    let second_initial: serde_json::Value =
+        second_proxy.call_confidential("Inspect", ()).await.unwrap();
+    assert_eq!(second_initial["restricted"], false);
+    assert_eq!(second_initial["generation"], 1);
+
+    let (outsider_server, outsider_client) = MemoryTransport::pair();
+    broker.attach(Arc::new(outsider_server));
+    let outsider = Connection::connect(Box::new(outsider_client))
+        .await
+        .unwrap();
+    let outsider_proxy = outsider
+        .proxy(
+            first_proxy.destination().as_str(),
+            "/context_factory",
+            "org.example.ContextFactory",
+        )
+        .unwrap();
+    let denied = outsider_proxy
+        .call_confidential::<serde_json::Value>("Inspect", serde_json::json!("malformed"))
+        .await
+        .unwrap_err();
+    assert!(
+        denied
+            .to_string()
+            .contains("factory context authority unavailable")
+    );
+    let selected_malformed = first_proxy
+        .call_confidential::<serde_json::Value>("Inspect", serde_json::json!("malformed"))
+        .await
+        .unwrap_err();
+    assert!(
+        selected_malformed
+            .to_string()
+            .contains("expected no arguments")
+    );
+
+    first
+        .reinitialize(&module_name, serde_json::json!({"restricted":true}))
+        .await
+        .expect("same-mode reinitialization should use a fresh trusted context");
+    let after_reinitialize: serde_json::Value =
+        first_proxy.call_confidential("Inspect", ()).await.unwrap();
+    assert_eq!(after_reinitialize["restricted"], true);
+    assert_eq!(after_reinitialize["generation"], 2);
+    assert_eq!(
+        after_reinitialize["factory_id"],
+        first_initial["factory_id"]
+    );
+
+    assert!(
+        first
+            .reinitialize(&module_name, serde_json::json!({"restricted":false}))
+            .await
+            .is_err()
+    );
+    let after_refusal: serde_json::Value =
+        first_proxy.call_confidential("Inspect", ()).await.unwrap();
+    assert_eq!(after_refusal, after_reinitialize);
+    let second_still_isolated: serde_json::Value =
+        second_proxy.call_confidential("Inspect", ()).await.unwrap();
+    assert_eq!(second_still_isolated["restricted"], false);
+    assert_eq!(second_still_isolated["generation"], 1);
+    controller.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires TINYBUS_TEST_CONTEXT_EAGER_MODULE to point at the built cdylib"]
 async fn an_eager_cdylib_authenticates_after_its_worker_runs_before_admission() {
     authenticates_native_context("TINYBUS_TEST_CONTEXT_EAGER_MODULE").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires TINYBUS_TEST_MIGRATION_MODULE to point at the built cdylib"]
+async fn a_compiled_migration_module_negotiates_before_ordinary_lease_registration() {
+    let artifact = PathBuf::from(
+        std::env::var_os("TINYBUS_TEST_MIGRATION_MODULE").expect("TINYBUS_TEST_MIGRATION_MODULE"),
+    );
+    let hash = crate::module::hash::file_hex(std::fs::File::open(&artifact).unwrap()).unwrap();
+    let (_dir, artifact) = staged_module(&artifact, &hash);
+
+    let broker = Broker::new_restricted_module_control();
+    let (broker_transport, controller_transport) = MemoryTransport::pair();
+    let selected_controller = broker
+        .attach_module_controller(Arc::new(broker_transport))
+        .unwrap();
+    let controller = Connection::connect(Box::new(controller_transport))
+        .await
+        .unwrap();
+    assert_eq!(
+        controller.unique_name().as_ref(),
+        Some(&selected_controller)
+    );
+    let modules = ModuleHost::new(broker.clone());
+    let info = modules.load_file(artifact).unwrap();
+
+    modules
+        .ensure_ready(info.manifest.bus_name.as_str())
+        .await
+        .expect("compiled migration setup must receive the selected controller binding");
+    let proxy = controller
+        .proxy(
+            info.manifest.bus_name.as_str(),
+            "/migration",
+            "org.example.TrustedMigration",
+        )
+        .unwrap();
+    assert!(proxy.attestation().await.unwrap().is_some());
+
+    let (other_server, other_client) = MemoryTransport::pair();
+    broker.attach(Arc::new(other_server));
+    let other = Connection::connect(Box::new(other_client)).await.unwrap();
+    let other_proxy = other
+        .proxy(
+            info.manifest.bus_name.as_str(),
+            "/migration",
+            "org.example.TrustedMigration",
+        )
+        .unwrap();
+    assert!(other_proxy.attestation().await.unwrap().is_some());
+    assert!(proxy.call::<serde_json::Value>("Schema", ()).await.is_err());
+    assert!(
+        other_proxy
+            .call_confidential::<serde_json::Value>("Schema", ())
+            .await
+            .is_err(),
+        "recipient attestation alone must not authorize a different sender"
+    );
+    assert!(
+        other_proxy
+            .call_confidential::<serde_json::Value>("Transform", ("attacker-id",))
+            .await
+            .is_err(),
+        "a denied caller cannot alter the migration transcript state"
+    );
+    assert!(
+        other_proxy
+            .call_confidential::<serde_json::Value>("RegisterOrdinaryLease", ())
+            .await
+            .is_err(),
+        "a denied caller cannot register the ordinary lease"
+    );
+    let forged_identity = serde_json::json!({
+        "authenticated_sender": controller.unique_name(),
+        "is_confidential": true
+    });
+    assert!(
+        other_proxy
+            .call_confidential::<serde_json::Value>("Schema", (forged_identity,))
+            .await
+            .is_err(),
+        "JSON claims cannot replace the broker-stamped sender"
+    );
+    let schema: serde_json::Value = proxy.call_confidential("Schema", ()).await.unwrap();
+    assert_eq!(schema["required"], serde_json::json!(["id"]));
+    let transformed: serde_json::Value = proxy
+        .call_confidential("Transform", ("legacy-id",))
+        .await
+        .unwrap();
+    assert_eq!(transformed["id"], "record-legacy-id");
+    assert_eq!(transformed["ordinary_lease_registered"], false);
+    let lease_registered: bool = proxy
+        .call_confidential("RegisterOrdinaryLease", ())
+        .await
+        .unwrap();
+    assert!(lease_registered);
 }
 
 async fn authenticates_native_context(variable: &str) {
@@ -2523,7 +3036,8 @@ async fn authenticates_native_context(variable: &str) {
         proxy.attestation().await.unwrap(),
         Some(crate::attest::Attestation {
             name: info.manifest.bus_name.clone(),
-            sha256: hash
+            sha256: hash.clone(),
+            library_sha256: Some(hash),
         })
     );
     let sender: crate::BusName = proxy.call_confidential("Inspect", ()).await.unwrap();
@@ -2579,6 +3093,7 @@ async fn fixed_unique_module_calls_are_refused_in_terminal_states_before_detach(
         crate::attest::Attestation {
             name: manifest().bus_name,
             sha256: "a".repeat(64),
+            library_sha256: None,
         },
     );
     let client = Connection::connect(bus.connect().await.unwrap())
@@ -2837,12 +3352,14 @@ async fn eager_native_setup_callbacks_are_bound_before_ready_and_failures_rollba
             .unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let guard = binding.guard();
+        let sender_lookup = modules.sender_lookup();
         binding
             .serve_at(
                 "/callback".parse().unwrap(),
                 BoundNativeCallback {
                     calls: calls.clone(),
                     guard: guard.clone(),
+                    sender_lookup,
                 },
             )
             .await
@@ -2920,9 +3437,263 @@ async fn eager_native_setup_callbacks_are_bound_before_ready_and_failures_rollba
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires TINYBUS_TEST_HOST_CALLBACK_MODULE to point at the built cdylib"]
+async fn an_eager_setup_callback_resolves_its_admitted_module_before_ready() {
+    let artifact = PathBuf::from(std::env::var_os("TINYBUS_TEST_HOST_CALLBACK_MODULE").unwrap());
+    let hash = crate::module::hash::file_hex(std::fs::File::open(&artifact).unwrap()).unwrap();
+    let (_dir, artifact) = staged_module(&artifact, &hash);
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    let broker_task = broker.spawn(bus.clone());
+    let modules = ModuleHost::new(broker);
+    let callback = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let (observed_tx, observed_rx) = tokio::sync::oneshot::channel();
+    callback
+        .serve_at(
+            "/callback".parse().unwrap(),
+            EagerSetupSenderLookup {
+                lookup: modules.sender_lookup(),
+                observed: std::sync::Mutex::new(Some(observed_tx)),
+            },
+        )
+        .await
+        .unwrap();
+
+    let (reached_tx, reached_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    *modules
+        .inner
+        .after_loaded_publish
+        .lock()
+        .expect("loaded publication barrier lock") = Some(LoadedPublishBarrier {
+        reached: reached_tx,
+        release: release_rx,
+    });
+    let config = serde_json::json!({
+        "host": callback.unique_name(),
+        "fail": false,
+        "confidential": false
+    });
+    let loading_modules = ModuleHost {
+        inner: modules.inner.clone(),
+    };
+    let mut loading = tokio::task::spawn_blocking(move || {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async { loading_modules.load_file_with_config(artifact, config) })
+    });
+
+    let reached = tokio::task::spawn_blocking(move || {
+        reached_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("attach did not reach the pre-publication barrier");
+    });
+    tokio::select! {
+        result = &mut loading => panic!("load completed before reaching the publication barrier: {result:?}"),
+        result = reached => result.expect("publication barrier observer panicked"),
+    }
+    let observation = tokio::select! {
+        result = &mut loading => panic!("load completed before its eager callback was observed: {result:?}"),
+        result = tokio::time::timeout(Duration::from_secs(30), observed_rx) => result,
+    };
+    release_tx
+        .send(())
+        .expect("release the attachment after observing callback identity");
+    let observed = observation
+        .expect("eager setup did not call the authenticated host callback")
+        .expect("host callback dropped its observation");
+    loading.await.unwrap().expect("eager module loads");
+
+    assert_eq!(
+        observed.as_ref().map(crate::module::ModuleId::as_str),
+        Some("tinybus"),
+        "the authenticated callback must resolve the exact admitted module before READY"
+    );
+    broker_task.abort();
+}
+
+struct PanickingStagedStartSubscriber {
+    host: Arc<ModuleHostInner>,
+    peer: Arc<StdMutex<Option<crate::BusName>>>,
+}
+
+impl tracing::Subscriber for PanickingStagedStartSubscriber {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        if *event.metadata().level() == tracing::Level::DEBUG
+            && event.metadata().target().ends_with("broker")
+        {
+            let peer = self
+                .host
+                .loaded
+                .lock()
+                .unwrap()
+                .last()
+                .expect("staged module row is published before broker start")
+                .unique_name
+                .clone();
+            *self.peer.lock().unwrap() = Some(peer);
+            panic!("test subscriber panics while staged dispatch starts");
+        }
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+#[test]
+fn a_staged_start_unwind_removes_its_exact_published_peer() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "module::host::tests::staged_start_unwind_child_process",
+            "--test-threads=1",
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed;"),
+        "isolated staged-start unwind check failed or was not selected: {}{}",
+        stdout,
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+fn staged_start_unwind_child_process() {
+    if !std::env::args()
+        .any(|argument| argument == "module::host::tests::staged_start_unwind_child_process")
+    {
+        return;
+    }
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(staged_start_unwind_case());
+}
+
+async fn staged_start_unwind_case() {
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    let broker_task = broker.spawn(bus.clone());
+    let host = ModuleHost::new(broker);
+    let observer = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let peer = Arc::new(StdMutex::new(None));
+    let mut manifest = named_manifest("staged-start-panic", "StagedStartPanic");
+    manifest.lazy_init = true;
+
+    let result = tracing::subscriber::with_default(
+        PanickingStagedStartSubscriber {
+            host: host.inner.clone(),
+            peer: peer.clone(),
+        },
+        || {
+            host.attach_linked_with_config(
+                LinkedModule {
+                    descriptor: TbAbiDescriptor::current("staged-start-panic", "0.1.0"),
+                    manifest,
+                    init: lazy_echo_init,
+                    init_with_setup: None,
+                },
+                serde_json::json!({}),
+            )
+        },
+    );
+    assert!(
+        result.is_err(),
+        "a failed dispatch start must refuse attachment"
+    );
+    let unique = peer
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("peer observed at panic");
+    assert!(
+        host.inner.loaded.lock().unwrap().is_empty(),
+        "failed start removes the published row"
+    );
+    assert!(
+        host.module_for_sender(&unique).is_none(),
+        "failed start revokes lookup authority for the exact peer"
+    );
+    assert_eq!(
+        observer
+            .name_owner("ai.tinyhumans.module.StagedStartPanic")
+            .await
+            .unwrap(),
+        None,
+        "failed start detaches its reserved bus name"
+    );
+    broker_task.abort();
+}
+
+struct EagerSetupSenderLookup {
+    lookup: crate::module::ModuleSenderLookup,
+    observed:
+        std::sync::Mutex<Option<tokio::sync::oneshot::Sender<Option<crate::module::ModuleId>>>>,
+}
+
+#[async_trait::async_trait]
+impl crate::Interface for EagerSetupSenderLookup {
+    fn name(&self) -> crate::InterfaceName {
+        "org.example.Callback".parse().unwrap()
+    }
+
+    fn members(&self) -> Vec<crate::MemberName> {
+        vec!["Observe".parse().unwrap()]
+    }
+
+    async fn call(
+        &self,
+        _: &crate::MemberName,
+        _: serde_json::Value,
+    ) -> crate::Result<serde_json::Value> {
+        Err(Error::failed("callback requires authenticated dispatch"))
+    }
+
+    async fn call_with_context(
+        &self,
+        _: &crate::MemberName,
+        _: serde_json::Value,
+        context: &crate::CallContext,
+    ) -> crate::Result<serde_json::Value> {
+        let sender = context
+            .authenticated_sender()
+            .ok_or_else(|| Error::failed("callback sender is unauthenticated"))?;
+        let module = self.lookup.module_for_sender(sender);
+        if let Some(observed) = self.observed.lock().unwrap().take() {
+            let _ = observed.send(module);
+        }
+        Ok(serde_json::json!(sender))
+    }
+}
+
 struct BoundNativeCallback {
     calls: Arc<AtomicUsize>,
     guard: crate::module::HostCallbackGuard,
+    sender_lookup: crate::module::ModuleSenderLookup,
 }
 #[async_trait::async_trait]
 impl crate::Interface for BoundNativeCallback {
@@ -2952,6 +3723,16 @@ impl crate::Interface for BoundNativeCallback {
         assert!(
             self.guard.authorizes(context),
             "peer must be pinned before eager callback"
+        );
+        assert!(
+            self.sender_lookup
+                .module_for_sender(
+                    context
+                        .authenticated_sender()
+                        .expect("authenticated sender")
+                )
+                .is_some(),
+            "the admitted module identity must be published before its eager setup callback"
         );
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(serde_json::json!(context.authenticated_sender().unwrap()))
@@ -3273,6 +4054,7 @@ fn attach_controlled_native(
             lazy_load: false,
             descriptor_info: None,
             pinned_sha256: None,
+            pinned_library_sha256: None,
         },
     )
 }
@@ -3446,4 +4228,98 @@ fn search_skip_matches_file_stems_only() {
         &["clock".into()]
     ));
     assert!(!is_search_skipped(Path::new("/m/libclock.so"), &[]));
+}
+
+#[test]
+fn an_explicit_search_path_config_preserves_env_first_order_without_product_defaults() {
+    let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let env_dir = root.path().join("operator-modules");
+    std::fs::create_dir(&env_dir).unwrap();
+    let env_var = "TINYBUS_TEST_MODULE_SEARCH_PATHS";
+    unsafe { std::env::set_var(env_var, &env_dir) };
+    let app_dir = PathBuf::from("tinydemo/modules");
+
+    let host = ModuleHost::new(Broker::new())
+        .with_search_path_config(SearchPathConfig::new(env_var, app_dir.clone()));
+    let paths = host.search_paths();
+    unsafe { std::env::remove_var(env_var) };
+
+    let mut expected = vec![env_dir];
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(path) = std::env::var_os("XDG_DATA_HOME") {
+            expected.push(PathBuf::from(path).join(&app_dir));
+        } else if let Some(path) = std::env::var_os("HOME") {
+            expected.push(PathBuf::from(path).join(".local/share").join(&app_dir));
+        }
+        expected.push(PathBuf::from("/usr/lib").join(&app_dir));
+    }
+    #[cfg(target_os = "macos")]
+    expected.push(PathBuf::from("/usr/local/lib").join(&app_dir));
+    #[cfg(windows)]
+    if let Some(path) = std::env::var_os("LOCALAPPDATA") {
+        expected.push(PathBuf::from(path).join(&app_dir));
+    }
+
+    assert_eq!(paths, expected);
+    assert!(!paths.iter().any(|path| path.ends_with("openhuman/modules")));
+}
+
+#[test]
+fn a_host_without_search_path_config_has_no_implicit_search_paths() {
+    let host = ModuleHost::new(Broker::new());
+
+    assert!(host.search_paths().is_empty());
+}
+
+#[test]
+fn rescan_with_no_explicit_paths_uses_the_host_search_path_config() {
+    let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let directory = root.path().join("rescan-modules");
+    super::super::windows_acl::create_private_dir_all(&directory).unwrap();
+    let file_name = if cfg!(windows) {
+        "rescan-invalid.dll"
+    } else if cfg!(target_os = "macos") {
+        "rescan-invalid.dylib"
+    } else {
+        "rescan-invalid.so"
+    };
+    std::fs::write(directory.join(file_name), b"not a shared library").unwrap();
+    let env_var = "TINYBUS_TEST_RESCAN_SEARCH_PATH";
+    unsafe { std::env::set_var(env_var, &directory) };
+    let host = ModuleHost::new(Broker::new())
+        .with_search_path_config(SearchPathConfig::new(env_var, "tinybus-rescan/modules"));
+
+    let (modules, transitions) = host.inner.clone().rescan(Vec::new(), true).unwrap();
+    unsafe { std::env::remove_var(env_var) };
+
+    assert!(transitions.is_empty());
+    assert!(
+        matches!(modules.as_slice(), [module] if matches!(module.state, ModuleState::Rejected { .. }))
+    );
+}
+
+#[test]
+fn load_search_paths_except_skips_an_artifact_before_opening_it() {
+    let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let directory = root.path().join("private-modules");
+    super::super::windows_acl::create_private_dir_all(&directory).unwrap();
+    let file_name = if cfg!(windows) {
+        "skip-before-open.dll"
+    } else if cfg!(target_os = "macos") {
+        "skip-before-open.dylib"
+    } else {
+        "skip-before-open.so"
+    };
+    // Invalid bytes make admission fail if the skip filter opens the artifact.
+    std::fs::write(directory.join(file_name), b"not a shared library").unwrap();
+    let env_var = "TINYBUS_TEST_SKIP_SEARCH_PATH";
+    unsafe { std::env::set_var(env_var, &directory) };
+    let host = ModuleHost::new(Broker::new())
+        .with_search_path_config(SearchPathConfig::new(env_var, "tinybus-test/modules"));
+
+    let outcomes = host.load_search_paths_except(&["skip-before-open".to_string()]);
+    unsafe { std::env::remove_var(env_var) };
+
+    assert!(outcomes.is_empty(), "the skipped file must never be opened");
 }

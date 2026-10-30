@@ -1,7 +1,7 @@
 use super::*;
 use crate::message::Message;
 use crate::router::{MatchRule, Router};
-use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, atomic::AtomicUsize};
 
 async fn active_stream_binding() -> (
     Arc<ModuleHost>,
@@ -52,6 +52,77 @@ fn signal_declaration() -> HostCallbackSignal {
         members: vec!["WatchChanged".parse().unwrap()],
     }
 }
+
+#[tokio::test]
+async fn bundled_callback_loader_rejects_missing_or_wrong_digest_marker() {
+    let host = ModuleHost::new(Broker::new());
+    let binding = Arc::new(host.prepare_host_callbacks(vec![endpoint()]).await.unwrap());
+    let directory = tempfile::tempdir().unwrap();
+
+    let error = host
+        .load_bundled_marked_with_host_callbacks(
+            directory.path(),
+            "demo.tar.gz",
+            &"a".repeat(64),
+            serde_json::json!({}),
+            &binding,
+            ("org.example.Demo", "/org/example/Demo"),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("digest marker"), "{error}");
+}
+
+#[derive(Clone)]
+struct StreamCallback;
+
+#[async_trait]
+impl Interface for StreamCallback {
+    fn name(&self) -> InterfaceName {
+        "org.example.Callback".parse().unwrap()
+    }
+
+    fn members(&self) -> Vec<MemberName> {
+        vec!["Transfer".parse().unwrap()]
+    }
+
+    async fn call(
+        &self,
+        _: &MemberName,
+        args: serde_json::Value,
+    ) -> crate::Result<serde_json::Value> {
+        Ok(args)
+    }
+}
+
+#[test]
+fn required_endpoint_count_deduplicates_a_shared_confidential_and_stream_interface() {
+    let mut state = state(
+        "org.example.Module".parse().unwrap(),
+        "org.example.Host".parse().unwrap(),
+    );
+    Arc::get_mut(&mut state).unwrap().stream_endpoints = vec![stream_endpoint()];
+    assert_eq!(state.required_endpoint_count(), 1);
+}
+
+#[test]
+fn directed_signal_requires_a_live_module_recipient() {
+    let state = state(
+        "org.example.Module".parse().unwrap(),
+        "org.example.Host".parse().unwrap(),
+    );
+    state.lifetime.lock().unwrap().module = None;
+    assert!(
+        state
+            .signal_destination(
+                &"/callback".parse().unwrap(),
+                &"org.example.Callback".parse().unwrap(),
+                &"WatchChanged".parse().unwrap(),
+            )
+            .is_err()
+    );
+}
 fn state(source: BusName, destination: BusName) -> Arc<CallbackState> {
     Arc::new(CallbackState {
         destination,
@@ -100,6 +171,7 @@ async fn reset_requests_receive_distinct_revocable_host_callback_bindings() {
         crate::attest::Attestation {
             name: "org.example.ResetTest".parse().unwrap(),
             sha256: "a".repeat(64),
+            library_sha256: None,
         },
     );
     let context = CallContext::brokered(Some(&module_peer), true);
@@ -145,6 +217,7 @@ async fn draining_a_binding_waits_for_running_grandchild_callbacks() {
         crate::attest::Attestation {
             name: "org.example.NestedDrainTest".parse().unwrap(),
             sha256: "a".repeat(64),
+            library_sha256: None,
         },
     );
     let (module_transport, _) =
@@ -197,6 +270,7 @@ async fn root_drain_retains_ancestry_for_running_grandchild_after_child_drop() {
         crate::attest::Attestation {
             name: "org.example.DescendantAncestryTest".parse().unwrap(),
             sha256: "a".repeat(64),
+            library_sha256: None,
         },
     );
     let (module_transport, _) =
@@ -255,6 +329,7 @@ async fn child_creation_prunes_expired_parent_entries() {
         crate::attest::Attestation {
             name: "org.example.ExpiredChildTest".parse().unwrap(),
             sha256: "a".repeat(64),
+            library_sha256: None,
         },
     );
     let (module_transport, _) =
@@ -382,6 +457,7 @@ fn directed_signals_target_only_the_live_bound_module_and_declared_member() {
         crate::attest::Attestation {
             name: "org.example.Module".parse().unwrap(),
             sha256: "a".repeat(64),
+            library_sha256: None,
         },
     );
     let capability = state(module_peer.clone(), binding_peer.clone());
@@ -458,6 +534,7 @@ fn kernel_fixture() -> (Router, Arc<CallbackState>, u64, u64) {
         crate::attest::Attestation {
             name: "org.example.Module".parse().unwrap(),
             sha256: "a".repeat(64),
+            library_sha256: None,
         },
     );
     let state = state(source, destination);
@@ -500,6 +577,7 @@ fn a_host_alias_and_a_second_verified_module_inherit_no_authority() {
         crate::attest::Attestation {
             name: "org.example.Other".parse().unwrap(),
             sha256: "b".repeat(64),
+            library_sha256: None,
         },
     );
     let mut message = call(&state);
@@ -544,6 +622,7 @@ fn unverified_sources_cannot_be_enrolled_and_scopes_are_bounded() {
         crate::attest::Attestation {
             name: "org.example.Module".parse().unwrap(),
             sha256: "a".repeat(64),
+            library_sha256: None,
         },
     );
     router.add_host_callbacks(state.clone()).unwrap();
@@ -556,6 +635,7 @@ fn unverified_sources_cannot_be_enrolled_and_scopes_are_bounded() {
             crate::attest::Attestation {
                 name: "org.example.Module".parse().unwrap(),
                 sha256: "a".repeat(64),
+                library_sha256: None,
             },
         );
         router
@@ -569,6 +649,7 @@ fn unverified_sources_cannot_be_enrolled_and_scopes_are_bounded() {
         crate::attest::Attestation {
             name: "org.example.Module".parse().unwrap(),
             sha256: "a".repeat(64),
+            library_sha256: None,
         },
     );
     let extra = super::tests::state(source, destination);
@@ -1203,6 +1284,7 @@ async fn rollback_after_attach_releases_the_actual_initialization_observer() {
             lazy_load: false,
             descriptor_info: None,
             pinned_sha256: None,
+            pinned_library_sha256: None,
         },
     )
     .unwrap();
@@ -2135,4 +2217,85 @@ async fn completing_provider_future_is_destroyed_before_its_running_account() {
     assert!(result.is_ok());
     assert_eq!(observed.load(Ordering::Acquire), 1);
     assert_eq!(HostCallbackGuard(account).running(), 0);
+}
+
+#[tokio::test]
+async fn host_stream_callbacks_are_bound_to_the_declared_module_peer() {
+    let broker = Broker::new();
+    let bus = crate::transport::memory::MemoryBus::new();
+    let broker_task = broker.spawn(bus.clone());
+    let host = ModuleHost::new(broker);
+    let binding = host
+        .prepare_host_callbacks_with_stream_endpoints(vec![], vec![stream_endpoint()])
+        .await
+        .unwrap();
+    let module = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let module_peer = module.unique_name().unwrap();
+    binding
+        .serve_at("/callback".parse().unwrap(), StreamCallback)
+        .await
+        .unwrap();
+    {
+        let mut state = binding.state.lifetime.lock().unwrap();
+        state.active = true;
+        state.module = Some(module_peer.clone());
+    }
+    let context = CallContext::brokered(Some(&module_peer), false);
+    assert!(
+        binding
+            .authorized_stream_module(&CallContext::brokered(Some(&module_peer), true))
+            .is_err()
+    );
+    assert!(
+        binding
+            .authorized_stream_module(&CallContext::brokered(
+                Some(&"org.example.Outsider".parse().unwrap()),
+                false,
+            ))
+            .is_err()
+    );
+    let proxy = module
+        .proxy(binding.unique_name(), "/callback", "org.example.Callback")
+        .unwrap();
+    assert_eq!(
+        proxy
+            .call::<serde_json::Value>("Transfer", serde_json::json!({ "ok": true }))
+            .await
+            .unwrap(),
+        serde_json::json!([{ "ok": true }])
+    );
+
+    let mut module_to_host = module
+        .open_stream(binding.unique_name(), StreamDescriptor::with_len(5))
+        .await
+        .unwrap();
+    let mut host_reader = binding
+        .accept_stream_from_module(&context, &module_to_host.stream_ref())
+        .unwrap();
+    let send = tokio::spawn(async move {
+        module_to_host.write(b"hello").await.unwrap();
+        module_to_host.finish().await.unwrap();
+    });
+    assert_eq!(host_reader.read_to_end_capped(5).await.unwrap(), b"hello");
+    send.await.unwrap();
+
+    let mut host_to_module = binding
+        .open_stream_to_module(
+            &context,
+            StreamDescriptor::with_len(5),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+    let mut module_reader = module
+        .accept_stream_from(&host_to_module.stream_ref(), binding.unique_name())
+        .unwrap();
+    host_to_module.write(b"world").await.unwrap();
+    host_to_module.finish().await.unwrap();
+    assert_eq!(module_reader.read_to_end_capped(5).await.unwrap(), b"world");
+
+    binding.close().await.unwrap();
+    broker_task.abort();
 }

@@ -121,6 +121,18 @@ impl FailureReporter {
         self.deliver(module, version, reason, false);
     }
 
+    /// Look up an identifier in the host's registry before reporting it.
+    ///
+    /// Unknown identifiers share the anonymous terminal report, so an
+    /// untrusted caller cannot put arbitrary identity into diagnostics.
+    pub fn report_for(&self, records: &[super::release::ReleaseRecord], id: &str, reason: Reason) {
+        if let Some(record) = records.iter().find(|record| record.id == id) {
+            self.report(record.id, record.version, reason);
+        } else {
+            self.report_unknown_module();
+        }
+    }
+
     /// Unknown identifiers never become metadata or deduplication keys.
     pub fn report_unknown_module(&self) {
         self.deliver("unregistered", "unknown", Reason::UnknownModule, true);

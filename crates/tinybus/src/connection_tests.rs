@@ -1,4 +1,5 @@
 use super::*;
+use crate::CallContext;
 use crate::broker::Broker;
 use crate::transport::memory::{MemoryBus, MemoryTransport};
 use async_trait::async_trait;
@@ -51,8 +52,8 @@ impl Interface for ReplacementEcho {
         vec![MemberName::new("Echo").unwrap()]
     }
 
-    async fn call(&self, _member: &MemberName, _args: Value) -> Result<Value> {
-        Ok(Value::String("replacement".to_string()))
+    async fn call(&self, _: &MemberName, _: Value) -> Result<Value> {
+        Ok(Value::String("replacement".to_owned()))
     }
 }
 
@@ -181,6 +182,124 @@ async fn brokered_pair() -> (Connection, Connection) {
     (client, service)
 }
 
+#[tokio::test]
+async fn try_serve_at_keeps_the_original_interface_after_a_collision() {
+    let (client, service) = pair().await;
+    assert!(service.try_serve_at(path(), ReplacementEcho).await.is_err());
+
+    let result: Value = client
+        .proxy("ai.tinyhumans.Test", path(), "ai.tinyhumans.Test")
+        .unwrap()
+        .call("Echo", ("original",))
+        .await
+        .unwrap();
+    assert_eq!(result, serde_json::json!(["original"]));
+}
+
+struct CaptureCallContext(std::sync::Mutex<Option<tokio::sync::oneshot::Sender<CallContext>>>);
+
+#[async_trait]
+impl Interface for CaptureCallContext {
+    fn name(&self) -> InterfaceName {
+        InterfaceName::new("org.example.ContextCapture").unwrap()
+    }
+
+    fn members(&self) -> Vec<MemberName> {
+        vec![MemberName::new("Capture").unwrap()]
+    }
+
+    async fn call(&self, _: &MemberName, _: Value) -> Result<Value> {
+        Err(Error::failed("context-aware dispatch required"))
+    }
+
+    async fn call_with_context(
+        &self,
+        _: &MemberName,
+        _: Value,
+        context: &CallContext,
+    ) -> Result<Value> {
+        self.0
+            .lock()
+            .unwrap()
+            .take()
+            .expect("one capture call")
+            .send(context.clone())
+            .map_err(|_| Error::failed("context receiver closed"))?;
+        Ok(Value::Null)
+    }
+}
+
+struct CapturedContext {
+    context: CallContext,
+    receiver: Connection,
+    caller: Connection,
+    _broker_task: tokio::task::JoinHandle<Result<()>>,
+}
+
+async fn capture_context_from_fresh_broker() -> CapturedContext {
+    let bus = MemoryBus::new();
+    let broker_task = Broker::new().spawn(bus.clone());
+    let receiver = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let (capture, captured_rx) = tokio::sync::oneshot::channel();
+    receiver
+        .serve_at(
+            "/capture".parse().unwrap(),
+            CaptureCallContext(std::sync::Mutex::new(Some(capture))),
+        )
+        .await
+        .unwrap();
+    receiver
+        .request_name("org.example.ContextCapture")
+        .await
+        .unwrap();
+    let caller = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let proxy = caller
+        .proxy(
+            "org.example.ContextCapture",
+            "/capture",
+            "org.example.ContextCapture",
+        )
+        .unwrap();
+    let _: Value = proxy.call("Capture", ()).await.unwrap();
+    CapturedContext {
+        context: captured_rx.await.unwrap(),
+        receiver,
+        caller,
+        _broker_task: broker_task,
+    }
+}
+
+#[tokio::test]
+async fn captured_contexts_from_distinct_brokers_do_not_match_same_named_receivers() {
+    let first = capture_context_from_fresh_broker().await;
+    let second = capture_context_from_fresh_broker().await;
+    assert_eq!(
+        first.caller.unique_name(),
+        second.caller.unique_name(),
+        "fresh brokers deliberately assign the same sender name"
+    );
+    assert!(first.context.is_for_connection(&first.receiver.downgrade()));
+    assert!(
+        second
+            .context
+            .is_for_connection(&second.receiver.downgrade())
+    );
+    assert!(
+        !first
+            .context
+            .is_for_connection(&second.receiver.downgrade())
+    );
+    assert!(
+        !second
+            .context
+            .is_for_connection(&first.receiver.downgrade())
+    );
+}
+
 struct MutatesObjectTree {
     service: Connection,
     extra_path: ObjectPath,
@@ -282,6 +401,167 @@ async fn a_reply_larger_than_one_frame_arrives_through_a_bounded_stream() {
     let reply: String = proxy.call_streaming("Large", ()).await.unwrap();
     assert_eq!(reply.len(), crate::message::codec::MAX_FRAME_LEN + 1);
     assert!(reply.bytes().all(|byte| byte == b'x'));
+}
+
+struct PausedMethodTransport {
+    inner: Box<dyn crate::ports::Transport>,
+    paused_member: &'static str,
+    blocked: tokio::sync::mpsc::UnboundedSender<()>,
+    resume: std::sync::Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl crate::ports::Transport for PausedMethodTransport {
+    async fn send(&self, message: Message) -> Result<()> {
+        if message.header.member.as_ref().map(MemberName::as_str) == Some(self.paused_member) {
+            self.blocked.send(()).unwrap();
+            self.resume.notified().await;
+        }
+        self.inner.send(message).await
+    }
+
+    async fn recv(&self) -> Result<Option<Message>> {
+        self.inner.recv().await
+    }
+
+    async fn close(&self) -> Result<()> {
+        self.inner.close().await
+    }
+}
+
+struct ReadsUploadedStream {
+    connection: Connection,
+    received: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+}
+
+#[async_trait]
+impl Interface for ReadsUploadedStream {
+    fn name(&self) -> InterfaceName {
+        InterfaceName::new("ai.tinyhumans.StreamHandover").unwrap()
+    }
+
+    fn members(&self) -> Vec<MemberName> {
+        vec![MemberName::new("Upload").unwrap()]
+    }
+
+    async fn call(&self, _member: &MemberName, args: Value) -> Result<Value> {
+        let (stream,): (crate::stream::StreamRef,) = serde_json::from_value(args)?;
+        let bytes = self.connection.read_stream(&stream).await?;
+        self.received.send(bytes.clone()).unwrap();
+        Ok(serde_json::to_value(bytes.len())?)
+    }
+}
+
+struct ReplacementUpload {
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait]
+impl Interface for ReplacementUpload {
+    fn name(&self) -> InterfaceName {
+        InterfaceName::new("ai.tinyhumans.StreamHandover").unwrap()
+    }
+
+    fn members(&self) -> Vec<MemberName> {
+        vec![MemberName::new("Upload").unwrap()]
+    }
+
+    async fn call(&self, _member: &MemberName, _args: Value) -> Result<Value> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Value::Null)
+    }
+}
+
+#[tokio::test]
+async fn a_stream_method_stays_with_the_owner_that_opened_its_stream_after_name_handover() {
+    const NAME: &str = "ai.tinyhumans.StreamHandover";
+    const PATH: &str = "/ai/tinyhumans/StreamHandover";
+
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+
+    let owner = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    owner.request_name(NAME).await.unwrap();
+    let (received_tx, mut received_rx) = tokio::sync::mpsc::unbounded_channel();
+    owner
+        .serve_at(
+            ObjectPath::new(PATH).unwrap(),
+            ReadsUploadedStream {
+                connection: owner.clone(),
+                received: received_tx,
+            },
+        )
+        .await
+        .unwrap();
+
+    let replacement = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let replacement_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    replacement
+        .serve_at(
+            ObjectPath::new(PATH).unwrap(),
+            ReplacementUpload {
+                calls: replacement_calls.clone(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let resume = std::sync::Arc::new(tokio::sync::Notify::new());
+    let (blocked_tx, mut blocked_rx) = tokio::sync::mpsc::unbounded_channel();
+    let client_transport = PausedMethodTransport {
+        inner: bus.connect().await.unwrap(),
+        paused_member: "Upload",
+        blocked: blocked_tx,
+        resume: resume.clone(),
+    };
+    let client = Connection::connect(Box::new(client_transport))
+        .await
+        .unwrap();
+    let upload = tokio::spawn(async move {
+        client
+            .call_with_stream::<usize>(
+                BusName::new(NAME).unwrap(),
+                ObjectPath::new(PATH).unwrap(),
+                InterfaceName::new(NAME).unwrap(),
+                MemberName::new("Upload").unwrap(),
+                |stream| serde_json::json!([stream]),
+                b"stream opened by the original owner",
+            )
+            .await
+    });
+
+    // The Open reply has arrived before the transport pauses the following
+    // method call. Move the public name while leaving the original stream peer
+    // alive, then allow the method frame to route.
+    tokio::time::timeout(Duration::from_secs(10), blocked_rx.recv())
+        .await
+        .expect("the post-Open method call reached the transport barrier")
+        .expect("the transport barrier remained connected");
+    owner.release_name(NAME).await.unwrap();
+    replacement.request_name(NAME).await.unwrap();
+    resume.notify_one();
+
+    let result = tokio::time::timeout(Duration::from_secs(10), upload)
+        .await
+        .expect("the streamed method completed after name handover")
+        .unwrap();
+    assert_eq!(
+        result.unwrap(),
+        b"stream opened by the original owner".len()
+    );
+    assert_eq!(
+        replacement_calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the replacement owner must not receive the method"
+    );
+    assert_eq!(
+        received_rx.recv().await.unwrap(),
+        b"stream opened by the original owner"
+    );
 }
 
 #[tokio::test]

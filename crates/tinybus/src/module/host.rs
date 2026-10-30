@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -14,16 +14,18 @@ use crate::build_info;
 use crate::error::{Error, Result, sanitize_untrusted};
 use crate::module::abi::{TB_OK, TbAbiDescriptor, TbModuleInit, TbModuleVtable, field_bytes};
 use crate::module::github::CachedRelease;
+use crate::module::host::callbacks::HostCallbackBinding;
 use crate::module::loader::{self, LoadedArtifact};
 use crate::module::manifest::{MANIFEST_SCHEMA, ModuleIdentity, ModuleManifest, PanicPolicy};
 use crate::module::transport::{ModuleTransport, StopError};
-use crate::module::{HostCallbackBinding, LinkedModule};
-use crate::name::{BusName, ObjectPath};
+use crate::module::{LinkedModule, LinkedModuleInitWithSetup, LinkedSetup, ModuleId};
+use crate::name::{BusName, InterfaceName, MemberName, ObjectPath};
 use crate::ports::Transport;
 use crate::version::Version;
 
 const LAZY_MANIFEST_SUFFIX: &str = ".manifest.json";
 const LAZY_MANIFEST_MAX_LEN: u64 = 1024 * 1024;
+const MAX_PRE_READY_CONFIDENTIAL_ROUTES: usize = 64;
 
 /// Current lifecycle state of a discovered module.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,6 +93,7 @@ pub struct ModuleInfo {
 
 struct LoadedModule {
     info: ModuleInfo,
+    module_id: ModuleId,
     transport: Arc<ModuleTransport>,
     unique_name: BusName,
     transition_from: Option<ModuleState>,
@@ -99,8 +102,8 @@ struct LoadedModule {
     callback_config: Option<[u8; 32]>,
     // Keep operation accounting after routing revocation removes the binding.
     callback_state: Option<Arc<callbacks::CallbackState>>,
-    // Keep the owning capability alive for as long as the admitted module can
-    // issue callbacks. The binding points back to this host weakly.
+    // Keep the owning capability alive for as long as this admitted module can
+    // issue callbacks. The binding holds only a weak reference back to the host.
     _callback_binding: Option<Arc<HostCallbackBinding>>,
 }
 
@@ -161,6 +164,7 @@ struct Activation {
     /// records the pinned archive digest; linked code records the host
     /// executable digest. `None` for raw attachments and ordinary local files.
     pinned_sha256: Option<String>,
+    pinned_library_sha256: Option<String>,
 }
 
 impl PendingModule {
@@ -228,6 +232,10 @@ pub struct ModuleHost {
 
 struct ModuleHostInner {
     broker: Broker,
+    // Callback bindings identify their owning host through this separate
+    // token. Keeping the back-reference out of `ModuleHostInner` avoids a
+    // recursive auto-trait proof through `loaded` bindings.
+    callback_owner: Arc<()>,
     strict: AtomicBool,
     // Admission spans duplicate validation through final insertion; a narrower
     // lock lets two concurrent loads both pass the name check.
@@ -240,6 +248,127 @@ struct ModuleHostInner {
     // resolve sibling files for the lifetime of its mapped library.
     artifacts: Mutex<Vec<tempfile::TempDir>>,
     warned: AtomicBool,
+    search_path_config: RwLock<Option<SearchPathConfig>>,
+    pre_ready_confidential_routes: RwLock<Arc<[PreReadyConfidentialRoute]>>,
+    #[cfg(test)]
+    after_loaded_publish: Mutex<Option<LoadedPublishBarrier>>,
+}
+
+/// One exact method route that a selected module controller may call
+/// confidentially while an admitted module is initializing.
+///
+/// The list is empty by default and can only be configured before the host
+/// admits a module. This grants no authority to ordinary module clients.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct PreReadyConfidentialRoute {
+    /// Object path of the host method.
+    pub path: ObjectPath,
+    /// Interface containing the host method.
+    pub interface: InterfaceName,
+    /// Method member name.
+    pub member: MemberName,
+}
+
+#[cfg(test)]
+struct LoadedPublishBarrier {
+    reached: std::sync::mpsc::SyncSender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+/// Owned, read-only access to a host's admitted unique-peer lookup.
+///
+/// The handle does not keep the host alive. It can be captured by a host
+/// callback that must outlive the borrow used to create it; after the host is
+/// dropped, lookups fail closed. It performs no broker request and grants no
+/// module or attestation authority.
+#[derive(Clone)]
+pub struct ModuleSenderLookup {
+    inner: Weak<ModuleHostInner>,
+}
+
+impl ModuleSenderLookup {
+    /// Resolve a broker-authenticated unique peer to its exact admitted module
+    /// identifier, or return `None` if the host is gone or the peer is no
+    /// longer admitted.
+    #[must_use]
+    pub fn module_for_sender(&self, sender: &BusName) -> Option<ModuleId> {
+        self.inner
+            .upgrade()
+            .and_then(|inner| module_for_sender(&inner, sender))
+    }
+
+    /// Resolve a canonical module ID to its current unique peer, if admitted.
+    #[must_use]
+    pub fn sender_for_module(&self, module_id: &str) -> Option<BusName> {
+        self.inner
+            .upgrade()
+            .and_then(|inner| sender_for_module(&inner, module_id))
+    }
+}
+
+fn module_for_sender(inner: &ModuleHostInner, sender: &BusName) -> Option<ModuleId> {
+    if !sender.is_unique() {
+        return None;
+    }
+    let loaded = inner.loaded.lock().expect("module list lock");
+    let module = loaded.iter().find(|module| &module.unique_name == sender)?;
+    if module.transport.is_faulted()
+        || module.transport.init_failed()
+        || module.transport.is_stopped()
+        || module.transport.admission_closed()
+    {
+        return None;
+    }
+    matches!(
+        module.snapshot().state,
+        ModuleState::Resolved
+            | ModuleState::Initializing
+            | ModuleState::Ready
+            | ModuleState::Serving
+    )
+    .then(|| module.module_id.clone())
+}
+
+fn sender_for_module(inner: &ModuleHostInner, module_id: &str) -> Option<BusName> {
+    if module_id.is_empty() {
+        return None;
+    }
+    let loaded = inner.loaded.lock().expect("module list lock");
+    let mut candidates = loaded.iter().filter(|module| {
+        module.module_id.as_str() == module_id
+            && !module.transport.is_faulted()
+            && !module.transport.init_failed()
+            && !module.transport.is_stopped()
+            && !module.transport.admission_closed()
+            && matches!(
+                module.snapshot().state,
+                ModuleState::Initializing | ModuleState::Ready | ModuleState::Serving
+            )
+    });
+    let sender = candidates.next()?.unique_name.clone();
+    candidates.next().is_none().then_some(sender)
+}
+
+/// Product configuration for directories that `ModuleHost` scans for modules.
+/// TinyBus has no product-specific default; hosts opt in by naming the
+/// environment variable and application directory they own.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SearchPathConfig {
+    /// Environment variable containing path-list entries searched first.
+    pub env_var: String,
+    /// App-specific suffix beneath each platform data directory.
+    pub app_dir: PathBuf,
+}
+
+impl SearchPathConfig {
+    /// Configure module search paths for a host.
+    #[must_use]
+    pub fn new(env_var: impl Into<String>, app_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            env_var: env_var.into(),
+            app_dir: app_dir.into(),
+        }
+    }
 }
 
 /// Clears a module's host-side lifecycle reservation when its operation ends.
@@ -251,6 +380,30 @@ struct LifecycleBusyGuard<'a> {
     host: &'a ModuleHostInner,
     name: String,
     stop_transport: Option<Arc<ModuleTransport>>,
+}
+
+/// Keeps a linked setup admission owned until the module publishes readiness.
+/// Dropping or timing out the async attach request revokes the broker peer and
+/// lets the existing native lifecycle path finish teardown; it never drops a
+/// module-owned future from the caller's runtime.
+struct LinkedSetupAdmissionGuard(Option<Arc<ModuleTransport>>);
+
+impl LinkedSetupAdmissionGuard {
+    fn new(transport: Arc<ModuleTransport>) -> Self {
+        Self(Some(transport))
+    }
+
+    fn ready(&mut self) {
+        self.0.take();
+    }
+}
+
+impl Drop for LinkedSetupAdmissionGuard {
+    fn drop(&mut self) {
+        if let Some(transport) = self.0.take() {
+            transport.request_terminal(true);
+        }
+    }
 }
 
 impl<'a> LifecycleBusyGuard<'a> {
@@ -335,6 +488,7 @@ impl ModuleHost {
     pub fn new(broker: Broker) -> Self {
         let inner = Arc::new(ModuleHostInner {
             broker: broker.clone(),
+            callback_owner: Arc::new(()),
             strict: AtomicBool::new(false),
             admission: Mutex::new(()),
             loaded: Mutex::new(Vec::new()),
@@ -343,10 +497,92 @@ impl ModuleHost {
             configs: Mutex::new(HashMap::new()),
             artifacts: Mutex::new(Vec::new()),
             warned: AtomicBool::new(false),
+            search_path_config: RwLock::new(None),
+            pre_ready_confidential_routes: RwLock::new(Arc::from([])),
+            #[cfg(test)]
+            after_loaded_publish: Mutex::new(None),
         });
         let control: Arc<dyn ModuleControl> = inner.clone();
         broker.set_module_control(Arc::downgrade(&control));
         Self { inner }
+    }
+
+    /// Builder form of [`Self::set_search_path_config`].
+    #[must_use]
+    pub fn with_search_path_config(self, config: SearchPathConfig) -> Self {
+        self.set_search_path_config(Some(config));
+        self
+    }
+
+    /// Set or clear this host's module search paths.
+    pub fn set_search_path_config(&self, config: Option<SearchPathConfig>) {
+        *self
+            .inner
+            .search_path_config
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = config;
+    }
+
+    /// Configure exact confidential host methods that the selected module
+    /// controller may call while a module is initializing.
+    ///
+    /// The default is an empty list. Configuration is accepted only before
+    /// any module admission or rejection, and at most 64 distinct routes may
+    /// be configured. Calls outside this exact list retain normal readiness
+    /// behavior. The routes do not broaden the authority of module peers.
+    pub fn set_pre_ready_confidential_routes(
+        &self,
+        routes: Vec<PreReadyConfidentialRoute>,
+    ) -> Result<()> {
+        if routes.len() > MAX_PRE_READY_CONFIDENTIAL_ROUTES {
+            return Err(Error::protocol("too many pre-ready confidential routes"));
+        }
+        let mut unique = HashSet::with_capacity(routes.len());
+        if routes.iter().any(|route| !unique.insert(route)) {
+            return Err(Error::protocol("duplicate pre-ready confidential route"));
+        }
+
+        let _admission = self.inner.admission.lock().expect("module admission lock");
+        if !self
+            .inner
+            .loaded
+            .lock()
+            .expect("module list lock")
+            .is_empty()
+            || !self
+                .inner
+                .rejected
+                .lock()
+                .expect("rejected module list lock")
+                .is_empty()
+        {
+            return Err(Error::protocol(
+                "pre-ready confidential routes must be set before module admission",
+            ));
+        }
+        *self
+            .inner
+            .pre_ready_confidential_routes
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::from(routes);
+        Ok(())
+    }
+
+    /// Create an owned weak handle for resolving authenticated module peers.
+    ///
+    /// The returned handle can be stored by runtime setup callbacks without a
+    /// back-reference to the [`ModuleHost`] or a global runtime slot. It uses
+    /// the same local admission table and terminal-state checks as
+    /// [`Self::module_for_sender`].
+    #[must_use]
+    pub fn sender_lookup(&self) -> ModuleSenderLookup {
+        ModuleSenderLookup {
+            inner: Arc::downgrade(&self.inner),
+        }
+    }
+
+    pub(crate) fn configure_search_path_config(&self, config: Option<SearchPathConfig>) {
+        self.set_search_path_config(config);
     }
 
     /// Refuse modules built by a different rustc release.
@@ -378,6 +614,9 @@ impl ModuleHost {
     /// connection. The module remains available while its setup function
     /// applies the new values; a rejected configuration leaves the runtime
     /// running with whatever state its setup function had already committed.
+    /// If a lazy module is still resolved and has not started initialization,
+    /// the replacement becomes its initialization configuration; its first
+    /// method call then starts the module with those values.
     pub async fn reinitialize(
         &self,
         name: impl AsRef<str>,
@@ -405,6 +644,79 @@ impl ModuleHost {
                 .cloned(),
         );
         modules
+    }
+
+    /// Resolve a broker-authenticated unique peer to its exact admitted module
+    /// identifier.
+    ///
+    /// Well-known names are routing aliases and never identify a module
+    /// sender. This is a local lookup over the admission table; it performs no
+    /// broker request and accepts initialization-time callbacks while the
+    /// admitted transport remains live.
+    #[must_use]
+    pub fn module_for_sender(&self, sender: &BusName) -> Option<ModuleId> {
+        module_for_sender(&self.inner, sender)
+    }
+
+    /// Resolve a canonical module ID to its current unique peer, if admitted.
+    #[must_use]
+    pub fn sender_for_module(&self, module_id: &str) -> Option<BusName> {
+        sender_for_module(&self.inner, module_id)
+    }
+
+    /// Initialize a loaded module and wait for its host lifecycle readiness.
+    ///
+    /// This host-owned preparation carries no business message. It is the
+    /// readiness barrier used before a caller asks the broker to attest a
+    /// lazily registered recipient.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed lifecycle error when the name is not a loaded module,
+    /// initialization fails, or the module does not reach `READY`.
+    pub async fn ensure_ready(&self, bus_name: &str) -> Result<()> {
+        self.ensure_ready_within(bus_name, Duration::from_secs(5))
+            .await
+    }
+
+    pub(crate) async fn ensure_ready_within(
+        &self,
+        bus_name: &str,
+        deadline: Duration,
+    ) -> Result<()> {
+        let transport = self
+            .inner
+            .loaded
+            .lock()
+            .expect("module list lock")
+            .iter()
+            .find(|module| module.info.manifest.bus_name.as_str() == bus_name)
+            .map(|module| Arc::clone(&module.transport))
+            .ok_or_else(|| Error::ModuleUnavailable {
+                module: "registered module".to_string(),
+                state: "unavailable".to_string(),
+                detail: "module is not loaded".to_string(),
+            })?;
+        transport.ensure_initialized().await?;
+        if tokio::time::timeout(deadline, transport.wait_ready())
+            .await
+            .is_err()
+        {
+            return Err(Error::ModuleUnavailable {
+                module: "registered module".to_string(),
+                state: "initializing".to_string(),
+                detail: "module did not announce READY before the deadline".to_string(),
+            });
+        }
+        if transport.is_ready() {
+            Ok(())
+        } else {
+            Err(Error::ModuleUnavailable {
+                module: "registered module".to_string(),
+                state: "unavailable".to_string(),
+                detail: "module did not become ready".to_string(),
+            })
+        }
     }
 
     /// Wait until the module that owns `bus_name` has finished setup, then
@@ -516,6 +828,7 @@ impl ModuleHost {
             &module,
             config,
             expected_sha256.map(str::to_ascii_lowercase),
+            None,
         )?;
         self.inner
             .artifacts
@@ -534,10 +847,8 @@ impl ModuleHost {
     /// maps the library without touching the network, which is what makes a
     /// module cheap to load at every launch rather than once per process.
     ///
-    /// Attestation is the same digest the uncached path records: the archive's,
-    /// checked against the pin before anything is mapped. The extracted library
-    /// is held to the release's own `modules.toml` by the ordinary allowlist
-    /// gate on every load.
+    /// Attestation preserves the archive digest and carries the separately
+    /// verified extracted-library digest when the release pins one.
     ///
     /// Nothing is retained here. The directory outlives the process by design,
     /// so the sibling files a mapped library may resolve stay where they are.
@@ -553,7 +864,12 @@ impl ModuleHost {
         config: serde_json::Value,
     ) -> Result<ModuleInfo> {
         let (module, sha256) = crate::module::github::acquire_cached(release)?;
-        self.load_file_pinned(&module, config, Some(sha256))
+        self.load_file_pinned(
+            &module,
+            config,
+            Some(sha256),
+            release.expected_library_sha256.map(str::to_ascii_lowercase),
+        )
     }
 
     /// Load an installer-bundle entry whose archive was replaced by its digest
@@ -561,10 +877,11 @@ impl ModuleHost {
     /// crate-private so the only caller stays [`super::load_first_admitted`],
     /// which reaches it for the installer-shipped directory alone.
     ///
-    /// The pin is *not* recorded as the attestation: nothing on this path
-    /// hashed bytes that match it, only a marker that claims so. Attestation
-    /// comes from the `modules.toml` beside the library, which this path
-    /// requires and activation re-hashes against the mapped file.
+    /// The marker proves the archive pin only. It is not a library digest
+    /// proof: notarization may have rewritten the extracted library after the
+    /// archive was built. Attestation therefore comes only from the sealed
+    /// `modules.toml` beside the library, which this path requires and
+    /// activation re-hashes against the mapped file.
     ///
     /// # Errors
     ///
@@ -583,7 +900,7 @@ impl ModuleHost {
                 "bundled digest marker does not match the pin, or the extraction is unusable",
             )
         })?;
-        self.load_file_pinned(&hit.module, config, None)
+        self.load_file_pinned(&hit.module, config, None, None)
     }
 
     /// Admit and initialize an already-resolved module without calling the
@@ -630,11 +947,12 @@ impl ModuleHost {
             descriptor,
             manifest,
             init,
+            library_sha256: None,
         };
         // No pin: the caller handed over an already-resolved artifact rather
         // than bytes this host read and hashed, so there is nothing to vouch
         // for. Attestation, if any, comes from an allowlist beside the file.
-        self.activate(file.as_ref(), artifact, config, None)
+        self.activate(file.as_ref(), artifact, config, None, None)
     }
 
     /// Admit a module whose code is linked into the host executable.
@@ -652,6 +970,73 @@ impl ModuleHost {
         &self,
         module: LinkedModule,
         config: serde_json::Value,
+    ) -> Result<ModuleInfo> {
+        self.attach_linked(module, config, None)
+    }
+
+    /// Admit linked code and replace its export-time setup with state owned by
+    /// this one attachment.
+    ///
+    /// The generated static export supplies a Rust-only initializer hook; the
+    /// hook receives this callback in place of its default setup function. Its
+    /// module connection remains the admitted, broker-authenticated peer, and
+    /// the ordinary descriptor, dependency, executable-digest and readiness
+    /// paths still apply. Dynamic modules cannot use this API.
+    ///
+    /// # Errors
+    /// Returns an error if the export has no linked setup hook, normal admission
+    /// fails, setup fails, or the module does not become ready before its
+    /// initialization deadline.
+    pub async fn attach_linked_with_setup<F, Fut>(
+        &self,
+        module: LinkedModule,
+        config: serde_json::Value,
+        setup: F,
+    ) -> Result<ModuleInfo>
+    where
+        F: FnOnce(crate::Connection) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<()>> + Send + 'static,
+    {
+        let init = module
+            .init_with_setup
+            .ok_or_else(|| Error::failed("linked export has no stateful setup entrypoint"))?;
+        let setup: LinkedSetup = Box::new(move |connection| Box::pin(setup(connection)));
+        let name = sanitize_untrusted(&module.manifest.module.name);
+        let info = self.attach_linked(module, config, Some((init, setup)))?;
+        let transport = self
+            .inner
+            .loaded
+            .lock()
+            .expect("module list lock")
+            .iter()
+            .find(|loaded| loaded.info.name == info.name)
+            .map(|loaded| loaded.transport.clone())
+            .ok_or_else(|| Error::failed("linked module did not retain its admitted transport"))?;
+        let mut setup_admission = LinkedSetupAdmissionGuard::new(transport.clone());
+        transport.ensure_initialized().await?;
+        if tokio::time::timeout(Duration::from_secs(5), transport.wait_ready())
+            .await
+            .is_err()
+            || !transport.is_ready()
+        {
+            return Err(Error::module_refused(
+                Path::new(&format!("linked-{name}")),
+                "linked module setup did not become ready",
+            ));
+        }
+        setup_admission.ready();
+        Ok(self
+            .list()
+            .into_iter()
+            .find(|module| module.name == info.name)
+            .unwrap_or(info))
+    }
+
+    fn attach_linked(
+        &self,
+        module: LinkedModule,
+        config: serde_json::Value,
+        linked_setup: Option<(LinkedModuleInitWithSetup, LinkedSetup)>,
     ) -> Result<ModuleInfo> {
         static EXECUTABLE_DIGEST: OnceLock<String> = OnceLock::new();
         let digest = match EXECUTABLE_DIGEST.get() {
@@ -674,9 +1059,11 @@ impl ModuleHost {
                 descriptor: module.descriptor,
                 manifest: module.manifest,
                 init: module.init,
+                library_sha256: None,
             },
             config,
             Some(digest),
+            linked_setup,
         )
     }
 
@@ -689,7 +1076,7 @@ impl ModuleHost {
         path: impl AsRef<Path>,
         config: serde_json::Value,
     ) -> Result<ModuleInfo> {
-        self.load_file_pinned(path, config, None)
+        self.load_file_pinned(path, config, None, None)
     }
 
     /// Load an artifact only if its actual manifest satisfies host requirements.
@@ -725,7 +1112,16 @@ impl ModuleHost {
                 "required activation refuses lazy sidecars",
             ));
         }
-        let artifact = loader::load(path, self.inner.strict.load(Ordering::Acquire))?;
+        let allowlisted = allowlisted_hash(
+            path,
+            std::fs::File::open(path)
+                .map_err(|_| Error::module_refused(path, "module library could not be opened"))?,
+        )?;
+        let artifact = loader::load_verified(
+            path,
+            self.inner.strict.load(Ordering::Acquire),
+            allowlisted.as_deref(),
+        )?;
         self.activate_required(path, artifact, config, requirements)
     }
 
@@ -739,13 +1135,13 @@ impl ModuleHost {
         requirements.check(&artifact.manifest).map_err(|_| {
             Error::module_refused(path, "artifact does not satisfy required module surface")
         })?;
-        self.activate(path, artifact, config, None)
+        self.activate(path, artifact, config, None, None)
     }
 
     /// [`ModuleHost::load_file_with_config`], carrying a digest the caller has
     /// already verified for an artifact that has no `modules.toml` beside it.
     ///
-    /// `pinned_sha256` is recorded as the attestation without being re-checked
+    /// `pinned_sha256` is recorded as the archive attestation without being re-checked
     /// here, because there is nothing left on disk to re-check it against — the
     /// bytes it names are the archive, which was verified and then extracted.
     /// The verification therefore lives entirely in the caller, and this stays
@@ -760,6 +1156,7 @@ impl ModuleHost {
         path: impl AsRef<Path>,
         config: serde_json::Value,
         pinned_sha256: Option<String>,
+        pinned_library_sha256: Option<String>,
     ) -> Result<ModuleInfo> {
         let path = path.as_ref();
         let result = (|| {
@@ -771,17 +1168,44 @@ impl ModuleHost {
                 })?;
             }
             check_file(path)?;
+            let allowlisted = allowlisted_hash(
+                path,
+                std::fs::File::open(path).map_err(|_| {
+                    Error::module_refused(path, "module library could not be opened")
+                })?,
+            )?;
+            if pinned_library_sha256
+                .as_ref()
+                .zip(allowlisted.as_ref())
+                .is_some_and(|(pinned, local)| !pinned.eq_ignore_ascii_case(local))
+            {
+                return Err(Error::module_refused(
+                    path,
+                    "release library pin disagrees with the local module allowlist",
+                ));
+            }
+            let library_pin = pinned_library_sha256.clone().or(allowlisted);
             if let Some(manifest) = read_lazy_manifest(path)? {
                 self.ensure_dependencies(&manifest, path)?;
-                return self.register_lazy(path, manifest, config, pinned_sha256.clone());
+                return self.register_lazy(
+                    path,
+                    manifest,
+                    config,
+                    pinned_sha256.clone(),
+                    library_pin,
+                );
             }
-            let artifact = loader::load(path, self.inner.strict.load(Ordering::Acquire))?;
+            let artifact = loader::load_verified(
+                path,
+                self.inner.strict.load(Ordering::Acquire),
+                library_pin.as_deref(),
+            )?;
             let rejected_manifest = artifact.manifest.clone();
             if let Err(error) = self.ensure_dependencies(&artifact.manifest, path) {
                 self.record_manifest_rejection(&error, rejected_manifest, RefusalClass::Unresolved);
                 return Err(error);
             }
-            self.activate(path, artifact, config, pinned_sha256)
+            self.activate(path, artifact, config, pinned_sha256, None)
         })();
         if let Err(error) = &result {
             self.record_rejection(error);
@@ -821,7 +1245,12 @@ impl ModuleHost {
         self.ensure_dependencies(&manifest, path)?;
         // No pin: a caller naming a path on disk vouches for it with the
         // `modules.toml` beside it, if at all.
-        self.register_lazy(path, manifest, config, None)
+        let library_sha256 = allowlisted_hash(
+            path,
+            std::fs::File::open(path)
+                .map_err(|_| Error::module_refused(path, "module library could not be opened"))?,
+        )?;
+        self.register_lazy(path, manifest, config, None, library_sha256)
     }
 
     /// Discover and load every platform library in a private directory.
@@ -891,8 +1320,14 @@ impl ModuleHost {
                 if let Some(manifest) = read_lazy_manifest(&path)? {
                     Ok(PendingModule::Lazy(Box::new(manifest)))
                 } else {
-                    loader::load(&path, self.inner.strict.load(Ordering::Acquire))
-                        .map(|artifact| PendingModule::Loaded(Box::new(artifact)))
+                    let library_pin =
+                        allowlisted_hash(&path, std::fs::File::open(&path).map_err(Error::from)?)?;
+                    loader::load_verified(
+                        &path,
+                        self.inner.strict.load(Ordering::Acquire),
+                        library_pin.as_deref(),
+                    )
+                    .map(|artifact| PendingModule::Loaded(Box::new(artifact)))
                 }
             });
             match inspected {
@@ -950,10 +1385,13 @@ impl ModuleHost {
                 // `modules.toml` in it is the operator's statement about them.
                 .and_then(|()| match module {
                     PendingModule::Loaded(artifact) => {
-                        self.activate(&path, *artifact, config, None)
+                        self.activate(&path, *artifact, config, None, None)
                     }
                     PendingModule::Lazy(manifest) => {
-                        self.register_lazy(&path, *manifest, config, None)
+                        let library_sha256 = std::fs::File::open(&path)
+                            .map_err(Error::from)
+                            .and_then(|file| allowlisted_hash(&path, file))?;
+                        self.register_lazy(&path, *manifest, config, None, library_sha256)
                     }
                 });
             outcomes.push(result);
@@ -964,25 +1402,39 @@ impl ModuleHost {
         Ok(outcomes)
     }
 
-    /// Search paths in precedence order for the current platform.
-    pub fn search_paths() -> Vec<PathBuf> {
-        let mut paths = std::env::var_os("OPENHUMAN_MODULE_PATH")
+    /// Search paths in precedence order for this host. An unconfigured host
+    /// has no implicit search paths.
+    pub fn search_paths(&self) -> Vec<PathBuf> {
+        let config = self
+            .inner
+            .search_path_config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(config) = config else {
+            return Vec::new();
+        };
+        let mut paths = std::env::var_os(&config.env_var)
             .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
             .unwrap_or_default();
         #[cfg(target_os = "linux")]
         {
             if let Some(path) = std::env::var_os("XDG_DATA_HOME") {
-                paths.push(PathBuf::from(path).join("openhuman/modules"));
+                paths.push(PathBuf::from(path).join(&config.app_dir));
             } else if let Some(path) = std::env::var_os("HOME") {
-                paths.push(PathBuf::from(path).join(".local/share/openhuman/modules"));
+                paths.push(
+                    PathBuf::from(path)
+                        .join(".local/share")
+                        .join(&config.app_dir),
+                );
             }
-            paths.push(PathBuf::from("/usr/lib/openhuman/modules"));
+            paths.push(PathBuf::from("/usr/lib").join(&config.app_dir));
         }
         #[cfg(target_os = "macos")]
-        paths.push(PathBuf::from("/usr/local/lib/openhuman/modules"));
+        paths.push(PathBuf::from("/usr/local/lib").join(&config.app_dir));
         #[cfg(windows)]
         if let Some(path) = std::env::var_os("LOCALAPPDATA") {
-            paths.push(PathBuf::from(path).join("openhuman/modules"));
+            paths.push(PathBuf::from(path).join(&config.app_dir));
         }
         paths
     }
@@ -990,10 +1442,7 @@ impl ModuleHost {
     /// Load every existing directory in [`ModuleHost::search_paths`] order.
     pub fn load_search_paths(&self) -> Vec<Result<ModuleInfo>> {
         let mut outcomes = Vec::new();
-        for path in Self::search_paths()
-            .into_iter()
-            .filter(|path| path.is_dir())
-        {
+        for path in self.search_paths().into_iter().filter(|path| path.is_dir()) {
             match self.load_dir(path) {
                 Ok(results) => outcomes.extend(results),
                 Err(error) => outcomes.push(Err(error)),
@@ -1010,10 +1459,7 @@ impl ModuleHost {
     /// [`Self::load_dir`] loads them.
     pub fn load_search_paths_except(&self, skip: &[String]) -> Vec<Result<ModuleInfo>> {
         let mut outcomes = Vec::new();
-        for directory in Self::search_paths()
-            .into_iter()
-            .filter(|path| path.is_dir())
-        {
+        for directory in self.search_paths().into_iter().filter(|path| path.is_dir()) {
             match self.load_dir_inner(&directory, None, skip) {
                 Ok(results) => outcomes.extend(results),
                 Err(error) => outcomes.push(Err(error)),
@@ -1039,7 +1485,13 @@ impl ModuleHost {
                     let info = provisional_info(&path, &manifest)?;
                     Ok((PendingModule::Lazy(Box::new(manifest)), info))
                 } else {
-                    let artifact = loader::load(&path, self.inner.strict.load(Ordering::Acquire))?;
+                    let library_pin =
+                        allowlisted_hash(&path, std::fs::File::open(&path).map_err(Error::from)?)?;
+                    let artifact = loader::load_verified(
+                        &path,
+                        self.inner.strict.load(Ordering::Acquire),
+                        library_pin.as_deref(),
+                    )?;
                     let info = self.validate(&path, &artifact.descriptor, &artifact.manifest)?;
                     Ok((PendingModule::Loaded(Box::new(artifact)), info))
                 }
@@ -1091,7 +1543,9 @@ impl ModuleHost {
         artifact: LoadedArtifact,
         config: serde_json::Value,
         pinned_sha256: Option<String>,
+        linked_setup: Option<(LinkedModuleInitWithSetup, LinkedSetup)>,
     ) -> Result<ModuleInfo> {
+        let pinned_library_sha256 = artifact.library_sha256.clone();
         let _admission = self.inner.admission.lock().expect("module admission lock");
         let manifest = artifact.manifest.clone();
         let mut admitted = self
@@ -1117,21 +1571,48 @@ impl ModuleHost {
             self.record_manifest_rejection(&error, manifest.clone(), RefusalClass::Rejected);
             error
         })?;
-        let (transport, host_vtable) = ModuleTransport::new(admitted.name.clone(), config);
-        if artifact.manifest.lazy_init {
-            admitted.state = ModuleState::Resolved;
-            transport.defer_initialize(artifact.init, host_vtable);
-        } else {
-            admitted.state = ModuleState::Initializing;
-            if let Err(failure) = transport.eager_initialize(artifact.init, host_vtable) {
-                let reason = if failure.to_string().contains("vtable") {
-                    "module returned an invalid vtable"
-                } else {
-                    "module initialization failed"
-                };
-                let error = Error::module_refused(path, reason);
-                self.record_manifest_rejection(&error, manifest, RefusalClass::Failed);
-                return Err(error);
+        let trusted_host = self.inner.broker.restricted_module_controller_binding();
+        let pre_ready_routes = self
+            .inner
+            .pre_ready_confidential_routes
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let (transport, host_vtable) = ModuleTransport::new_with_controller_binding(
+            admitted.name.clone(),
+            config,
+            trusted_host,
+            pre_ready_routes,
+        );
+        match linked_setup {
+            Some((init, setup)) => {
+                admitted.state = ModuleState::Resolved;
+                transport.defer_initializer(host_vtable, move |host| {
+                    let mut module = TbModuleVtable::default();
+                    let code = unsafe { init(&host, &mut module, setup) };
+                    if code == TB_OK {
+                        Ok(module)
+                    } else {
+                        Err("linked module initialization failed".to_string())
+                    }
+                });
+            }
+            None if artifact.manifest.lazy_init => {
+                admitted.state = ModuleState::Resolved;
+                transport.defer_initialize(artifact.init, host_vtable);
+            }
+            None => {
+                admitted.state = ModuleState::Initializing;
+                if let Err(failure) = transport.eager_initialize(artifact.init, host_vtable) {
+                    let reason = if failure.to_string().contains("vtable") {
+                        "module returned an invalid vtable"
+                    } else {
+                        "module initialization failed"
+                    };
+                    let error = Error::module_refused(path, reason);
+                    self.record_manifest_rejection(&error, manifest, RefusalClass::Failed);
+                    return Err(error);
+                }
             }
         }
 
@@ -1145,6 +1626,7 @@ impl ModuleHost {
                 lazy_load: false,
                 descriptor_info: None,
                 pinned_sha256,
+                pinned_library_sha256,
             },
         )
     }
@@ -1155,6 +1637,7 @@ impl ModuleHost {
         manifest: ModuleManifest,
         config: serde_json::Value,
         pinned_sha256: Option<String>,
+        pinned_library_sha256: Option<String>,
     ) -> Result<ModuleInfo> {
         let _admission = self.inner.admission.lock().expect("module admission lock");
         let admitted = provisional_info(path, &manifest).inspect_err(|error| {
@@ -1177,10 +1660,23 @@ impl ModuleHost {
             self.record_manifest_rejection(&error, manifest.clone(), RefusalClass::Rejected);
             error
         })?;
-        let (transport, host_vtable) = ModuleTransport::new(admitted.name.clone(), config);
+        let trusted_host = self.inner.broker.restricted_module_controller_binding();
+        let pre_ready_routes = self
+            .inner
+            .pre_ready_confidential_routes
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let (transport, host_vtable) = ModuleTransport::new_with_controller_binding(
+            admitted.name.clone(),
+            config,
+            trusted_host,
+            pre_ready_routes,
+        );
         let expected = manifest.clone();
         let artifact_path = path.to_path_buf();
         let strict = self.inner.strict.load(Ordering::Acquire);
+        let expected_library = pinned_library_sha256.clone();
         let descriptor_info = Arc::new(Mutex::new(None));
         let loaded_descriptor_info = descriptor_info.clone();
         transport.defer_initializer(host_vtable, move |host| {
@@ -1189,8 +1685,9 @@ impl ModuleHost {
             // replaced after discovery cannot inherit the old hash attestation.
             check_file(&artifact_path)
                 .map_err(|_| "module library no longer passes admission".to_string())?;
-            let artifact = loader::load(&artifact_path, strict)
-                .map_err(|_| "module library could not be loaded".to_string())?;
+            let artifact =
+                loader::load_verified(&artifact_path, strict, expected_library.as_deref())
+                    .map_err(|_| "module library could not be loaded".to_string())?;
             let rustc = sanitized_field(&artifact.descriptor.rustc_version);
             if artifact.manifest != expected
                 || loaded_identity(&artifact.descriptor, &artifact.manifest).is_none()
@@ -1223,6 +1720,7 @@ impl ModuleHost {
                 lazy_load: true,
                 descriptor_info: Some(descriptor_info),
                 pinned_sha256,
+                pinned_library_sha256,
             },
         )
     }
@@ -1236,7 +1734,8 @@ impl ModuleHost {
         activation: Activation,
     ) -> Result<ModuleInfo> {
         let transport_for_broker: Arc<dyn Transport> = transport.clone();
-        let unique = self.inner.broker.attach(transport_for_broker);
+        let staged = self.inner.broker.attach_module_staged(transport_for_broker);
+        let unique = staged.unique_name().clone();
         let reserved_change = match self
             .inner
             .broker
@@ -1245,12 +1744,6 @@ impl ModuleHost {
             Ok(change) => change,
             Err(_) => {
                 transport.commit_terminal(true);
-                self.inner
-                    .broker
-                    .router
-                    .lock()
-                    .expect("router lock")
-                    .detach_unique(&unique);
                 transport.request_terminal(true);
                 let error = Error::module_refused(path, "module bus name is already owned");
                 self.record_manifest_rejection(&error, manifest, RefusalClass::Unresolved);
@@ -1273,6 +1766,7 @@ impl ModuleHost {
         // value is carried down instead. Linked code carries the executable
         // digest through the same field. Without one of these sources there is
         // no attestation.
+        let archive_is_pinned = activation.pinned_sha256.is_some();
         let vouched = match activation.pinned_sha256 {
             Some(pinned) => Some(pinned),
             None => std::fs::File::open(path)
@@ -1281,23 +1775,70 @@ impl ModuleHost {
                 .ok()
                 .flatten(),
         };
-        if let Some(sha256) = vouched {
+        let library_sha256 = activation.pinned_library_sha256;
+        let library_matches_vouch = archive_is_pinned
+            || library_sha256
+                .as_ref()
+                .is_none_or(|library| vouched.as_ref() == Some(library));
+        if let (Some(sha256), true) = (vouched, library_matches_vouch) {
             self.inner.broker.attest_module(
                 &unique,
                 crate::attest::Attestation {
                     name: admitted.manifest.bus_name.clone(),
                     sha256,
+                    library_sha256,
                 },
             );
         }
 
-        let broker = self.inner.broker.clone();
-        let ready_transport = transport.clone();
-        let module_name = admitted.name.clone();
-        let previous_state = state_name(&admitted.state);
         let lazy_init = activation.lazy_init;
         let lazy_load = activation.lazy_load;
         let descriptor_info = activation.descriptor_info;
+        if !self.inner.warned.swap(true, Ordering::AcqRel) {
+            tracing::warn!(
+                modules = 1,
+                "in-process modules are inside the host trust boundary"
+            );
+        }
+        if lazy_load {
+            tracing::info!(module = %admitted.name, "module registered for lazy loading");
+        } else {
+            tracing::info!(module = %admitted.name, "module loaded");
+        }
+        let ready_transport = transport.clone();
+        let module_name = admitted.name.clone();
+        let previous_state = state_name(&admitted.state);
+        self.inner
+            .loaded
+            .lock()
+            .expect("module list lock")
+            .push(LoadedModule {
+                info: admitted.clone(),
+                module_id: ModuleId::new(manifest.module.name.clone()),
+                transport,
+                unique_name: unique.clone(),
+                transition_from: None,
+                descriptor_info,
+                lifecycle_busy: false,
+                callback_config: None,
+                callback_state: None,
+                _callback_binding: None,
+            });
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| staged.start())).is_err() {
+            let mut loaded = self.inner.loaded.lock().expect("module list lock");
+            if let Some(index) = loaded.iter().position(|module| {
+                module.unique_name == unique && Arc::ptr_eq(&module.transport, &ready_transport)
+            }) {
+                loaded.remove(index);
+            }
+            drop(loaded);
+            ready_transport.commit_terminal(true);
+            ready_transport.request_terminal(true);
+            let error = Error::module_refused(path, "module transport could not start");
+            self.record_manifest_rejection(&error, manifest, RefusalClass::Failed);
+            return Err(error);
+        }
+        let broker = self.inner.broker.clone();
         tokio::spawn(async move {
             if lazy_init {
                 ready_transport.wait_initializing().await;
@@ -1326,32 +1867,23 @@ impl ModuleHost {
                     .await;
             }
         });
-        if !self.inner.warned.swap(true, Ordering::AcqRel) {
-            tracing::warn!(
-                modules = 1,
-                "in-process modules are inside the host trust boundary"
-            );
-        }
-        if lazy_load {
-            tracing::info!(module = %admitted.name, "module registered for lazy loading");
-        } else {
-            tracing::info!(module = %admitted.name, "module loaded");
-        }
-        self.inner
-            .loaded
+        #[cfg(test)]
+        if let Some(barrier) = self
+            .inner
+            .after_loaded_publish
             .lock()
-            .expect("module list lock")
-            .push(LoadedModule {
-                info: admitted.clone(),
-                transport,
-                unique_name: unique,
-                transition_from: None,
-                descriptor_info,
-                lifecycle_busy: false,
-                callback_config: None,
-                callback_state: None,
-                _callback_binding: None,
-            });
+            .expect("loaded publication barrier lock")
+            .take()
+        {
+            barrier
+                .reached
+                .send(())
+                .expect("test observes loaded publication barrier");
+            barrier
+                .release
+                .recv()
+                .expect("test releases loaded publication barrier");
+        }
         Ok(admitted)
     }
 
@@ -1372,12 +1904,15 @@ impl ModuleHost {
             tracing::warn!(module = %sanitize_untrusted(&manifest.module.name), "module rustc differs from host");
         }
 
-        let name = sanitized_field(&descriptor.module_name)
-            .ok_or_else(|| refuse("descriptor identity is invalid"))?;
+        let descriptor_name = std::str::from_utf8(field_bytes(&descriptor.module_name))
+            .map_err(|_| refuse("descriptor identity is invalid"))?;
+        if !canonical_module_id(&manifest.module.name) || descriptor_name != manifest.module.name {
+            return Err(refuse("manifest identity does not match descriptor"));
+        }
+        let name = sanitize_untrusted(descriptor_name);
         let version = sanitized_field(&descriptor.module_version)
             .ok_or_else(|| refuse("descriptor identity is invalid"))?;
         if manifest.schema != MANIFEST_SCHEMA
-            || sanitize_untrusted(&manifest.module.name) != name
             || sanitize_untrusted(&manifest.module.version.to_string()) != version
             || manifest.module.name.len() > 64
             || manifest.module.version.to_string().len() > 32
@@ -1612,16 +2147,17 @@ impl ModuleControl for ModuleHostInner {
             (module.transport.clone(), module.callback_state.clone())
         };
         let _lifecycle_busy = LifecycleBusyGuard::for_stop(self, name, transport.clone());
-        if let Some(callbacks) = callbacks
-            && let Err(error) = callbacks
+        if let Some(callbacks) = callbacks {
+            if let Err(error) = callbacks
                 .drain(deadline.saturating_sub(started.elapsed()))
                 .await
-        {
-            let mut loaded = self.loaded.lock().expect("module list lock");
-            if let Some(module) = loaded.iter_mut().find(|module| module.info.name == name) {
-                module.transition_from = None;
+            {
+                let mut loaded = self.loaded.lock().expect("module list lock");
+                if let Some(module) = loaded.iter_mut().find(|module| module.info.name == name) {
+                    module.transition_from = None;
+                }
+                return Err(error);
             }
-            return Err(error);
         }
         let stopped = transport
             .stop(deadline.saturating_sub(started.elapsed()))
@@ -1683,7 +2219,11 @@ impl ModuleControl for ModuleHostInner {
                     "module lifecycle operation is already running",
                 ));
             }
-            if !matches!(state, ModuleState::Ready | ModuleState::Serving) {
+            let deferred_initialization = matches!(state, ModuleState::Resolved)
+                && module.transport.has_deferred_initializer();
+            if !matches!(state, ModuleState::Ready | ModuleState::Serving)
+                && !deferred_initialization
+            {
                 return Err(Error::ModuleUnavailable {
                     module: module.info.name.clone(),
                     state: state_name(&state).to_string(),
@@ -1757,10 +2297,13 @@ impl ModuleControl for ModuleHostInner {
                 .expect("module directory lock")
                 .clone();
             if configured.is_empty() {
-                ModuleHost::search_paths()
-                    .into_iter()
-                    .filter(|path| path.is_dir())
-                    .collect()
+                ModuleHost {
+                    inner: Arc::clone(&self),
+                }
+                .search_paths()
+                .into_iter()
+                .filter(|path| path.is_dir())
+                .collect()
             } else {
                 configured
             }
@@ -1804,11 +2347,11 @@ impl ModuleControl for ModuleHostInner {
         let module = loaded
             .iter_mut()
             .find(|module| &module.unique_name == unique_name)?;
-        if !module.transport.is_faulted()
-            && let Some(old) = module.transition_from.take()
-        {
-            module.info.state = ModuleState::Stopped;
-            return Some((module.info.name.clone(), old, ModuleState::Stopped));
+        if !module.transport.is_faulted() {
+            if let Some(old) = module.transition_from.take() {
+                module.info.state = ModuleState::Stopped;
+                return Some((module.info.name.clone(), old, ModuleState::Stopped));
+            }
         }
         if !module.transport.is_faulted()
             || matches!(
@@ -1957,8 +2500,7 @@ fn provisional_info(path: &Path, manifest: &ModuleManifest) -> Result<ModuleInfo
     let version = sanitize_untrusted(&manifest.module.version.to_string());
     if !manifest.lazy_init
         || manifest.schema != MANIFEST_SCHEMA
-        || name.is_empty()
-        || name != manifest.module.name
+        || !canonical_module_id(&manifest.module.name)
         || version != manifest.module.version.to_string()
         || manifest.module.name.len() > 64
         || manifest.module.version.to_string().len() > 32
@@ -1986,14 +2528,27 @@ fn loaded_identity(
     descriptor: &TbAbiDescriptor,
     manifest: &ModuleManifest,
 ) -> Option<(String, String)> {
-    let name = sanitized_field(&descriptor.module_name)?;
+    let descriptor_name = std::str::from_utf8(field_bytes(&descriptor.module_name)).ok()?;
+    let name = sanitize_untrusted(descriptor_name);
     let version = sanitized_field(&descriptor.module_version)?;
     (manifest.schema == MANIFEST_SCHEMA
-        && sanitize_untrusted(&manifest.module.name) == name
+        && canonical_module_id(&manifest.module.name)
+        && descriptor_name == manifest.module.name
         && sanitize_untrusted(&manifest.module.version.to_string()) == version
         && manifest.module.name.len() <= 64
         && manifest.module.version.to_string().len() <= 32)
         .then_some((name, version))
+}
+
+/// Module identifiers are package names, not log-safe display labels. Keep the
+/// full validated identifier for authorization while allowing the summary name
+/// to remain capped by `sanitize_untrusted`.
+fn canonical_module_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'-'))
 }
 
 fn rejection_info(error: &Error) -> ModuleInfo {

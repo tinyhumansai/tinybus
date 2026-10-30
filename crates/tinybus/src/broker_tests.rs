@@ -47,6 +47,22 @@ async fn bus() -> (MemoryBus, Connection, Connection) {
     (bus, service, client)
 }
 
+async fn receive_name_change(
+    changes: &mut tokio::sync::broadcast::Receiver<Message>,
+    name: &str,
+) -> Message {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let message = changes.recv().await.unwrap();
+            if message.body[0] == name {
+                break message;
+            }
+        }
+    })
+    .await
+    .expect("the requested name change is announced")
+}
+
 #[tokio::test]
 async fn a_client_calls_a_service_by_its_well_known_name() {
     let (_bus, _service, client) = bus().await;
@@ -62,6 +78,246 @@ async fn hello_assigns_distinct_unique_names() {
     let b = client.unique_name().unwrap();
     assert!(a.is_unique() && b.is_unique());
     assert_ne!(a, b);
+}
+
+#[tokio::test]
+async fn disconnect_announces_unique_name_loss_but_alias_release_does_not() {
+    let bus = MemoryBus::new();
+    Broker::new().spawn(bus.clone());
+    let peer = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let observer = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let unique = peer.unique_name().unwrap();
+    let mut changes = observer
+        .add_match(
+            MatchRule::new()
+                .signals()
+                .member(MemberName::new("NameOwnerChanged").unwrap()),
+        )
+        .await
+        .unwrap();
+
+    peer.close().await.unwrap();
+
+    let detached = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let message = changes.recv().await.unwrap();
+            if message.body[0] == serde_json::Value::String(unique.to_string()) {
+                break message;
+            }
+        }
+    })
+    .await
+    .expect("peer detach must announce its unique name");
+    assert_eq!(
+        detached.body[1],
+        serde_json::Value::String(unique.to_string())
+    );
+    assert!(detached.body[2].is_null());
+
+    let live = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let alias = "org.example.LiveAlias";
+    let live_unique = live.unique_name().unwrap();
+    assert!(live.release_name(live_unique.as_str()).await.is_err());
+    assert_eq!(
+        live.name_owner(live_unique.as_str()).await.unwrap(),
+        Some(live_unique.clone())
+    );
+    live.request_name(alias).await.unwrap();
+    let alias_acquired = tokio::time::timeout(Duration::from_secs(2), changes.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(alias_acquired.body[0], alias);
+    assert!(alias_acquired.body[1].is_null());
+    assert_eq!(
+        alias_acquired.body[2],
+        serde_json::Value::String(live_unique.to_string())
+    );
+
+    live.release_name(alias).await.unwrap();
+    let alias_released = tokio::time::timeout(Duration::from_secs(2), changes.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(alias_released.body[0], alias);
+    assert_eq!(
+        alias_released.body[1],
+        serde_json::Value::String(live_unique.to_string())
+    );
+    assert!(alias_released.body[2].is_null());
+    assert_eq!(
+        live.name_owner(live_unique.as_str()).await.unwrap(),
+        Some(live_unique)
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), changes.recv())
+            .await
+            .is_err(),
+        "releasing an alias from a live peer must not announce peer death"
+    );
+}
+
+#[tokio::test]
+#[cfg(feature = "modules")]
+async fn an_internally_detached_peer_still_announces_its_unique_name_loss() {
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    broker.clone().spawn(bus.clone());
+    let peer = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let observer = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let unique = peer.unique_name().unwrap();
+    let mut changes = observer
+        .add_match(
+            MatchRule::new()
+                .signals()
+                .member(MemberName::new("NameOwnerChanged").unwrap()),
+        )
+        .await
+        .unwrap();
+
+    // This is the synchronous revocation path used by module teardown. The
+    // reader task will later observe EOF, but by then the route is already gone.
+    broker.detach_unique(&unique);
+    let detached = tokio::time::timeout(Duration::from_secs(2), changes.recv())
+        .await
+        .expect("internal detach must announce peer death")
+        .unwrap();
+    assert_eq!(detached.body, serde_json::json!([unique, unique, null]));
+    assert_eq!(observer.name_owner(unique.as_str()).await.unwrap(), None);
+    peer.close().await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), changes.recv())
+            .await
+            .is_err(),
+        "reader cleanup must not announce the same detach twice"
+    );
+}
+
+struct CountingVoice(tokio::sync::mpsc::UnboundedSender<()>);
+
+#[async_trait]
+impl Interface for CountingVoice {
+    fn name(&self) -> InterfaceName {
+        InterfaceName::new(VOICE_NAME).unwrap()
+    }
+
+    fn members(&self) -> Vec<MemberName> {
+        vec![MemberName::new("Transcribe").unwrap()]
+    }
+
+    async fn call(&self, _member: &MemberName, _args: Value) -> Result<Value> {
+        let _ = self.0.send(());
+        Ok(Value::Null)
+    }
+}
+
+#[tokio::test]
+#[cfg(feature = "modules")]
+async fn a_detached_peer_cannot_route_frames_after_its_death_is_announced() {
+    let bus = MemoryBus::new();
+    let broker = Broker::new();
+    broker.clone().spawn(bus.clone());
+
+    let (call_tx, mut call_rx) = tokio::sync::mpsc::unbounded_channel();
+    let service = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    service
+        .serve_at(ObjectPath::new(VOICE_PATH).unwrap(), CountingVoice(call_tx))
+        .await
+        .unwrap();
+    service.request_name(VOICE_NAME).await.unwrap();
+
+    let stale_peer = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let unique = stale_peer.unique_name().unwrap();
+    let death_observer = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let signal_observer = Connection::connect(bus.connect().await.unwrap())
+        .await
+        .unwrap();
+    let mut deaths = death_observer
+        .add_match(
+            MatchRule::new()
+                .signals()
+                .member(MemberName::new("NameOwnerChanged").unwrap()),
+        )
+        .await
+        .unwrap();
+    let mut peer_signals = signal_observer
+        .add_match(
+            MatchRule::new()
+                .signals()
+                .member(MemberName::new("PeerPing").unwrap()),
+        )
+        .await
+        .unwrap();
+    let id = unique
+        .as_str()
+        .strip_prefix(":1.")
+        .expect("broker unique name has the documented prefix")
+        .parse::<u64>()
+        .expect("broker unique name embeds its peer id");
+
+    broker.detach_unique(&unique);
+    let death = tokio::time::timeout(Duration::from_secs(2), deaths.recv())
+        .await
+        .expect("detach announcement arrives before stale frames")
+        .unwrap();
+    assert_eq!(death.body, serde_json::json!([unique, unique, null]));
+
+    let signal = Message::signal(
+        ObjectPath::new("/ai/tinyhumans/test/Peer").unwrap(),
+        InterfaceName::new("ai.tinyhumans.test.Peer").unwrap(),
+        MemberName::new("PeerPing").unwrap(),
+        Value::Null,
+    );
+    let signal_result = broker.route(id, &unique, signal).await;
+
+    let method = Message::method_call(
+        BusName::new(VOICE_NAME).unwrap(),
+        ObjectPath::new(VOICE_PATH).unwrap(),
+        InterfaceName::new(VOICE_NAME).unwrap(),
+        MemberName::new("Transcribe").unwrap(),
+        serde_json::json!(["/tmp/stale.wav"]),
+    );
+    let method_result = broker.route(id, &unique, method).await;
+
+    let alias = BusName::new("org.example.DetachedGhost").unwrap();
+    let request_name = Message::method_call(
+        BusName::new(crate::BUS_NAME).unwrap(),
+        ObjectPath::new(crate::BUS_PATH).unwrap(),
+        InterfaceName::new(crate::BUS_INTERFACE).unwrap(),
+        MemberName::new("RequestName").unwrap(),
+        serde_json::json!([alias]),
+    );
+    let request_result = broker.route(id, &unique, request_name).await;
+
+    let signal_delivery =
+        tokio::time::timeout(Duration::from_millis(100), peer_signals.recv()).await;
+    let service_delivery = tokio::time::timeout(Duration::from_millis(100), call_rx.recv()).await;
+    let live_names = broker.router.lock().expect("router lock").list_names();
+    assert!(
+        signal_result.is_err()
+            && method_result.is_err()
+            && request_result.is_err()
+            && signal_delivery.is_err()
+            && service_delivery.is_err()
+            && !live_names.contains(&alias),
+        "stale routing: signal={signal_result:?}, method={method_result:?}, request={request_result:?}, signal_delivery={signal_delivery:?}, service_delivery={service_delivery:?}, names={live_names:?}"
+    );
 }
 
 struct ClosedListener;
@@ -235,10 +491,7 @@ async fn a_service_dying_releases_its_name_and_announces_it() {
 
     drop(service);
 
-    let announcement = tokio::time::timeout(Duration::from_secs(5), signals.recv())
-        .await
-        .expect("the kernel is told")
-        .unwrap();
+    let announcement = receive_name_change(&mut signals, VOICE_NAME).await;
     let (name, _old, new): (BusName, Option<BusName>, Option<BusName>) =
         serde_json::from_value(announcement.body).unwrap();
     assert_eq!(name.as_str(), VOICE_NAME);
@@ -455,6 +708,7 @@ async fn attested_bus() -> (MemoryBus, Broker, Connection, Connection) {
         crate::attest::Attestation {
             name: BusName::new(VOICE_NAME).unwrap(),
             sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
+            library_sha256: None,
         },
     );
 
@@ -644,10 +898,7 @@ async fn a_name_handed_on_to_another_peer_does_not_hand_on_its_attestation() {
         .await
         .unwrap();
     service.close().await.unwrap();
-    let detached = tokio::time::timeout(Duration::from_secs(5), changes.recv())
-        .await
-        .unwrap()
-        .unwrap();
+    let detached = receive_name_change(&mut changes, "org.example.Extra").await;
     assert_eq!(detached.body[0], "org.example.Extra");
     assert_eq!(fixed.attestation().await.unwrap(), None);
     assert_eq!(

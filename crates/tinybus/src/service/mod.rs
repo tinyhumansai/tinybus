@@ -26,6 +26,7 @@ use serde_json::Value;
 
 use crate::error::Result;
 use crate::name::{BusName, InterfaceName, MemberName};
+use crate::{WeakConnection, connection::ConnectionOrigin};
 
 pub use crate::service::tree::ObjectTree;
 
@@ -45,10 +46,21 @@ pub use crate::service::tree::ObjectTree;
 /// ```compile_fail
 /// let _: tinybus::CallContext = serde_json::from_str("{}").unwrap();
 /// ```
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct CallContext {
     sender: Option<BusName>,
     confidential: bool,
+    receive_origin: Option<std::sync::Weak<ConnectionOrigin>>,
+}
+
+impl std::fmt::Debug for CallContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CallContext")
+            .field("sender", &self.sender)
+            .field("confidential", &self.confidential)
+            .field("has_receive_origin", &self.receive_origin.is_some())
+            .finish()
+    }
 }
 
 impl CallContext {
@@ -67,10 +79,31 @@ impl CallContext {
         self.confidential
     }
 
+    /// Whether this call was received by `connection` itself.
+    ///
+    /// The connection identity is opaque and compared through weak allocation
+    /// identity. Context captured from another bus connection cannot match even
+    /// when both brokers assigned the same unique sender name.
+    pub fn is_for_connection(&self, connection: &WeakConnection) -> bool {
+        self.receive_origin
+            .as_ref()
+            .is_some_and(|origin| connection.matches_origin(origin))
+    }
+
+    #[cfg(test)]
     pub(crate) fn brokered(sender: Option<&BusName>, confidential: bool) -> Self {
+        Self::brokered_with_origin(sender, confidential, None)
+    }
+
+    pub(crate) fn brokered_with_origin(
+        sender: Option<&BusName>,
+        confidential: bool,
+        receive_origin: Option<&std::sync::Arc<ConnectionOrigin>>,
+    ) -> Self {
         Self {
             sender: sender.filter(|name| name.is_unique()).cloned(),
             confidential: confidential && sender.is_some_and(BusName::is_unique),
+            receive_origin: receive_origin.map(std::sync::Arc::downgrade),
         }
     }
 }

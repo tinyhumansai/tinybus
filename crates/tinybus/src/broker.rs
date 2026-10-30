@@ -57,6 +57,63 @@ pub struct Broker {
     module_controller: Option<Arc<Mutex<ModuleControllerBinding>>>,
 }
 
+/// A module peer admitted into the router but not yet made dispatchable.
+/// Module hosts publish its validated identity before calling `start`.
+#[cfg(feature = "modules")]
+pub(crate) struct StagedModulePeer {
+    broker: Broker,
+    id: Option<u64>,
+    unique: BusName,
+    transport: Option<Arc<dyn Transport>>,
+    inbox: Option<mpsc::Receiver<Message>>,
+}
+
+#[cfg(feature = "modules")]
+impl StagedModulePeer {
+    pub(crate) fn unique_name(&self) -> &BusName {
+        &self.unique
+    }
+
+    pub(crate) fn start(mut self) {
+        let id = self.id.expect("staged peer is live");
+        let transport = self.transport.as_ref().expect("staged transport").clone();
+        let inbox = self.inbox.take().expect("staged inbox");
+        if let Some(module) = crate::transport::downcast::<crate::module::transport::ModuleTransport>(
+            transport.as_ref(),
+        ) {
+            module.admit_broker();
+        }
+        tracing::debug!(peer = %self.unique, transport = %transport.describe(), "module peer attached");
+        tokio::spawn(writer_task(transport.clone(), inbox));
+        tokio::spawn(reader_task(
+            self.broker.clone(),
+            transport,
+            id,
+            self.unique.clone(),
+        ));
+        self.id.take();
+        self.transport.take();
+    }
+}
+
+#[cfg(feature = "modules")]
+impl Drop for StagedModulePeer {
+    fn drop(&mut self) {
+        if self.id.is_some() {
+            self.broker.detach_unique(&self.unique);
+            if let Some(transport) = self.transport.as_deref() {
+                if let Some(module) = crate::transport::downcast::<
+                    crate::module::transport::ModuleTransport,
+                >(transport)
+                {
+                    module.commit_terminal(true);
+                    module.request_terminal(true);
+                }
+            }
+        }
+    }
+}
+
 #[cfg(feature = "modules")]
 #[derive(Default)]
 enum ModuleControllerBinding {
@@ -64,6 +121,45 @@ enum ModuleControllerBinding {
     Unselected,
     Attaching,
     Selected(BusName),
+}
+
+/// A non-owning snapshot of the controller selected when one module transport
+/// is created. It retains no connection or transport endpoint.
+#[cfg(feature = "modules")]
+#[derive(Clone)]
+pub(crate) struct RestrictedModuleControllerBinding {
+    peer: BusName,
+    controller: Weak<Mutex<ModuleControllerBinding>>,
+    router: Weak<Mutex<Router>>,
+}
+
+#[cfg(feature = "modules")]
+impl RestrictedModuleControllerBinding {
+    pub(crate) fn peer(&self) -> &BusName {
+        &self.peer
+    }
+
+    /// Confirm that the selected peer is unchanged and still attached.
+    pub(crate) fn is_live(&self) -> bool {
+        let Some(controller) = self.controller.upgrade() else {
+            return false;
+        };
+        let selected = match controller.lock() {
+            Ok(binding) => {
+                matches!(&*binding, ModuleControllerBinding::Selected(peer) if peer == &self.peer)
+            }
+            Err(_) => false,
+        };
+        if !selected {
+            return false;
+        }
+        let Some(router) = self.router.upgrade() else {
+            return false;
+        };
+        router
+            .lock()
+            .is_ok_and(|router| router.has_unique_peer(&self.peer))
+    }
 }
 
 impl Broker {
@@ -134,6 +230,33 @@ impl Broker {
         Ok(unique)
     }
 
+    /// Snapshot the selected restricted controller for a new module transport.
+    /// A missing selection is final for that transport; later selection does
+    /// not bind an already-created module context.
+    #[cfg(feature = "modules")]
+    pub(crate) fn restricted_module_controller_binding(
+        &self,
+    ) -> Option<RestrictedModuleControllerBinding> {
+        let controller = self.module_controller.as_ref()?;
+        let selected_peer = {
+            let binding = controller.lock().ok()?;
+            match &*binding {
+                ModuleControllerBinding::Selected(peer) => peer.clone(),
+                ModuleControllerBinding::Unselected | ModuleControllerBinding::Attaching => {
+                    return None;
+                }
+            }
+        };
+        if !self.router.lock().ok()?.has_unique_peer(&selected_peer) {
+            return None;
+        }
+        Some(RestrictedModuleControllerBinding {
+            peer: selected_peer,
+            controller: Arc::downgrade(controller),
+            router: Arc::downgrade(&self.router),
+        })
+    }
+
     /// This broker's id, as reported by the bus's `GetId`.
     pub fn id(&self) -> &str {
         &self.id
@@ -198,6 +321,25 @@ impl Broker {
         unique
     }
 
+    /// Reserve a module peer without starting dispatch. The module host must
+    /// validate and publish its exact identity before starting this peer.
+    #[cfg(feature = "modules")]
+    pub(crate) fn attach_module_staged(&self, transport: Arc<dyn Transport>) -> StagedModulePeer {
+        let (outbox, inbox) = mpsc::channel(PEER_QUEUE_CAPACITY);
+        let (id, unique) = self
+            .router
+            .lock()
+            .expect("router lock is never held across a panic point")
+            .attach(outbox);
+        StagedModulePeer {
+            broker: self.clone(),
+            id: Some(id),
+            unique,
+            transport: Some(transport),
+            inbox: Some(inbox),
+        }
+    }
+
     #[cfg(feature = "modules")]
     pub(crate) fn reserve_module_name(
         &self,
@@ -208,6 +350,32 @@ impl Broker {
             .lock()
             .expect("router lock")
             .request_name_for_unique(unique, name)
+    }
+
+    /// Atomically claim a runtime-owned host name for one attached connection.
+    /// Returns whether this call created the claim. This stays local to the
+    /// broker so an idempotent public RequestName cannot erase ownership
+    /// disposition through a reply race.
+    #[cfg(feature = "modules")]
+    pub(crate) fn claim_host_name(&self, unique: &BusName, name: BusName) -> Result<bool> {
+        let change = self.reserve_module_name(unique, name)?;
+        let newly_claimed = change.old_owner.is_none();
+        if newly_claimed {
+            self.announce_name_change_now(change);
+        }
+        Ok(newly_claimed)
+    }
+
+    /// Release a host name only while the exact unique peer still owns it.
+    #[cfg(feature = "modules")]
+    pub(crate) fn release_host_name(&self, unique: &BusName, name: &BusName) -> Result<()> {
+        let change = self
+            .router
+            .lock()
+            .expect("router lock")
+            .release_name_for_unique(unique, name)?;
+        self.announce_name_change_now(change);
+        Ok(())
     }
 
     /// Record that a loaded module's artifact matched the module allowlist.
@@ -236,7 +404,7 @@ impl Broker {
                     .router
                     .lock()
                     .expect("router lock")
-                    .subscribers(&message, from);
+                    .subscribers_from(&message, from, from_name)?;
                 for target in targets {
                     // A full or closed queue is that subscriber's problem;
                     // signals are best-effort and must not block the sender's
@@ -257,7 +425,12 @@ impl Broker {
                         .router
                         .lock()
                         .expect("router lock")
-                        .directed_signal_target(from_name, destination, &message.header)?;
+                        .directed_signal_target_from(
+                            from,
+                            from_name,
+                            destination,
+                            &message.header,
+                        )?;
                     // This route is one recipient, not a match-rule broadcast.
                     let _ = target.try_send(message);
                     Ok(())
@@ -311,7 +484,9 @@ impl Broker {
                 // connection, which chose to participate in the exchange.
                 let confidential_call =
                     message.header.confidential && message.header.kind == MessageKind::MethodCall;
-                let target = self.router.lock().expect("router lock").resolve_call(
+                let target = self.router.lock().expect("router lock").resolve_call_from(
+                    from,
+                    from_name,
                     &destination,
                     message.header.expected_responder.as_ref(),
                     confidential_call,
@@ -423,10 +598,20 @@ impl Broker {
         body: Value,
     ) -> (Result<Value>, Vec<NameChange>, Vec<Value>) {
         #[cfg(feature = "modules")]
-        if let Some((result, module_states)) =
-            self.module_method(from_name, member, body.clone()).await
         {
-            return (result, Vec::new(), module_states);
+            let admission = self
+                .router
+                .lock()
+                .expect("router lock")
+                .ensure_peer_attached(from, from_name);
+            if let Err(error) = admission {
+                return (Err(error), Vec::new(), Vec::new());
+            }
+            if let Some((result, module_states)) =
+                self.module_method(from_name, member, body.clone()).await
+            {
+                return (result, Vec::new(), module_states);
+            }
         }
 
         // Negotiate conditional routing before building the call body. Keep
@@ -435,7 +620,11 @@ impl Broker {
         if member.as_str() == "ResolveCallTarget" {
             let result = (|| -> Result<Value> {
                 let (name,): (BusName,) = parse_args(member, body)?;
-                let owner = self.router.lock().expect("router lock").owner_of(&name);
+                let owner = {
+                    let router = self.router.lock().expect("router lock");
+                    router.ensure_peer_attached(from, from_name)?;
+                    router.owner_of(&name)
+                };
                 match owner {
                     Some(owner) => Ok(serde_json::to_value(owner)?),
                     None => {
@@ -461,6 +650,7 @@ impl Broker {
         let mut router = self.router.lock().expect("router lock");
 
         let result = (|| -> Result<Value> {
+            router.ensure_peer_attached(from, from_name)?;
             match member.as_str() {
                 "Hello" => Ok(serde_json::to_value(from_name)?),
                 "GetId" => Ok(Value::String(self.id.clone())),
@@ -737,19 +927,36 @@ impl Broker {
     /// user has been staring at a spinner. Subscribers still have to have asked
     /// for it; the broker does not push it at peers that did not.
     pub(crate) async fn announce_name_change(&self, change: NameChange) {
+        self.announce_name_change_now(change);
+    }
+
+    /// Synchronously detach an internally managed peer and announce each name
+    /// transition before its reader task observes the closed transport.
+    #[cfg(feature = "modules")]
+    pub(crate) fn detach_unique(&self, unique: &BusName) {
+        let changes = self
+            .router
+            .lock()
+            .expect("router lock")
+            .detach_unique(unique);
+        for change in changes {
+            self.announce_name_change_now(change);
+        }
+    }
+
+    fn announce_name_change_now(&self, change: NameChange) {
         self.broadcast_bus_signal(
             "NameOwnerChanged",
             serde_json::json!([change.name, change.old_owner, change.new_owner]),
-        )
-        .await;
+        );
     }
 
     #[cfg(feature = "modules")]
     pub(crate) async fn announce_module_state(&self, body: Value) {
-        self.broadcast_bus_signal("ModuleStateChanged", body).await;
+        self.broadcast_bus_signal("ModuleStateChanged", body);
     }
 
-    async fn broadcast_bus_signal(&self, member: &str, body: Value) {
+    fn broadcast_bus_signal(&self, member: &str, body: Value) {
         let signal = Message {
             header: crate::message::Header {
                 kind: MessageKind::Signal,
@@ -769,6 +976,7 @@ impl Broker {
                 ),
                 member: Some(MemberName::new(member).expect("literal is a valid member")),
                 error_name: None,
+                module_lifecycle: None,
                 // The bus's own announcements are broadcasts by construction.
                 confidential: false,
                 sensitive: false,

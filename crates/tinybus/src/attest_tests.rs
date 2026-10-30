@@ -23,3 +23,13 @@ fn only_a_full_length_hex_digest_counts_as_a_hash() {
     assert!(!is_hex_sha256("e3b0c442"));
     assert!(!is_hex_sha256(&"z".repeat(64)));
 }
+
+#[test]
+fn an_attestation_without_a_library_digest_remains_compatible() {
+    let value = serde_json::json!({
+        "name": "ai.tinyhumans.test.Legacy",
+        "sha256": "a".repeat(64),
+    });
+    let attestation: Attestation = serde_json::from_value(value).unwrap();
+    assert_eq!(attestation.library_sha256, None);
+}

@@ -175,6 +175,8 @@ impl PendingReply {
 }
 
 struct Inner {
+    /// Per-receiver identity copied weakly into broker-authenticated contexts.
+    origin: Arc<ConnectionOrigin>,
     transport: Arc<dyn Transport>,
     brokered_native: bool,
     native_provenance: Option<Arc<AtomicBool>>,
@@ -199,6 +201,22 @@ struct Inner {
     // Last: opted-in observers retain whole-Connection teardown ownership,
     // including ObjectTree, streams and cloned method observers.
     catch_observer: std::sync::RwLock<Option<Arc<dyn Fn() + Send + Sync>>>,
+}
+
+/// Opaque allocation identity for one local receive connection.
+pub(crate) struct ConnectionOrigin {
+    _private: u8,
+}
+
+/// Identity of one exact exported interface registration.
+///
+/// Used by owner guards: a guard removes its interface only if no later
+/// registration has replaced it at the same path and interface.
+#[cfg(feature = "modules")]
+pub(crate) struct ObjectRegistration {
+    path: ObjectPath,
+    interface: InterfaceName,
+    id: u64,
 }
 
 /// Closes the transport when the last [`Connection`] handle goes away.
@@ -248,6 +266,7 @@ pub struct Connection {
 pub struct WeakConnection {
     inner: std::sync::Weak<Inner>,
     close: std::sync::Weak<CloseOnDrop>,
+    origin: std::sync::Weak<ConnectionOrigin>,
 }
 
 impl std::fmt::Debug for WeakConnection {
@@ -274,6 +293,12 @@ impl WeakConnection {
             _close: close,
         })
     }
+
+    pub(crate) fn matches_origin(&self, origin: &std::sync::Weak<ConnectionOrigin>) -> bool {
+        self.origin.strong_count() > 0
+            && origin.strong_count() > 0
+            && std::sync::Weak::ptr_eq(&self.origin, origin)
+    }
 }
 
 impl Connection {
@@ -286,6 +311,7 @@ impl Connection {
         WeakConnection {
             inner: Arc::downgrade(&self.inner),
             close: Arc::downgrade(&self._close),
+            origin: Arc::downgrade(&self.inner.origin),
         }
     }
 
@@ -378,6 +404,7 @@ impl Connection {
         let (signal_deliveries, _) = broadcast::channel(SIGNAL_BUFFER);
         let (outbox, outbound) = mpsc::channel(OUTBOX_CAPACITY);
         let inner = Arc::new(Inner {
+            origin: Arc::new(ConnectionOrigin { _private: 0 }),
             transport,
             brokered_native,
             native_provenance,
@@ -448,20 +475,25 @@ impl Connection {
 
     /// Export `interface` at `path`.
     pub async fn serve_at(&self, path: ObjectPath, interface: impl Interface) -> Result<()> {
-        self.inner
-            .objects
-            .write()
-            .await
-            .insert(path, Arc::new(interface));
-        Ok(())
+        #[cfg(feature = "modules")]
+        {
+            self.serve_at_owned(path, interface).await.map(drop)
+        }
+        #[cfg(not(feature = "modules"))]
+        {
+            self.inner
+                .objects
+                .write()
+                .await
+                .insert(path, Arc::new(interface));
+            Ok(())
+        }
     }
 
-    /// Export `interface` at `path` only if no interface is already served
-    /// there.
+    /// Export `interface` at `path` only when the object path is unoccupied.
     ///
-    /// Registration is atomic with respect to other calls to this method: a
-    /// collision leaves every existing interface at that path untouched. Use
-    /// [`Connection::serve_at`] when replacement is intentional.
+    /// Unlike [`Connection::serve_at`], this never replaces an existing
+    /// interface. Concurrent registrations are atomic: exactly one can win.
     pub async fn try_serve_at(&self, path: ObjectPath, interface: impl Interface) -> Result<()> {
         if self
             .inner
@@ -476,6 +508,50 @@ impl Connection {
                 "interface is already served at this object path",
             ))
         }
+    }
+
+    /// Export one interface and retain the exact registration identity for an
+    /// owner guard. Public `serve_at` replacements invalidate older identities.
+    #[cfg(feature = "modules")]
+    pub(crate) async fn serve_at_owned(
+        &self,
+        path: ObjectPath,
+        interface: impl Interface,
+    ) -> Result<ObjectRegistration> {
+        let interface: Arc<dyn Interface> = Arc::new(interface);
+        let interface_name = interface.name();
+        let (id, replaced) = self.inner.objects.write().await.insert_owned(
+            path.clone(),
+            interface_name.clone(),
+            interface,
+        );
+        let registration = ObjectRegistration {
+            path,
+            interface: interface_name,
+            id,
+        };
+        if !replaced.is_empty() {
+            // Retired interfaces are user code: their destructors can panic.
+            // Keep the newly installed registration in this parent task while
+            // a child owns the retired values, then consume any JoinError.
+            let _ = tokio::runtime::Handle::current()
+                .spawn(async move { drop(replaced) })
+                .await;
+        }
+        Ok(registration)
+    }
+
+    /// Remove an exported interface only while this registration still owns it.
+    #[cfg(feature = "modules")]
+    pub(crate) async fn take_if_owned(
+        &self,
+        registration: &ObjectRegistration,
+    ) -> Option<Arc<dyn Interface>> {
+        self.inner.objects.write().await.take_if_owned(
+            &registration.path,
+            &registration.interface,
+            registration.id,
+        )
     }
 
     /// Stop exporting everything at `path`.
@@ -507,9 +583,18 @@ impl Connection {
 
     /// Which peer, if any, owns `name`.
     pub async fn name_owner(&self, name: impl AsRef<str>) -> Result<Option<BusName>> {
+        self.name_owner_with_timeout(name, DEFAULT_TIMEOUT).await
+    }
+
+    /// Which peer owns `name`, with a caller-supplied deadline.
+    pub(crate) async fn name_owner_with_timeout(
+        &self,
+        name: impl AsRef<str>,
+        timeout: Duration,
+    ) -> Result<Option<BusName>> {
         let name = BusName::new(name.as_ref())?;
         let value = self
-            .call_bus("GetNameOwner", serde_json::json!([name]))
+            .call_bus_with_timeout("GetNameOwner", serde_json::json!([name]), timeout)
             .await?;
         Ok(serde_json::from_value(value)?)
     }
@@ -525,8 +610,17 @@ impl Connection {
     /// `None` means the bus will refuse a confidential message to that name —
     /// nothing owns it, or the operator never allowlisted an artifact for it.
     pub async fn attestation(&self, name: BusName) -> Result<Option<crate::attest::Attestation>> {
+        self.attestation_with_timeout(name, DEFAULT_TIMEOUT).await
+    }
+
+    /// What the broker verified about `name`, with a caller-supplied deadline.
+    pub(crate) async fn attestation_with_timeout(
+        &self,
+        name: BusName,
+        timeout: Duration,
+    ) -> Result<Option<crate::attest::Attestation>> {
         let value = self
-            .call_bus("GetAttestation", serde_json::json!([name]))
+            .call_bus_with_timeout("GetAttestation", serde_json::json!([name]), timeout)
             .await?;
         Ok(serde_json::from_value(value)?)
     }
@@ -629,7 +723,10 @@ impl Connection {
     /// Apply replacement JSON configuration to a running module.
     ///
     /// Configuration is always carried as a sensitive control call and is
-    /// never eligible for signal fan-out or monitor output.
+    /// never eligible for signal fan-out or monitor output. If the module is
+    /// still resolved with a deferred lazy initializer, the replacement is
+    /// applied to that initializer so its first method call uses the new
+    /// configuration.
     #[cfg(feature = "modules")]
     pub async fn reinitialize_module(
         &self,
@@ -1197,6 +1294,24 @@ impl Connection {
         bytes: &[u8],
         timeout: Duration,
     ) -> Result<R> {
+        self.call_with_stream_serialized(destination, path, interface, member, args, bytes, timeout)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    /// Shared transfer path for argument builders that can fail serialization.
+    /// If encoding fails after `Open`, returning drops the writer and triggers
+    /// its best-effort `Abort` before any business method is sent.
+    pub(crate) async fn call_with_stream_serialized<R: DeserializeOwned, A: Serialize>(
+        &self,
+        destination: BusName,
+        path: ObjectPath,
+        interface: InterfaceName,
+        member: MemberName,
+        args: impl FnOnce(&StreamRef) -> A,
+        bytes: &[u8],
+        timeout: Duration,
+    ) -> Result<R> {
         let mut writer = self
             .open_stream_with_timeout(
                 &destination,
@@ -1204,8 +1319,11 @@ impl Connection {
                 timeout,
             )
             .await?;
+        // Keep the method with the peer that accepted Open. A well-known name
+        // may have changed owners while the stream was being opened, and
+        // splitting its handle from its payload would make the transfer fail.
         let message = Message::method_call(
-            destination,
+            writer.destination().clone(),
             path,
             interface,
             member,
@@ -1483,6 +1601,7 @@ async fn refuse_call(inner: &Inner, serial: u64, refusal: &Error) {
         interface: None,
         member: None,
         error_name: None,
+        module_lifecycle: None,
         confidential: false,
         sensitive: false,
         stream_reply: false,
@@ -1533,9 +1652,10 @@ async fn dispatch_loop(inner: Arc<Inner>) {
                 if pending
                     .get(&serial)
                     .is_some_and(|waiter| waiter.accepts(&message, brokered))
-                    && let Some(waiter) = pending.remove(&serial)
                 {
-                    let _ = waiter.sender.send(message);
+                    if let Some(waiter) = pending.remove(&serial) {
+                        let _ = waiter.sender.send(message);
+                    }
                 }
             }
             MessageKind::Signal | MessageKind::DirectedSignal => {
@@ -1720,7 +1840,11 @@ async fn dispatch(inner: &Inner, header: &Header, body: Value, brokered: bool) -
         return Err(Error::protocol("method call is missing an address"));
     };
     let context = if brokered {
-        crate::CallContext::brokered(header.sender.as_ref(), header.confidential)
+        crate::CallContext::brokered_with_origin(
+            header.sender.as_ref(),
+            header.confidential,
+            Some(&inner.origin),
+        )
     } else {
         crate::CallContext::default()
     };

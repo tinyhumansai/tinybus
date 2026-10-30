@@ -28,6 +28,7 @@ fn owner() -> (ExecutionOwner, &'static AtomicUsize) {
         ready,
         broker_routing: None,
         native_terminal_state: None,
+        trusted_host_binding: None,
     });
     (ExecutionOwner::new(host), count)
 }
@@ -234,6 +235,7 @@ fn terminal_deliver_enters_exact_instance_and_restores_nested_caller() {
     let (instance, instance_count) = owner();
     let host = HostCalls(TbHostVtable {
         native_terminal_state: Some(tracing_native_query),
+        trusted_host_binding: None,
         ..instance.host.0
     });
     let state = super::super::terminal::TerminalState::admit(host, Some(instance)).unwrap();

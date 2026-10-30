@@ -19,7 +19,15 @@ use crate::service::{CallContext, Interface};
 /// Everything one connection exports.
 #[derive(Default)]
 pub struct ObjectTree {
-    objects: HashMap<ObjectPath, Vec<Arc<dyn Interface>>>,
+    objects: HashMap<ObjectPath, Vec<ObjectRegistration>>,
+    next_registration: u64,
+}
+
+struct ObjectRegistration {
+    #[cfg_attr(not(feature = "modules"), allow(dead_code))]
+    id: u64,
+    name: InterfaceName,
+    interface: Arc<dyn Interface>,
 }
 
 impl ObjectTree {
@@ -37,26 +45,69 @@ impl ObjectTree {
     /// order-dependent.
     pub fn insert(&mut self, path: ObjectPath, interface: Arc<dyn Interface>) {
         let name = interface.name();
-        let entry = self.objects.entry(path).or_default();
-        entry.retain(|existing| existing.name() != name);
-        entry.push(interface);
+        let (_, replaced) = self.insert_owned(path, name, interface);
+        drop(replaced);
     }
 
-    /// Export `interface` at `path` only when the complete path is vacant.
-    ///
-    /// Unlike [`Self::insert`], this never replaces a live implementation. The
-    /// caller holds the connection's object-tree write lock across this check
-    /// and insert, so concurrent registrations cannot both claim one address.
-    pub(crate) fn insert_if_absent(
-        &mut self,
-        path: ObjectPath,
-        interface: Arc<dyn Interface>,
-    ) -> bool {
+    /// Export `interface` at `path` only if no interface is already served there.
+    pub fn insert_if_absent(&mut self, path: ObjectPath, interface: Arc<dyn Interface>) -> bool {
         if self.objects.contains_key(&path) {
             return false;
         }
-        self.objects.insert(path, vec![interface]);
+        self.insert(path, interface);
         true
+    }
+
+    /// Export `interface` and return the identity of this exact registration.
+    /// A later replacement at the same path and interface gets a different
+    /// identity, so an older owner cannot unregister the newer implementation.
+    pub(crate) fn insert_owned(
+        &mut self,
+        path: ObjectPath,
+        name: InterfaceName,
+        interface: Arc<dyn Interface>,
+    ) -> (u64, Vec<Arc<dyn Interface>>) {
+        self.next_registration = self
+            .next_registration
+            .checked_add(1)
+            .expect("object registration identity exhausted");
+        let id = self.next_registration;
+        let entry = self.objects.entry(path).or_default();
+        let mut replaced = Vec::new();
+        let mut retained = Vec::with_capacity(entry.len() + 1);
+        for existing in entry.drain(..) {
+            if existing.name == name {
+                replaced.push(existing.interface);
+            } else {
+                retained.push(existing);
+            }
+        }
+        *entry = retained;
+        entry.push(ObjectRegistration {
+            id,
+            name,
+            interface,
+        });
+        (id, replaced)
+    }
+
+    /// Remove one interface only if it is still the same registration.
+    #[cfg(feature = "modules")]
+    pub(crate) fn take_if_owned(
+        &mut self,
+        path: &ObjectPath,
+        interface: &InterfaceName,
+        id: u64,
+    ) -> Option<Arc<dyn Interface>> {
+        let entries = self.objects.get_mut(path)?;
+        let index = entries
+            .iter()
+            .position(|entry| entry.id == id && entry.name == *interface)?;
+        let removed = entries.remove(index).interface;
+        if entries.is_empty() {
+            self.objects.remove(path);
+        }
+        Some(removed)
     }
 
     /// Stop exporting everything at `path`. Returns whether anything went away.
@@ -75,7 +126,7 @@ impl ObjectTree {
     pub fn interfaces_at(&self, path: &ObjectPath) -> Vec<InterfaceName> {
         self.objects
             .get(path)
-            .map(|list| list.iter().map(|i| i.name()).collect())
+            .map(|list| list.iter().map(|entry| entry.name.clone()).collect())
             .unwrap_or_default()
     }
 
@@ -91,8 +142,8 @@ impl ObjectTree {
             .get(path)
             .ok_or_else(|| Error::UnknownObject { path: path.clone() })?;
         list.iter()
-            .find(|i| &i.name() == interface)
-            .cloned()
+            .find(|entry| &entry.name == interface)
+            .map(|entry| entry.interface.clone())
             .ok_or_else(|| Error::UnknownInterface {
                 path: path.clone(),
                 interface: interface.clone(),

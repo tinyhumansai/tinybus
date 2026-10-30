@@ -134,6 +134,7 @@ async fn reject_forged_replies(named: bool, confidential: bool, genuine_error: b
             crate::attest::Attestation {
                 name: alias.clone(),
                 sha256: "a".repeat(64),
+                library_sha256: None,
             },
         );
     }
@@ -252,6 +253,7 @@ async fn alias_takeover_is_refused(confidential: bool) {
             crate::attest::Attestation {
                 name: alias.clone(),
                 sha256: "a".repeat(64),
+                library_sha256: None,
             },
         );
     }
