@@ -261,6 +261,8 @@ pub(crate) struct StreamRegistry {
     limits: std::sync::RwLock<StreamLimits>,
     inbound: std::sync::Mutex<HashMap<String, Arc<Inbound>>>,
     next_id: AtomicU64,
+    #[cfg(test)]
+    after_close_seal: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl StreamRegistry {
@@ -269,6 +271,8 @@ impl StreamRegistry {
             limits: std::sync::RwLock::new(StreamLimits::default()),
             inbound: std::sync::Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
+            #[cfg(test)]
+            after_close_seal: std::sync::Mutex::new(None),
         }
     }
 
@@ -487,15 +491,29 @@ impl StreamRegistry {
         // the *fast* case — into "no such stream".
         let received = stream.received.load(Ordering::Relaxed);
         stream.touch();
+        let truncated = received != total_len;
+        if truncated {
+            stream.finish(Outcome::Aborted("the sender closed a truncated stream"));
+        } else {
+            stream.finish(Outcome::Complete);
+        }
         stream.seal();
 
-        if received != total_len {
-            stream.finish(Outcome::Aborted("the sender closed a truncated stream"));
+        #[cfg(test)]
+        if let Some(hook) = self
+            .after_close_seal
+            .lock()
+            .expect("stream close test hook lock")
+            .take()
+        {
+            hook();
+        }
+
+        if truncated {
             return Err(Error::protocol(format!(
                 "stream closed after {received} bytes, {total_len} declared"
             )));
         }
-        stream.finish(Outcome::Complete);
         Ok(Value::Null)
     }
 
@@ -690,6 +708,15 @@ impl StreamWriter {
             content_type: self.content_type.clone(),
             len: self.declared_len,
         }
+    }
+
+    /// The peer that accepted this stream's `Open` request.
+    ///
+    /// A method carrying this writer's handle must use the same destination;
+    /// resolving a well-known name again could select a different peer after a
+    /// name handover.
+    pub(crate) fn destination(&self) -> &BusName {
+        &self.destination
     }
 
     /// How many bytes have been accepted by the receiver so far.

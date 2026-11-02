@@ -20,7 +20,10 @@ $acl.AddAccessRule($rule)
 Set-Acl -LiteralPath $private -AclObject $acl
 Copy-Item (Join-Path $examples module_clock.dll) $private
 Copy-Item (Join-Path $examples module_context.dll) $private
+Copy-Item (Join-Path $examples module_context_configured.dll) $private
+Copy-Item (Join-Path $examples module_context_factory.dll) $private
 Copy-Item (Join-Path $examples module_context_eager.dll) $private
+Copy-Item (Join-Path $examples module_trusted_migration.dll) $private
 Copy-Item (Join-Path $examples module_host_callback.dll) $private
 Copy-Item (Join-Path $examples module_host_stream_callback.dll) $private
 Copy-Item (Join-Path $examples module_controlled_init.dll) $private
@@ -28,7 +31,7 @@ Copy-Item (Join-Path $examples module_terminal.dll) $private
 Copy-Item (Join-Path $examples module_wrong_target.dll) $private
 # Admit every intentional fixture by its actual built bytes so later
 # checks, including the wrong-target gate, can exercise their contract.
-$fixtureAllowlist = @('module_clock.dll', 'module_context.dll', 'module_context_eager.dll', 'module_host_callback.dll', 'module_host_stream_callback.dll', 'module_controlled_init.dll', 'module_terminal.dll', 'module_wrong_target.dll') | ForEach-Object {
+$fixtureAllowlist = @('module_clock.dll', 'module_context.dll', 'module_context_configured.dll', 'module_context_factory.dll', 'module_context_eager.dll', 'module_host_callback.dll', 'module_host_stream_callback.dll', 'module_controlled_init.dll', 'module_terminal.dll', 'module_wrong_target.dll') | ForEach-Object {
   $digest = (Get-FileHash -LiteralPath (Join-Path $private $_) -Algorithm SHA256).Hash.ToLowerInvariant()
   '"' + $_ + '" = "' + $digest + '"'
 }
@@ -50,7 +53,10 @@ $wrongTarget = (Get-ChildItem "$private/module_wrong_target.dll" | Select-Object
 $env:TEMP = $private
 $env:TMP = $private
 $env:TINYBUS_TEST_CONTEXT_MODULE = (Get-Item "$private/module_context.dll").FullName
+$env:TINYBUS_TEST_CONFIGURED_CONTEXT_MODULE = (Get-Item "$private/module_context_configured.dll").FullName
+$env:TINYBUS_TEST_CONTEXT_FACTORY_MODULE = (Get-Item "$private/module_context_factory.dll").FullName
 $env:TINYBUS_TEST_CONTEXT_EAGER_MODULE = (Get-Item "$private/module_context_eager.dll").FullName
+$env:TINYBUS_TEST_MIGRATION_MODULE = (Get-Item "$private/module_trusted_migration.dll").FullName
 $env:TINYBUS_TEST_CONTROLLED_INIT_MODULE = (Get-Item "$private/module_controlled_init.dll").FullName
 $env:TINYBUS_TEST_TERMINAL_MODULE = (Get-Item "$private/module_terminal.dll").FullName
 $env:TINYBUS_TEST_HOST_CALLBACK_MODULE = (Get-Item "$private/module_host_callback.dll").FullName
@@ -59,19 +65,19 @@ $env:TINYBUS_TEST_MODULE = $module
 $env:TINYBUS_TEST_MODULE_TWO = $moduleTwo
 $env:TINYBUS_TEST_WRONG_TARGET = $wrongTarget
 $env:TINYBUS_TEST_MODULE_DIRECTORY = $mixed
-cargo test --locked --no-default-features --workspace --features modules,macros,test-support,__native-fixture-support -- --ignored --skip terminal_runtime_tests::compiled_native_
+cargo test --locked --no-default-features --workspace --features uds,modules,macros,test-support,__native-fixture-support -- --ignored --skip terminal_runtime_tests::compiled_native_
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 # Retained fixture owners require a fresh process for each SDK scenario.
-$testList = cargo test --locked -p tinybus-module --features __native-fixture-support,tinybus/macros -- --list --ignored
+$testList = cargo test --locked -p tinybus-module --features __native-fixture-support,tinybus/macros,tinybus/uds -- --list --ignored
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 foreach ($line in $testList) {
   if ($line -match '^(terminal_runtime_tests::compiled_native_.*): test$') {
-    cargo test --locked -p tinybus-module --features __native-fixture-support,tinybus/macros $Matches[1] -- --ignored --exact
+    cargo test --locked -p tinybus-module --features __native-fixture-support,tinybus/macros,tinybus/uds $Matches[1] -- --ignored --exact
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   }
 }
 # Directory admission against the real ACLs: a bundle Everyone can
 # write falls back to the verified release cache.
-cargo test --locked --no-default-features --features modules,macros admission_tests -- --include-ignored
+cargo test --locked --no-default-features --features uds,modules,macros admission_tests -- --include-ignored
 
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

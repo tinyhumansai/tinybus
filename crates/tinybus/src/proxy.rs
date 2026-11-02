@@ -237,6 +237,10 @@ impl Proxy {
     pub fn connection(&self) -> &Connection {
         &self.connection
     }
+
+    pub(crate) fn timeout(&self) -> Duration {
+        self.timeout
+    }
 }
 
 impl std::fmt::Debug for Proxy {

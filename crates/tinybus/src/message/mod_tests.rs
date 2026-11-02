@@ -39,6 +39,92 @@ fn an_error_reply_keeps_the_dotted_name_matchable() {
 }
 
 #[test]
+fn initializing_metadata_roundtrips_without_changing_the_error_name() {
+    let call = call();
+    let error = Error::ModuleUnavailable {
+        module: "module".into(),
+        state: "initializing".into(),
+        detail: "module is initializing".into(),
+    };
+    let reply = Message::error_reply(&call.header, &error);
+    assert_eq!(
+        reply.header.error_name.as_deref(),
+        Some(Error::MODULE_UNAVAILABLE)
+    );
+    assert_eq!(
+        reply.header.module_lifecycle,
+        Some(ModuleLifecycle::Initializing)
+    );
+    let bytes = serde_json::to_vec(&reply).unwrap();
+    let decoded: Message = serde_json::from_slice(&bytes).unwrap();
+    assert!(matches!(
+        decoded.into_error(),
+        Error::ModuleUnavailable { state, .. } if state == "initializing"
+    ));
+}
+
+#[test]
+fn legacy_errors_and_unknown_or_misplaced_metadata_fall_back_safely() {
+    let call = call();
+    let legacy = Message::error_reply(
+        &call.header,
+        &Error::ModuleUnavailable {
+            module: "module".into(),
+            state: "stopped".into(),
+            detail: "module is stopped".into(),
+        },
+    );
+    let legacy_json = serde_json::to_value(&legacy).unwrap();
+    assert!(legacy_json["header"].get("module_lifecycle").is_none());
+    assert!(matches!(
+        serde_json::from_value::<Message>(legacy_json)
+            .unwrap()
+            .into_error(),
+        Error::MethodFailed { name, .. } if name == Error::MODULE_UNAVAILABLE
+    ));
+
+    let mut misplaced = Message::method_return(&call.header, Value::Null);
+    misplaced.header.module_lifecycle = Some(ModuleLifecycle::Initializing);
+    misplaced.validate().unwrap();
+    assert!(matches!(
+        misplaced.into_error(),
+        Error::MethodFailed { name, .. } if name == Error::FAILED
+    ));
+
+    let mut wrong_name = Message::error_reply(
+        &call.header,
+        &Error::ModuleUnavailable {
+            module: "module".into(),
+            state: "initializing".into(),
+            detail: "module is initializing".into(),
+        },
+    );
+    wrong_name.header.error_name = Some(Error::FAILED.to_owned());
+    wrong_name.validate().unwrap();
+    assert!(matches!(
+        wrong_name.into_error(),
+        Error::MethodFailed { name, .. } if name == Error::FAILED
+    ));
+
+    let mut future: serde_json::Value = serde_json::to_value(Message::error_reply(
+        &call.header,
+        &Error::ModuleUnavailable {
+            module: "module".into(),
+            state: "initializing".into(),
+            detail: "module is initializing".into(),
+        },
+    ))
+    .unwrap();
+    future["header"]["module_lifecycle"] = Value::String("future_state".into());
+    let future: Message = serde_json::from_value(future).unwrap();
+    future.validate().unwrap();
+    assert!(matches!(
+        future.into_error(),
+        Error::MethodFailed { name, .. } if name == Error::MODULE_UNAVAILABLE
+    ));
+}
+
+#[test]
 fn a_call_without_a_destination_is_refused_on_ingress() {
     let mut c = call();
     c.header.destination = None;

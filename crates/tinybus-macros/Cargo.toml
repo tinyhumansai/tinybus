@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "The #[interface] attribute for tinybus. Not useful on its own; use the `tinybus` crate."
-readme = "README.md"
+readme = "../../README.md"
 
 [lib]
 proc-macro = true

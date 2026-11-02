@@ -28,6 +28,10 @@ pub const TB_PANICKED: i32 = -3;
 pub const TB_TIMEOUT: i32 = -4;
 /// A pointer, length, or frame was invalid.
 pub const TB_BAD_ARGUMENT: i32 = -5;
+/// A caller-owned output buffer is too small; `out_len` carries the required size.
+pub const TB_BUFFER_TOO_SMALL: i32 = -6;
+/// The optional host capability is unavailable or has been revoked.
+pub const TB_UNSUPPORTED: i32 = -7;
 
 /// Exactly this value permits native per-instance admission. Zero, unknown
 /// bits, or any combination with terminal bits must deny admission. A sampled
@@ -202,6 +206,14 @@ pub struct TbHostVtable {
     /// The SDK's existing process-lifetime context retention is unbounded;
     /// this optional callback adds no aggregate resource bound.
     pub native_terminal_state: Option<unsafe extern "C" fn(*mut c_void) -> u32>,
+    /// Optional query for the controller peer pinned when this module transport
+    /// was created. Read only when `size` covers the complete field. The host
+    /// writes the peer's bytes to caller-owned storage and never retains either
+    /// output pointer. Absence means no trusted migration host is available.
+    /// The query is valid during admitted setup before `ready`, and must return
+    /// `TB_CLOSED` after the module or pinned controller becomes inactive.
+    pub trusted_host_binding:
+        Option<unsafe extern "C" fn(*mut c_void, *mut u8, usize, *mut usize) -> i32>,
 }
 
 /// Size required from an older host before reading its frozen prefix.
@@ -244,6 +256,15 @@ impl TbHostVtable {
         } else {
             None
         };
+        let trusted_host_binding = if base.size as usize
+            >= std::mem::offset_of!(Self, trusted_host_binding)
+                + size_of::<
+                    Option<unsafe extern "C" fn(*mut c_void, *mut u8, usize, *mut usize) -> i32>,
+                >() {
+            unsafe { std::ptr::addr_of!((*host).trusted_host_binding).read() }
+        } else {
+            None
+        };
         Some(Self {
             size: base.size,
             _reserved: base._reserved,
@@ -256,6 +277,7 @@ impl TbHostVtable {
             ready: base.ready,
             broker_routing,
             native_terminal_state,
+            trusted_host_binding,
         })
     }
 }

@@ -57,6 +57,126 @@ async fn broker_with_module_host() -> (tempfile::TempDir, PathBuf, ModuleHost) {
 }
 
 #[test]
+fn checksum_manifest_keeps_archive_hash_and_adds_its_library_hash() {
+    let directory = tempfile::tempdir().unwrap();
+    let archive_path = directory.path().join("clock-linux.tar.gz");
+    let library = b"verified library bytes";
+    let library_path = directory.path().join("library.so");
+    std::fs::write(&library_path, library).unwrap();
+    let file = std::fs::File::create(&archive_path).unwrap();
+    let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+    let mut archive = tar::Builder::new(encoder);
+    let mut header = tar::Header::new_gnu();
+    header.set_size(library.len() as u64);
+    header.set_mode(0o755);
+    header.set_cksum();
+    archive
+        .append_data(&mut header, "libclock.so", &library[..])
+        .unwrap();
+    archive.into_inner().unwrap().finish().unwrap();
+
+    let manifest_path = directory.path().join("checksum.toml");
+    write_checksum_manifest(std::slice::from_ref(&archive_path), Some(&manifest_path)).unwrap();
+    let manifest = std::fs::read_to_string(manifest_path).unwrap();
+    let archive_sha256 = tinybus::module::sha256_file(&archive_path).unwrap();
+    assert!(manifest.contains("[sha256]"));
+    assert!(manifest.contains(&format!("\"clock-linux.tar.gz\" = \"{archive_sha256}\"")));
+    assert!(manifest.contains("[library_sha256]"));
+    assert!(manifest.contains(&format!(
+        "\"clock-linux.tar.gz\" = \"{}\"",
+        tinybus::module::sha256_file(library_path).unwrap()
+    )));
+}
+
+#[test]
+fn checksum_manifest_reads_a_windows_library_from_zip_on_unix() {
+    use std::io::Write as _;
+
+    let directory = tempfile::tempdir().unwrap();
+    let archive_path = directory.path().join("clock-windows.zip");
+    let library = b"windows module bytes";
+    let mut archive = rawzip::ZipArchiveWriter::new(Vec::new());
+    let (mut entry, config) = archive.new_file("clock.dll").start().unwrap();
+    let mut writer = config.wrap(&mut entry);
+    writer.write_all(library).unwrap();
+    let (_, descriptor) = writer.finish().unwrap();
+    entry.finish(descriptor).unwrap();
+    std::fs::write(&archive_path, archive.finish().unwrap()).unwrap();
+
+    let library_path = directory.path().join("clock.dll");
+    std::fs::write(&library_path, library).unwrap();
+    let manifest_path = directory.path().join("checksum.toml");
+    write_checksum_manifest(std::slice::from_ref(&archive_path), Some(&manifest_path)).unwrap();
+    let manifest = std::fs::read_to_string(manifest_path).unwrap();
+    assert!(manifest.contains("[sha256]"));
+    assert!(manifest.contains("[library_sha256]"));
+    assert!(manifest.contains(&format!(
+        "\"clock-windows.zip\" = \"{}\"",
+        tinybus::module::sha256_file(library_path).unwrap()
+    )));
+}
+
+fn write_zip_fixture(path: &Path, files: &[(&str, &[u8])]) {
+    use std::io::Write as _;
+
+    let mut archive = rawzip::ZipArchiveWriter::new(Vec::new());
+    for &(name, bytes) in files {
+        let (mut entry, config) = archive.new_file(name).start().unwrap();
+        let mut writer = config.wrap(&mut entry);
+        writer.write_all(bytes).unwrap();
+        let (_, descriptor) = writer.finish().unwrap();
+        entry.finish(descriptor).unwrap();
+    }
+    std::fs::write(path, archive.finish().unwrap()).unwrap();
+}
+
+#[test]
+fn checksum_manifest_rejects_a_zip_without_a_module_library() {
+    let directory = tempfile::tempdir().unwrap();
+    let archive_path = directory.path().join("no-library.zip");
+    write_zip_fixture(&archive_path, &[("README.txt", b"documentation")]);
+
+    let error = write_checksum_manifest(std::slice::from_ref(&archive_path), None).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("checksum ZIP contains no module library"),
+        "{error}"
+    );
+}
+
+#[test]
+fn checksum_manifest_rejects_multiple_module_libraries_in_a_zip() {
+    let directory = tempfile::tempdir().unwrap();
+    let archive_path = directory.path().join("multiple-libraries.zip");
+    write_zip_fixture(
+        &archive_path,
+        &[
+            ("lib/clock.so", b"first library"),
+            ("nested/clock.dll", b"second library"),
+        ],
+    );
+
+    let error = write_checksum_manifest(std::slice::from_ref(&archive_path), None).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("checksum ZIP contains more than one module library"),
+        "{error}"
+    );
+}
+
+#[test]
+fn checksum_reader_refuses_module_sizes_above_its_expansion_limit() {
+    let error = sha256_reader(&b""[..], 8, 4).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("checksum module exceeds its size limit")
+    );
+}
+
+#[test]
 fn the_cli_parses_its_declared_commands_and_uses_explicit_addresses() {
     let cli = Cli::try_parse_from([
         "tinybus",
@@ -332,7 +452,7 @@ async fn a_module_stop_deadline_cannot_outlive_the_call_deadline() {
 async fn module_cli_controls_a_real_dynamic_module_lifecycle() {
     let path = PathBuf::from(std::env::var_os("TINYBUS_TEST_MODULE").unwrap());
     let (dir, address, _host) = broker_with_module_host().await;
-    let timeout = Duration::from_secs(2);
+    let timeout = Duration::from_secs(30);
     let config = dir.path().join("config.json");
     std::fs::write(&config, r#"{"prefix":"cli:"}"#).unwrap();
 

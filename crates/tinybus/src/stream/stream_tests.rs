@@ -18,7 +18,8 @@ use crate::message::Message;
 use crate::name::{BusName, InterfaceName, MemberName, ObjectPath};
 use crate::ports::Transport;
 use crate::stream::{
-    MAX_CHUNK_LEN, STREAM_INTERFACE, STREAM_PATH, StreamDescriptor, StreamLimits, StreamRef,
+    MAX_CHUNK_LEN, STREAM_INTERFACE, STREAM_PATH, StreamDescriptor, StreamLimits, StreamReader,
+    StreamRef, StreamRegistry,
 };
 use crate::transport::memory::{MemoryBus, MemoryTransport};
 
@@ -94,6 +95,92 @@ fn checksum(bytes: &[u8]) -> u64 {
 
 fn payload(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i % 251) as u8).collect()
+}
+
+fn stream_header(member: &str, sender: &BusName) -> crate::message::Header {
+    let mut header = Message::method_call(
+        BusName::new("ai.tinyhumans.StreamReceiver").unwrap(),
+        ObjectPath::new(STREAM_PATH).unwrap(),
+        InterfaceName::new(STREAM_INTERFACE).unwrap(),
+        MemberName::new(member).unwrap(),
+        Value::Null,
+    )
+    .header;
+    header.sender = Some(sender.clone());
+    header
+}
+
+async fn close_verdict_is_published_before_reader_observes_eof(
+    declared_len: u64,
+    close_len: u64,
+    expected_terminal: &str,
+    expected_close_error: Option<&str>,
+) {
+    let registry = Arc::new(StreamRegistry::new());
+    let owner = BusName::new("ai.tinyhumans.StreamSender").unwrap();
+    let open = registry
+        .dispatch(
+            &stream_header("Open", &owner),
+            serde_json::json!([StreamDescriptor::with_len(declared_len)]),
+        )
+        .await
+        .unwrap();
+    let id = open.as_str().unwrap().to_string();
+    let mut reader: StreamReader = registry.take_reader(&id).unwrap();
+    registry
+        .dispatch(
+            &stream_header("Write", &owner),
+            serde_json::json!([id.clone(), 0, super::base64::encode(b"abc")]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        reader.next_chunk().await.unwrap().as_deref(),
+        Some(b"abc".as_slice())
+    );
+
+    let (close_sealed_tx, close_sealed_rx) = tokio::sync::oneshot::channel();
+    let release_close = Arc::new(std::sync::Barrier::new(2));
+    let close_release = Arc::clone(&release_close);
+    *registry
+        .after_close_seal
+        .lock()
+        .expect("stream close test hook lock") = Some(Box::new(move || {
+        let _ = close_sealed_tx.send(());
+        close_release.wait();
+    }));
+
+    let close_registry = Arc::clone(&registry);
+    let close_member = MemberName::new("Close").unwrap();
+    let close_header = stream_header("Close", &owner);
+    let close = tokio::task::spawn_blocking(move || {
+        close_registry.close(
+            &close_header,
+            &close_member,
+            serde_json::json!([id, close_len]),
+        )
+    });
+
+    close_sealed_rx
+        .await
+        .expect("Close should reach the per-registry scheduling hook");
+    let terminal = reader.next_chunk().await;
+    // Always release and join the paused synchronous Close before asserting, so
+    // a deliberately failing RED run cannot strand a blocking task.
+    release_close.wait();
+    let close_result = close.await.expect("Close task should complete");
+
+    let terminal = match terminal {
+        Ok(None) => "clean EOF".to_string(),
+        Ok(Some(_)) => "unexpected extra chunk".to_string(),
+        Err(Error::StreamAborted { reason }) => format!("aborted: {reason}"),
+        Err(error) => format!("error: {}", error.wire_name()),
+    };
+    assert_eq!(terminal, expected_terminal);
+    match expected_close_error {
+        Some(wire_name) => assert_eq!(close_result.unwrap_err().wire_name(), wire_name),
+        None => assert!(close_result.is_ok()),
+    }
 }
 
 /// A broker, a sink service that owns [`SINK`], and a client.
@@ -368,6 +455,22 @@ async fn closing_short_of_the_declared_length_is_an_error_not_a_short_read() {
         .await
         .unwrap_err();
     assert_eq!(error.wire_name(), "ai.tinyhumans.tinybus.Error.Protocol");
+}
+
+#[tokio::test]
+async fn a_complete_close_publishes_its_verdict_before_reader_eof() {
+    close_verdict_is_published_before_reader_observes_eof(3, 3, "clean EOF", None).await;
+}
+
+#[tokio::test]
+async fn a_truncated_close_publishes_its_abort_before_reader_eof() {
+    close_verdict_is_published_before_reader_observes_eof(
+        4,
+        4,
+        "aborted: the sender closed a truncated stream",
+        Some("ai.tinyhumans.tinybus.Error.Protocol"),
+    )
+    .await;
 }
 
 #[tokio::test]

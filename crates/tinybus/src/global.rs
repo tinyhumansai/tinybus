@@ -11,8 +11,21 @@
 //! The bus is generic over the host's event type, so tinybus cannot own a
 //! `static` of it — there is no single type to name. Instead the host writes:
 //!
-//! ```ignore
+//! ```
+//! use serde::{Deserialize, Serialize};
+//! use tinybus::events::Event;
+//!
+//! #[derive(Clone, Serialize, Deserialize)]
+//! struct DomainEvent;
+//!
+//! impl Event for DomainEvent {
+//!     fn domain(&self) -> &str {
+//!         "example"
+//!     }
+//! }
+//!
 //! static BUS: tinybus::global::OnceBus<DomainEvent> = tinybus::global::OnceBus::new();
+//! assert!(!BUS.is_initialised());
 //! ```
 //!
 //! …and gets the whole surface off it. `OnceBus::new` is `const`, so this costs

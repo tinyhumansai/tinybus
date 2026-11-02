@@ -152,3 +152,19 @@ fn every_structured_error_has_a_stable_wire_name() {
         assert!(error.wire_name().starts_with("ai.tinyhumans."));
     }
 }
+
+#[test]
+fn module_unavailable_wire_name_remains_stable_across_lifecycle_states() {
+    let unavailable = Error::ModuleUnavailable {
+        module: "module".into(),
+        state: "faulted".into(),
+        detail: "safe".into(),
+    };
+    let initializing = Error::ModuleUnavailable {
+        module: "module".into(),
+        state: "initializing".into(),
+        detail: "safe".into(),
+    };
+    assert_eq!(unavailable.wire_name(), Error::MODULE_UNAVAILABLE);
+    assert_eq!(initializing.wire_name(), Error::MODULE_UNAVAILABLE);
+}

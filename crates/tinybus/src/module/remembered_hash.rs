@@ -75,18 +75,18 @@ mod imp {
     pub(super) fn hex(file: File, age: Duration) -> io::Result<(String, bool)> {
         let before = identity(&file)?;
         let eligible = quiet_for(&before, age);
-        if eligible && let Some(known) = memory().lock().ok().and_then(|m| m.get(&before).cloned())
-        {
-            return Ok((known, true));
+        if eligible {
+            if let Some(known) = memory().lock().ok().and_then(|m| m.get(&before).cloned()) {
+                return Ok((known, true));
+            }
         }
         let digest = crate::module::hash::file_hex(&file)?;
         // Hashed bytes are only attributable to this identity if the file did
         // not change underneath the read.
-        if eligible
-            && identity(&file).is_ok_and(|after| after == before)
-            && let Ok(mut memory) = memory().lock()
-        {
-            memory.insert(before, digest.clone());
+        if eligible && identity(&file).is_ok_and(|after| after == before) {
+            if let Ok(mut memory) = memory().lock() {
+                memory.insert(before, digest.clone());
+            }
         }
         Ok((digest, false))
     }

@@ -2,12 +2,12 @@
 name = "tinybus"
 version.workspace = true
 edition.workspace = true
-rust-version = "1.88"
+rust-version = "1.85"
 license.workspace = true
 repository.workspace = true
 build = "build.rs"
 description = "A zbus-style message bus that keeps external integrations out of the OpenHuman kernel's dependency graph."
-readme = "README.md"
+readme = "../../README.md"
 keywords = ["bus", "ipc", "rpc", "integrations", "openhuman"]
 categories = ["network-programming", "asynchronous"]
 # Examples are declared explicitly, with the features they need, so an example
@@ -38,7 +38,9 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["e
 ureq = { version = "3.5", optional = true }
 flate2 = { version = "1", optional = true }
 tar = { version = "0.4", optional = true }
-zip = { version = "9", optional = true, default-features = false, features = ["deflate-flate2"] }
+rawzip = { version = "0.5.2", optional = true }
+icu_casemap = { version = "2.1", default-features = false, features = ["compiled_data"], optional = true }
+unicode-normalization = { version = "0.1", default-features = false, optional = true }
 tempfile = { version = "3", optional = true }
 toml = { version = "1", optional = true }
 
@@ -73,11 +75,17 @@ cli = [
     "tokio/rt-multi-thread",
     "tokio/signal",
     "uds",
+    "dep:flate2",
+    "dep:tar",
+    "dep:rawzip",
+    "dep:icu_casemap",
+    "dep:unicode-normalization",
+    "dep:tempfile",
 ]
 
 # Load trusted, in-process cdylib modules. Off by default because a loaded
 # module shares the host's address space and full privileges.
-modules = ["tokio/rt-multi-thread", "dep:ureq", "dep:flate2", "dep:tar", "dep:zip", "dep:tempfile", "dep:toml", "dep:libc"]
+modules = ["tokio/rt-multi-thread", "dep:ureq", "dep:flate2", "dep:tar", "dep:rawzip", "dep:icu_casemap", "dep:unicode-normalization", "dep:tempfile", "dep:toml", "dep:libc"]
 
 # Shared helpers for integration suites that load a built module cdylib.
 test-support = ["modules", "macros"]
@@ -86,6 +94,13 @@ test-support = ["modules", "macros"]
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "io-util", "test-util"] }
 tempfile = "3"
+# `zip`'s `deflate-flate2` feature enables flate2 without selecting a backend.
+# Keep the fixture writer self-contained in standalone test builds while the
+# production loader continues to use its bounded rawzip implementation.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# Archive writer used only to construct hostile ZIP regression fixtures. The
+# production loader remains the bounded rawzip parser/extractor.
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 
 [[bin]]
 name = "tinybus"
@@ -129,7 +144,22 @@ crate-type = ["cdylib"]
 required-features = ["modules"]
 
 [[example]]
+name = "module_context_configured"
+crate-type = ["cdylib"]
+required-features = ["modules"]
+
+[[example]]
+name = "module_context_factory"
+crate-type = ["cdylib"]
+required-features = ["modules"]
+
+[[example]]
 name = "module_context_eager"
+crate-type = ["cdylib"]
+required-features = ["modules"]
+
+[[example]]
+name = "module_trusted_migration"
 crate-type = ["cdylib"]
 required-features = ["modules"]
 

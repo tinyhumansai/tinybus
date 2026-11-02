@@ -19,7 +19,10 @@
 //! about its bytes. The release cache then gets the same pinned release, held
 //! to the same digest, in a directory this user owns.
 
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
+use std::sync::Arc;
 
 use super::cache::{digest_marker_path, secure_release_cache};
 use super::host::is_placement_refusal;
@@ -88,11 +91,15 @@ pub fn load_first_admitted(
                     release_url: plan.release_url,
                     asset_name: asset.archive,
                     expected_sha256: Some(asset.sha256),
+                    expected_library_sha256: asset.library_sha256,
                     cache_dir: &cache_dir,
                     allow_download: false,
                 };
                 host.load_github_release_cached(&release, module_config.clone())
             } else {
+                // The marker records the signed archive, but notarization may
+                // rewrite its library. The bundle's sealed, rehashed local
+                // allowlist is the trust source for the final bytes.
                 host.load_bundled_marked(
                     &cache_dir,
                     asset.archive,
@@ -140,6 +147,7 @@ pub fn load_first_admitted(
             release_url: plan.release_url,
             asset_name: asset.archive,
             expected_sha256: Some(asset.sha256),
+            expected_library_sha256: asset.library_sha256,
             cache_dir: &cache_dir,
             allow_download: plan.allow_download,
         };
@@ -166,14 +174,206 @@ pub fn load_first_admitted(
             "[modules] '{id}' release cache miss with downloads disabled: {last_error}"
         );
         return Err(format!(
-            "module '{id}' is unavailable: no local artifact is installed and downloads are \
-             disabled in configuration"
+            "module '{id}' is unavailable: no usable local artifact is installed and downloads are \
+             disabled in configuration ({last_error})"
         ));
     }
     Err(format!(
         "module '{id}' could not be loaded: {last_error}. This is terminal for the running \
          process; restart the app to try again"
     ))
+}
+
+/// Load the first admitted pinned artifact while preparing a fresh callback
+/// binding for each candidate. A failed load consumes only its own binding;
+/// the successful binding is retained with the exact registry peer.
+type PreparedCallbacks = Result<
+    (
+        std::sync::Arc<crate::module::HostCallbackBinding>,
+        serde_json::Value,
+    ),
+    String,
+>;
+type BoxedCallbackPreparer<'a> =
+    dyn FnMut(usize) -> Pin<Box<dyn Future<Output = PreparedCallbacks> + Send + 'a>> + Send + 'a;
+
+pub async fn load_first_admitted_with_host_callbacks<F, Fut>(
+    host: &ModuleHost,
+    plan: &ReleasePlan<'_>,
+    mut prepare: F,
+    expected_bus_name: &str,
+    expected_object_path: &str,
+) -> Result<
+    (
+        ModuleInfo,
+        std::sync::Arc<crate::module::HostCallbackBinding>,
+    ),
+    String,
+>
+where
+    F: FnMut(usize) -> Fut + Send,
+    Fut: std::future::Future<Output = PreparedCallbacks> + Send,
+{
+    let mut boxed_prepare = |attempt| {
+        Box::pin(prepare(attempt)) as Pin<Box<dyn Future<Output = PreparedCallbacks> + Send + '_>>
+    };
+    load_first_admitted_with_host_callbacks_inner(
+        host,
+        plan,
+        &mut boxed_prepare,
+        expected_bus_name,
+        expected_object_path,
+    )
+    .await
+}
+
+async fn load_first_admitted_with_host_callbacks_inner<'a>(
+    host: &ModuleHost,
+    plan: &ReleasePlan<'_>,
+    prepare: &'a mut BoxedCallbackPreparer<'a>,
+    expected_bus_name: &str,
+    expected_object_path: &str,
+) -> Result<
+    (
+        ModuleInfo,
+        std::sync::Arc<crate::module::HostCallbackBinding>,
+    ),
+    String,
+> {
+    let id = plan.id;
+    if plan.assets.is_empty() {
+        return Err(format!(
+            "module '{id}' is not available for this platform, so the feature it provides is unavailable in this build"
+        ));
+    }
+
+    let mut attempt = 0;
+    let mut last_error = String::new();
+    let mut found_bundled = false;
+    let mut bundle_refused_for_placement_only = true;
+    if let Some(bundled_root) = plan.bundled_root {
+        for asset in plan.assets {
+            let Some(cache_dir) = artifact_dir(bundled_root, id, plan.version, asset.host_key)
+            else {
+                continue;
+            };
+            let has_archive = cache_dir.join(asset.archive).is_file();
+            let has_marker = digest_marker_path(&cache_dir, asset.archive).is_file();
+            if !has_archive && !has_marker {
+                continue;
+            }
+            found_bundled = true;
+            let result = if has_archive {
+                let release = CachedRelease {
+                    release_url: plan.release_url,
+                    asset_name: asset.archive,
+                    expected_sha256: Some(asset.sha256),
+                    expected_library_sha256: asset.library_sha256,
+                    cache_dir: &cache_dir,
+                    allow_download: false,
+                };
+                let (binding, config) = prepare(attempt).await?;
+                attempt += 1;
+                host.load_github_release_cached_with_host_callbacks(
+                    &release,
+                    config,
+                    &binding,
+                    expected_bus_name,
+                    expected_object_path,
+                )
+                .await
+                .map(|info| (info, binding))
+            } else {
+                let (binding, config) = prepare(attempt).await?;
+                attempt += 1;
+                host.load_bundled_marked_with_host_callbacks(
+                    &cache_dir,
+                    asset.archive,
+                    asset.sha256,
+                    config,
+                    &binding,
+                    (expected_bus_name, expected_object_path),
+                )
+                .await
+                .map(|info| (info, binding))
+            };
+            match result {
+                Ok((info, binding)) => {
+                    host.retain_host_callback_binding(expected_bus_name, Arc::clone(&binding))
+                        .map_err(|error| {
+                            format!("module '{id}' callback retention failed: {error}")
+                        })?;
+                    return Ok((info, binding));
+                }
+                Err(error) => {
+                    bundle_refused_for_placement_only &= is_placement_refusal(&error);
+                    last_error = error.to_string();
+                    tracing::warn!(
+                        "[modules] bundled '{id}' artifact for {} was not admitted: {last_error}",
+                        asset.host_key
+                    );
+                }
+            }
+        }
+    }
+    if found_bundled && !bundle_refused_for_placement_only {
+        return Err(format!(
+            "module '{id}' could not be loaded from the installer bundle: {last_error}. Restart the app after repairing the installation"
+        ));
+    }
+
+    for asset in plan.assets {
+        let Some(cache_dir) = artifact_dir(plan.install_root, id, plan.version, asset.host_key)
+        else {
+            last_error =
+                "the module's cache path could not be built from its registry entry".into();
+            continue;
+        };
+        secure_release_cache(plan.install_root, &cache_dir);
+        let release = CachedRelease {
+            release_url: plan.release_url,
+            asset_name: asset.archive,
+            expected_sha256: Some(asset.sha256),
+            expected_library_sha256: asset.library_sha256,
+            cache_dir: &cache_dir,
+            allow_download: plan.allow_download,
+        };
+        let (binding, config) = prepare(attempt).await?;
+        attempt += 1;
+        match host
+            .load_github_release_cached_with_host_callbacks(
+                &release,
+                config,
+                &binding,
+                expected_bus_name,
+                expected_object_path,
+            )
+            .await
+        {
+            Ok(info) => {
+                host.retain_host_callback_binding(expected_bus_name, Arc::clone(&binding))
+                    .map_err(|error| format!("module '{id}' callback retention failed: {error}"))?;
+                return Ok((info, binding));
+            }
+            Err(error) => {
+                last_error = error.to_string();
+                tracing::warn!(
+                    "[modules] '{id}' artifact for {} was not admitted: {last_error}",
+                    asset.host_key
+                );
+            }
+        }
+    }
+
+    if !plan.allow_download {
+        Err(format!(
+            "module '{id}' is unavailable: no usable local artifact is installed and downloads are disabled in configuration ({last_error})"
+        ))
+    } else {
+        Err(format!(
+            "module '{id}' could not be loaded: {last_error}. This is terminal for the running process; restart the app to try again"
+        ))
+    }
 }
 
 #[cfg(test)]

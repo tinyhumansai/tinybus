@@ -15,6 +15,10 @@ pub struct ReleaseAsset<'a> {
     pub archive: &'a str,
     /// Lowercase hex SHA-256 of the archive, pinned by the host.
     pub sha256: &'a str,
+    /// Lowercase hex SHA-256 of the extracted library, from the release
+    /// checksum manifest. `None` keeps older registries compatible but cannot
+    /// authorize a strict attested call.
+    pub library_sha256: Option<&'a str>,
 }
 
 /// A first-party module a host knows how to load.

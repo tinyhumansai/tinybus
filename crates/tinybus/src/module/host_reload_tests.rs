@@ -113,6 +113,7 @@ fn observed_native(host: &ModuleHost, path: &Path, prefix: &str) -> usize {
             lazy_load: false,
             descriptor_info: None,
             pinned_sha256: None,
+            pinned_library_sha256: None,
         },
     )
     .unwrap();
@@ -350,6 +351,7 @@ async fn compiled_native_host_stop_and_fault_deny_factory_after_entered_init_bar
                 lazy_load: false,
                 descriptor_info: None,
                 pinned_sha256: None,
+                pinned_library_sha256: None,
             },
         )
         .unwrap();

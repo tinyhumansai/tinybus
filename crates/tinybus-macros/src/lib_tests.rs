@@ -67,6 +67,30 @@ fn expansion_generates_dispatch_members_and_strips_helper_attributes() {
 }
 
 #[test]
+fn expansion_skips_nonmethods_and_tracks_confidential_wildcard_arguments() {
+    let expanded = expand(
+        args("name = PATH, name = 7, name = \"ai.tinyhumans.Example\""),
+        implementation(
+            r#"
+                impl Example {
+                    const VERSION: u32 = 1;
+                    #[allow(dead_code)]
+                    fn constructor() -> Self { Self }
+                    #[tinybus(confidential)]
+                    async fn inspect(&self, _: u32) -> tinybus::Result<()> { Ok(()) }
+                }
+                "#,
+        ),
+    )
+    .unwrap()
+    .to_string();
+
+    assert!(expanded.contains("__arg0"));
+    assert!(expanded.contains("matches"));
+    assert!(expanded.contains("Inspect"));
+}
+
+#[test]
 fn expansion_rejects_invalid_interface_method_signatures() {
     let name = args("name = \"ai.tinyhumans.Example\"");
     for source in [
@@ -88,6 +112,13 @@ fn attributes_and_interface_names_are_validated() {
         "ai.tinyhumans.Example"
     );
     assert!(interface_name(&args("other = \"value\"")).is_err());
+    assert_eq!(
+        interface_name(&args(
+            "name = PATH, name = 7, name = \"ai.tinyhumans.Valid\""
+        ))
+        .unwrap(),
+        "ai.tinyhumans.Valid"
+    );
 
     let declared = implementation(
         "impl Example { #[tinybus(skip, confidential, name = \"WireName\")] async fn call(&self) -> tinybus::Result<()> { Ok(()) } }",

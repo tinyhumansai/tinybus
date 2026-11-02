@@ -44,6 +44,46 @@ last initialized instance. Linked modules keep the embedding host's tracing and
 panic hook. The existing instance-wide last panic location is diagnostic state,
 not a proof of exact attribution among concurrently panicking methods.
 
+## Host runtime leases
+
+`RuntimeLeaseDriver` is the protocol-neutral contract for a host that reserves
+module-side resources and exports one callback through `ModuleRuntime::lease`.
+The host validates the opaque reservation, creates its object, supplies an
+owned callback factory, then starts the module. The callback factory runs only
+after validation and object creation. The returned cloneable `RuntimeLease`
+provides `object()` and `close()`; the last user clone starts the same cleanup
+worker as explicit close, including when dropped outside Tokio.
+
+The driver returns `StopOutcome::Acknowledged`, `RetryableFailure`, or
+`Unacknowledged`. A retryable failure is safe only after the driver proves the
+operation settled. Lost replies, timeouts, malformed responses and faults are
+uncertain unless the driver has other authoritative evidence. The SDK retains
+the active STOP future across its per-attempt deadline, never overlaps STOP
+attempts, and removes the exact callback registration only after ACK. If the
+operation remains uncertain or finite retries end, the dedicated runtime parks
+the reservation and callback guard without another retry. Caller close waiters
+may time out independently; that does not cancel cleanup.
+
+`ModuleClient::bind` is the ordinary counterpart for owned module operations.
+It waits for the module's normal lazy readiness, resolves the current serving
+peer, and keeps that peer for root calls, streamed uploads and held object paths.
+It supports linked modules and explicit fixtures without claiming archive or
+library proof. A peer disconnect makes the held calls fail; they do not move to
+a new owner of the public bus name. The proxy's deadline is preserved for owner
+lookup and later calls, unless the client supplies an explicit timeout override.
+Use this for ordinary Docs and Voice operations; use strict attested calls when
+the operation requires native artifact proof or confidential delivery.
+
+`ModuleClient::bind_attested` applies the same identity rule to module calls. It
+returns a `BoundModuleClient` only after the loaded peer proves the registered
+archive and library pair. Later ordinary, detailed, confidential, and held
+object calls use that same unique peer even after its public bus name changes
+owners. If the peer disconnects, those calls fail instead of rebinding.
+
+The lifecycle contract, retry policy, typed error accessor and content-free
+report records compile without the `modules` feature. The runtime lease and its
+host-object registration require `modules`.
+
 ## Opted-in terminal factories
 
 Configured modules can opt in with `module_export!(terminal_setup_factory =
@@ -97,9 +137,10 @@ cannot certify whole-Connection destruction.
 Each SDK image has 256 instance slots. The existing opaque `module_ctx` contains
 a slot/generation address token, never a dereferenced pointer or extra ABI
 allocation. Callback lookup acquires the exact State before releasing registry
-exclusion. Successful teardown retires its registry anchor; only actual State
-last-Drop releases the slot, so old views and surviving SDK resources count
-against the limit. Generations never wrap: exhaustion permanently denies that
+exclusion. Successful teardown retires its registry anchor before publishing
+physical completion; only actual State last-Drop releases the slot, so old views
+and surviving SDK resources count against the limit.
+Generations never wrap: exhaustion permanently denies that
 slot. Null, stale or unknown context tokens return `TB_CLOSED` for otherwise
 valid terminal callbacks and cannot select a replacement. Legacy shutdown's
 null-context behavior remains unchanged.
@@ -191,6 +232,22 @@ Reinitialization has a mandatory four-second module-side deadline and is
 serialized with both other reinitializations and shutdown. A host timeout never
 permits a later lifecycle callback to overlap code that is still returning.
 
+Hosts that choose configuration from each caller can use
+`module::ReconfigurableModule` to hash the selected JSON configuration and
+reinitialize only when it changes. The coordinator stores a digest, not the
+configuration. Its default strategy uses lifecycle reinitialization; a
+`Reconfigure::Member("Configure")` strategy calls a module-owned member with
+the configuration as its sole argument over a confidential call, so the
+recipient must be attested. `retry_while_initializing` retries only a typed
+initializing result, within the configured attempt and delay bounds.
+
+`proxy(config)` serializes configuration transitions but releases its lock
+before the caller uses the returned proxy. When a bus call must run under the
+selected configuration, hold `exclusive()` through that call and obtain the
+proxy with `guard.proxy(config)`. All users of the coordinator must follow this
+contract; calling `proxy(config)` while holding its guard waits on the same
+lock.
+
 Stopping a module loaded with `HostCallbackBinding` revokes new callback
 admission and waits for already admitted user futures before starting native
 shutdown. Both phases share the stop deadline. A drain timeout refuses shutdown;
@@ -208,10 +265,13 @@ When present, `modules.toml` is authoritative for its directory. Keys are
 artifact file names (or stems) and values are lowercase SHA-256 hashes. An
 artifact absent from the file or with a mismatched hash is refused. For remote
 loads, the host supplies the expected SHA-256 alongside the artifact URL;
-hashing happens before the platform loader opens the artifact. Search
-precedence is `OPENHUMAN_MODULE_PATH`, the platform user data directory, then
-the platform system directory. `tinybus modules scan --path <dir> --dry-run`
-performs admission and dependency checks without initializing or attaching.
+hashing happens before the platform loader opens the artifact. Search paths are
+host-configured through `SearchPathConfig::new(env_var, app_dir)`. When set,
+path-list entries from `env_var` come first, followed by the app-specific user
+and system data directories for the platform. A `ModuleHost` without this
+configuration has no implicit search paths. `tinybus modules scan --path <dir>
+--dry-run` performs admission and dependency checks without initializing or
+attaching.
 
 GitHub releases are loaded with `ModuleHost::load_github_release`. The release
 URL must identify a tag, the selected asset must be a `.tar.gz` or `.zip` archive, and
@@ -337,6 +397,35 @@ configuration validation, deadlines and error codes remain authoritative.
 Factory panics return the native initialization panic code. The factory form
 is available in module_export, module_export_static and
 module_export_optional_static; legacy setup callbacks remain supported.
+
+When setup also needs the loader-issued host binding, use
+`setup_factory_with_context = factory, config = Config` in either export macro.
+Its factory returns `Fn(ModuleSetupContext, Config) -> Future<Result<()>>` and
+runs once per ABI instance after host validation and initial config parsing.
+The retained callback receives a new context for each initial setup or
+reinitialization, so its connection matches the active module attachment while
+its captured per-instance mode remains stable. A generic module can see
+`context.trusted_host() == None`; a migration service must require the binding
+before registering itself or starting ordinary storage access.
+
+```rust,ignore
+fn setup_factory() -> impl Fn(ModuleSetupContext, Config) -> SetupFuture {
+    let admitted_mode = Arc::new(Mutex::new(None));
+    move |context, config| {
+        // Validate the mode against this factory's retained state, then use
+        // context.connection() and context.trusted_host() for this attachment.
+        Box::pin(setup_with_context(context, config, Arc::clone(&admitted_mode)))
+    }
+}
+
+tinybus_module::module_export! {
+    setup_factory_with_context = setup_factory,
+    config = Config,
+    worker_threads = 1,
+    provides = ["org.example.Service"],
+    methods = [], signals = [], requires = [], optional = [], lazy = false,
+}
+```
 
 ## Controller admission
 

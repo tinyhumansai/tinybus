@@ -105,10 +105,34 @@ attested.
 `load_github_release`. Before extracting anything, `acquire` fetches the
 release's own `checksum.toml`, refuses a disagreement between it and the caller's
 value, downloads the archive, and hashes the bytes it actually received. Only
-then is the library extracted and loaded. The attestation records the digest of
-that **archive** — the artifact the operator named — not a hash of the extracted
-`.so`, which nobody vouched for and which the host would only be computing in
-order to trust itself for it.
+then is the library extracted and loaded. The attestation keeps that **archive**
+digest in `sha256` — the artifact the operator named — and may carry a separately
+pinned `library_sha256` for the extracted library.
+
+Release checksum manifests may publish both values under the same archive key:
+
+```toml
+[sha256]
+"clock-linux.tar.gz" = "<archive digest>"
+
+[library_sha256]
+"clock-linux.tar.gz" = "<library digest>"
+```
+
+`tinybus modules checksum` writes both values when an archive contains one
+module library. A host registry pins the pair in `ReleaseAsset`. Cache hits
+re-hash the extracted library against that pin, and the native loader checks it
+again at the actual mapping boundary. The checked library digest is bound to the
+process-lifetime native handle; the same handle cannot later acquire a different
+digest because its path now names different bytes. `ModuleClient::call_attested`
+requires the original manifest name and both digests, then sends to the unique
+peer whose attestation it checked. Its host readiness hook initializes a lazy
+module before the attestation query and sends no probe call.
+
+The pre-map path check relies on the module directory protections enforced by
+host admission. It does not claim to prove code mapped outside TinyBus, survive a
+compromised host process, or contain an in-process module that can already read
+host memory. Such modules remain inside the host trust boundary.
 
 A pinned digest is the stronger of the two statements, because it cannot be
 edited on the machine that runs it.

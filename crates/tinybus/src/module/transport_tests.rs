@@ -1,6 +1,9 @@
 use super::*;
 use std::sync::atomic::AtomicI32;
 
+use crate::Connection;
+use crate::broker::Broker;
+use crate::transport::memory::MemoryTransport;
 use crate::{BusName, InterfaceName, MemberName, ObjectPath};
 
 static DELIVERY_CODE: AtomicI32 = AtomicI32::new(TB_OK);
@@ -14,6 +17,40 @@ static REINITIALIZE_CODE: AtomicI32 = AtomicI32::new(TB_OK);
 static REINITIALIZE_BLOCKED: AtomicBool = AtomicBool::new(false);
 static REINITIALIZE_ENTERED: AtomicBool = AtomicBool::new(false);
 static VTABLE_TEST_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+static PRE_READY_DELIVERED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+static PRE_READY_DELIVERY_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+unsafe extern "C" fn pre_ready_deliver(_: *mut c_void, _: *const u8, _: usize) -> i32 {
+    PRE_READY_DELIVERY_COUNT.fetch_add(1, Ordering::AcqRel);
+    PRE_READY_DELIVERED.notify_one();
+    TB_OK
+}
+
+async fn wait_for_pending_len(transport: &ModuleTransport, expected: usize) {
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if transport.pending.lock().expect("module pending lock").len() >= expected {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the message reached the module pending queue");
+}
+
+async fn wait_for_pre_ready_delivery_count(expected: usize) {
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if PRE_READY_DELIVERY_COUNT.load(Ordering::Acquire) >= expected {
+                break;
+            }
+            PRE_READY_DELIVERED.notified().await;
+        }
+    })
+    .await
+    .expect("module delivery callback reached the expected count");
+}
 
 unsafe extern "C" fn deliver(_: *mut c_void, _: *const u8, _: usize) -> i32 {
     DELIVERIES.fetch_add(1, Ordering::AcqRel);
@@ -138,7 +175,7 @@ fn incomplete_module_vtables_are_rejected_and_shutdown_reports_closed() {
 
 #[tokio::test]
 async fn an_older_vtable_loads_but_reports_reinitialization_as_unsupported() {
-    let (transport, _) = ModuleTransport::new("older".to_string(), Vec::new());
+    let (transport, host) = ModuleTransport::new("older".to_string(), Vec::new());
     let mut older = TbModuleVtable {
         module_ctx: std::ptr::dangling_mut(),
         deliver,
@@ -148,6 +185,7 @@ async fn an_older_vtable_loads_but_reports_reinitialization_as_unsupported() {
     };
     older.size = TB_MODULE_VTABLE_BASE_SIZE;
     transport.initialize(older).unwrap();
+    unsafe { (host.ready)(host.host_ctx) };
     let error = transport
         .reinitialize(crate::Secret::new(
             serde_json::to_vec(&serde_json::json!({ "secret": "never printed" })).unwrap(),
@@ -189,10 +227,11 @@ async fn reinitialization_maps_callback_failures_without_exposing_configuration(
             .contains("not initialized")
     );
 
-    let (transport, _) = ModuleTransport::new("configured".to_string(), Vec::new());
+    let (transport, host) = ModuleTransport::new("configured".to_string(), Vec::new());
     let mut module = TbModuleVtable::default();
     unsafe { initialize_ok(std::ptr::null(), &mut module) };
     transport.initialize(module).unwrap();
+    unsafe { (host.ready)(host.host_ctx) };
     for (code, expected) in [
         (TB_BAD_ARGUMENT, "configuration is invalid"),
         (TB_CLOSED, "reinitialization failed"),
@@ -228,10 +267,11 @@ async fn a_running_reinitialization_excludes_another_reinitialization_and_shutdo
     REINITIALIZE_BLOCKED.store(true, Ordering::Release);
     REINITIALIZE_ENTERED.store(false, Ordering::Release);
     SHUTDOWN_CALLS.store(0, Ordering::Release);
-    let (transport, _) = ModuleTransport::new("configured".to_string(), Vec::new());
+    let (transport, host) = ModuleTransport::new("configured".to_string(), Vec::new());
     let mut module = TbModuleVtable::default();
     unsafe { initialize_ok(std::ptr::null(), &mut module) };
     transport.initialize(module).unwrap();
+    unsafe { (host.ready)(host.host_ctx) };
 
     let first_transport = transport.clone();
     let first = tokio::spawn(async move {
@@ -346,6 +386,285 @@ async fn deferred_initialization_waits_for_ready_then_delivers_pending_calls() {
     assert!(transport.is_ready());
     assert!(transport.context.config.lock().unwrap().is_empty());
     assert_eq!(transport.stop_sync(Duration::from_millis(1)), TB_OK);
+}
+
+#[tokio::test]
+async fn deferred_reinitialize_replaces_the_initializer_config_slice() {
+    let original = br#"{"token":"old-sensitive-value"}"#;
+    let replacement = br#"{"route":"new"}"#;
+    let (transport, host) = ModuleTransport::new("deferred-config".into(), original.to_vec());
+    let original_pointer = host.config.ptr;
+    let observed = Arc::new(StdMutex::new(None));
+    let observed_by_init = observed.clone();
+    transport.defer_initializer(host, move |host| {
+        if host.config.ptr.is_null() && host.config.len != 0 {
+            return Err("configuration pointer is null".to_owned());
+        }
+        let config = serde_json::from_slice(unsafe {
+            std::slice::from_raw_parts(host.config.ptr, host.config.len)
+        })
+        .map_err(|_| "configuration is invalid".to_owned())?;
+        *observed_by_init.lock().expect("observed config lock") = Some(config);
+        let mut module = TbModuleVtable::default();
+        let code = unsafe { initialize_ok(&host, &mut module) };
+        if code == TB_OK {
+            Ok(module)
+        } else {
+            Err("module initialization failed".to_owned())
+        }
+    });
+
+    transport
+        .reinitialize(crate::Secret::new(replacement.to_vec()))
+        .await
+        .unwrap();
+    {
+        let config = transport.context.config.lock().expect("module config lock");
+        let initializer = transport
+            .initializer
+            .lock()
+            .expect("module initializer lock");
+        let host = &initializer.as_ref().unwrap().host;
+        assert_ne!(config.as_ptr(), original_pointer);
+        assert_eq!(config.as_slice(), replacement);
+        assert_eq!(host.config.ptr, config.as_ptr());
+        assert_eq!(host.config.len, config.len());
+        assert!(
+            !config
+                .windows(b"old-sensitive-value".len())
+                .any(|window| window == b"old-sensitive-value")
+        );
+    }
+
+    transport.ensure_initialized().await.unwrap();
+    assert_eq!(
+        observed.lock().unwrap().as_ref(),
+        Some(&serde_json::json!({ "route": "new" }))
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn canceling_reconfiguration_waiting_for_started_lazy_init_keeps_initializer_owned() {
+    let _lock = VTABLE_TEST_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    REINITIALIZE_CODE.store(TB_OK, Ordering::Release);
+    REINITIALIZE_ENTERED.store(false, Ordering::Release);
+    let (transport, host) = ModuleTransport::new("lazy-reinitialize-race".into(), b"{}".to_vec());
+    let (worker_started_tx, worker_started_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_worker_tx, release_worker_rx) = std::sync::mpsc::sync_channel(1);
+    *transport
+        .before_worker_lock
+        .lock()
+        .expect("worker test hook lock") = Some(Box::new(move || {
+        let _ = worker_started_tx.send(());
+        let _ = release_worker_rx.recv();
+    }));
+    transport.defer_initialize(initialize_ok, host);
+
+    let initializing_transport = transport.clone();
+    let initializing =
+        tokio::spawn(async move { initializing_transport.ensure_initialized().await });
+    tokio::task::spawn_blocking(move || worker_started_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        transport
+            .context
+            .physical
+            .lock()
+            .expect("physical state lock")
+            .init,
+        InitState::Scheduled
+    );
+
+    let (attempted_tx, attempted_rx) = tokio::sync::oneshot::channel();
+    let reconfiguring_transport = transport.clone();
+    let reconfiguring = tokio::spawn(async move {
+        let _ = attempted_tx.send(());
+        reconfiguring_transport
+            .reinitialize(crate::Secret::new(br#"{"route":"replacement"}"#.to_vec()))
+            .await
+    });
+    attempted_rx.await.unwrap();
+    tokio::task::yield_now().await;
+    assert!(
+        !transport.lifecycle_is_owned_for_test(),
+        "waiting for a scheduled initializer must not retain the lifecycle lock"
+    );
+    reconfiguring.abort();
+    assert!(reconfiguring.await.unwrap_err().is_cancelled());
+
+    release_worker_tx.send(()).unwrap();
+    initializing.await.unwrap().unwrap();
+    assert!(!transport.is_faulted());
+    assert!(!REINITIALIZE_ENTERED.load(Ordering::Acquire));
+    unsafe { (host.ready)(host.host_ctx) };
+
+    transport
+        .reinitialize(crate::Secret::new(br#"{"route":"after-init"}"#.to_vec()))
+        .await
+        .unwrap();
+    assert!(REINITIALIZE_ENTERED.load(Ordering::Acquire));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn reinitialization_waits_for_host_ready_after_lazy_vtable_publication() {
+    struct SetupState {
+        ready: AtomicBool,
+        calls: AtomicUsize,
+        callback_returned: AtomicBool,
+        release_early: StdMutex<Option<std::sync::mpsc::Receiver<()>>>,
+    }
+    unsafe extern "C" fn reinitialize_until_setup(ctx: *mut c_void, _: *const u8, _: usize) -> i32 {
+        let state = unsafe { &*ctx.cast::<SetupState>() };
+        state.calls.fetch_add(1, Ordering::AcqRel);
+        let code = if state.ready.load(Ordering::Acquire) {
+            TB_OK
+        } else {
+            if let Some(release) = state.release_early.lock().unwrap().take() {
+                let _ = release.recv();
+            }
+            TB_CLOSED
+        };
+        state.callback_returned.store(true, Ordering::Release);
+        code
+    }
+    unsafe extern "C" fn setup_deliver(_: *mut c_void, _: *const u8, _: usize) -> i32 {
+        TB_OK
+    }
+    unsafe extern "C" fn setup_shutdown(_: *mut c_void, _: u64) -> i32 {
+        TB_OK
+    }
+
+    let (transport, host) = ModuleTransport::new("host-ready-race".into(), b"{}".to_vec());
+    let state = Arc::new(SetupState {
+        ready: AtomicBool::new(false),
+        calls: AtomicUsize::new(0),
+        callback_returned: AtomicBool::new(false),
+        release_early: StdMutex::new(None),
+    });
+    *transport.fixture_controller.lock().unwrap() = Some(state.clone());
+    let (worker_started_tx, worker_started_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_worker_tx, release_worker_rx) = std::sync::mpsc::sync_channel(1);
+    *transport.before_worker_lock.lock().unwrap() = Some(Box::new(move || {
+        worker_started_tx.send(()).unwrap();
+        release_worker_rx.recv().unwrap();
+    }));
+    let (release_early_tx, release_early_rx) = std::sync::mpsc::sync_channel(1);
+    *state.release_early.lock().unwrap() = Some(release_early_rx);
+    let state_for_init = state.clone();
+    transport.defer_initializer(host, move |_| {
+        Ok(TbModuleVtable {
+            size: size_of::<TbModuleVtable>() as u32,
+            _reserved: 0,
+            module_ctx: Arc::as_ptr(&state_for_init).cast_mut().cast(),
+            deliver: setup_deliver,
+            shutdown: setup_shutdown,
+            reinitialize: Some(reinitialize_until_setup),
+        })
+    });
+
+    let first_call = tokio::spawn({
+        let transport = transport.clone();
+        async move { transport.send(call()).await }
+    });
+    transport.wait_initializing().await;
+    tokio::task::spawn_blocking(move || worker_started_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Poll the reinitializer while the physical initializer is still parked.
+    // This proves it took the scheduled-initializer path before publication.
+    let reinitializing_transport = transport.clone();
+    let mut reinitializing = Box::pin(
+        reinitializing_transport
+            .reinitialize(crate::Secret::new(br#"{"route":"replacement"}"#.to_vec())),
+    );
+    std::future::poll_fn(|cx| match reinitializing.as_mut().poll(cx) {
+        std::task::Poll::Pending => std::task::Poll::Ready(()),
+        std::task::Poll::Ready(result) => {
+            panic!("reinitialization finished before lazy initialization: {result:?}")
+        }
+    })
+    .await;
+
+    release_worker_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if transport.context.physical.lock().unwrap().result.is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the lazy initializer publishes its vtable");
+
+    // Model the SDK setup window: the vtable is published while its
+    // reinitialization connection is absent and host.ready has not run.
+    assert!(transport.module.lock().unwrap().is_some());
+    assert!(!transport.is_ready());
+    let pending_before_ready = std::future::poll_fn(|cx| {
+        std::task::Poll::Ready(matches!(
+            reinitializing.as_mut().poll(cx),
+            std::task::Poll::Pending
+        ))
+    })
+    .await;
+    let native_callback_started_before_ready = transport.native_lifecycle_pending();
+    let callback_calls_before_ready = state.calls.load(Ordering::Acquire);
+    release_early_tx.send(()).unwrap();
+    if callback_calls_before_ready != 0 {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !state.callback_returned.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("an early native callback returns");
+    }
+
+    tokio::time::pause();
+    tokio::time::advance(MODULE_INIT_DEADLINE).await;
+    let timed_out_before_ready = matches!(reinitializing.await, Err(Error::Timeout { .. }));
+
+    state.ready.store(true, Ordering::Release);
+    unsafe { (host.ready)(host.host_ctx) };
+    let first_call_result = tokio::time::timeout(Duration::from_secs(2), first_call)
+        .await
+        .expect("the original business call is released by readiness")
+        .unwrap();
+    let reinitialize_after_ready = transport
+        .reinitialize(crate::Secret::new(br#"{"route":"after-ready"}"#.to_vec()))
+        .await;
+    let callback_calls_after_ready = state.calls.load(Ordering::Acquire);
+    tokio::time::resume();
+    let stopped = transport.stop(Duration::from_secs(2)).await;
+
+    assert!(
+        pending_before_ready,
+        "reconfiguration must wait for host.ready"
+    );
+    assert!(
+        timed_out_before_ready,
+        "readiness wait keeps the original deadline"
+    );
+    assert!(
+        !native_callback_started_before_ready,
+        "the native callback returns TB_CLOSED until setup publishes its connection"
+    );
+    assert_eq!(callback_calls_before_ready, 0);
+    first_call_result.unwrap();
+    reinitialize_after_ready.unwrap();
+    assert_eq!(
+        callback_calls_after_ready, 1,
+        "callback runs after readiness"
+    );
+    assert_eq!(stopped.unwrap(), TB_OK);
 }
 
 #[tokio::test]
@@ -583,10 +902,12 @@ async fn a_reinitialization_that_times_out_reports_a_timeout_without_the_configu
         .get_or_init(|| tokio::sync::Mutex::new(()))
         .lock()
         .await;
-    let (transport, _) = ModuleTransport::new("timeout".to_string(), Vec::new());
+    let (transport, host) = ModuleTransport::new("timeout".to_string(), Vec::new());
     let mut module = TbModuleVtable::default();
     unsafe { initialize_ok(std::ptr::null(), &mut module) };
     transport.initialize(module).unwrap();
+    unsafe { (host.ready)(host.host_ctx) };
+    REINITIALIZE_ENTERED.store(false, Ordering::Release);
     REINITIALIZE_CODE.store(TB_TIMEOUT, Ordering::Release);
     let error = transport
         .reinitialize(crate::Secret::new(
@@ -596,6 +917,7 @@ async fn a_reinitialization_that_times_out_reports_a_timeout_without_the_configu
         .unwrap_err();
     REINITIALIZE_CODE.store(TB_OK, Ordering::Release);
     assert!(matches!(error, Error::Timeout { .. }), "{error}");
+    assert!(REINITIALIZE_ENTERED.load(Ordering::Acquire));
     assert!(!error.to_string().contains("never printed"));
 }
 
@@ -2070,6 +2392,10 @@ async fn actual_native_reinitializer_fault_denies_before_c_returns_and_joins_onc
     transport.defer_initialize(init, host);
     transport.ensure_initialized().await.unwrap();
     barrier.entered.notified().await;
+    // This raw-controls fixture does not request Ready from its native init
+    // entry point. Publish readiness through the real ABI before exercising
+    // the reinitializer, whose SDK connection slot is installed at that edge.
+    unsafe { (host.ready)(host.host_ctx) };
     {
         let mut state = barrier.state.lock().unwrap();
         state.1 = false;
@@ -2078,7 +2404,9 @@ async fn actual_native_reinitializer_fault_denies_before_c_returns_and_joins_onc
         let transport = transport.clone();
         async move { transport.reinitialize(crate::Secret::new(vec![])).await }
     });
-    barrier.entered.notified().await;
+    tokio::time::timeout(Duration::from_secs(10), barrier.entered.notified())
+        .await
+        .expect("native reinitializer enters after host readiness");
     unsafe {
         (host.fault)(host.host_ctx, std::ptr::null(), 0);
     }
@@ -2374,4 +2702,494 @@ async fn completed_shutdown_has_already_released_its_native_lifecycle_marker() {
         !still_pending,
         "completed cleanup still reports native work"
     );
+}
+
+#[tokio::test]
+async fn selected_controller_binding_is_available_before_ready_and_revoked_on_disconnect() {
+    let broker = Broker::new_restricted_module_control();
+    let (broker_transport, controller_transport) = MemoryTransport::pair();
+    let selected = broker
+        .attach_module_controller(Arc::new(broker_transport))
+        .unwrap();
+    let controller = Connection::connect(Box::new(controller_transport))
+        .await
+        .unwrap();
+    assert_eq!(controller.unique_name().as_ref(), Some(&selected));
+    let binding = broker
+        .restricted_module_controller_binding()
+        .expect("selected live peer is a loader capability");
+    let (transport, host) = ModuleTransport::new_with_controller_binding(
+        "trusted-migration".into(),
+        vec![],
+        Some(binding.clone()),
+        Arc::from([]),
+    );
+    let query = host
+        .trusted_host_binding
+        .expect("selected controller installs the optional ABI callback");
+    let peer_len = selected.as_str().len();
+    transport
+        .eager_initialize_with(host, |initializing_host| {
+            let mut output = [0_u8; crate::name::MAX_NAME_LEN];
+            let mut output_len = usize::MAX;
+            assert_eq!(
+                unsafe {
+                    query(
+                        initializing_host.host_ctx,
+                        output.as_mut_ptr(),
+                        peer_len,
+                        &mut output_len,
+                    )
+                },
+                TB_OK
+            );
+            assert_eq!(&output[..output_len], selected.as_str().as_bytes());
+            assert_eq!(output_len, peer_len);
+            let mut module = TbModuleVtable::default();
+            assert_eq!(
+                unsafe { initialize_ok(&initializing_host, &mut module) },
+                TB_OK
+            );
+            Ok(module)
+        })
+        .unwrap();
+    assert!(!transport.is_ready(), "binding is queried during setup");
+
+    let mut output = [0_u8; crate::name::MAX_NAME_LEN];
+    assert!(!transport.is_ready());
+
+    let mut short = [0xa5_u8; crate::name::MAX_NAME_LEN];
+    let mut output_len = usize::MAX;
+    assert_eq!(
+        unsafe {
+            query(
+                host.host_ctx,
+                short.as_mut_ptr(),
+                peer_len - 1,
+                &mut output_len,
+            )
+        },
+        TB_BUFFER_TOO_SMALL
+    );
+    assert_eq!(output_len, peer_len);
+    assert!(short.iter().all(|byte| *byte == 0xa5));
+
+    output_len = usize::MAX;
+    assert_eq!(
+        unsafe { query(host.host_ctx, std::ptr::null_mut(), 0, &mut output_len,) },
+        TB_BUFFER_TOO_SMALL
+    );
+    assert_eq!(output_len, peer_len);
+
+    assert_eq!(
+        unsafe {
+            query(
+                host.host_ctx,
+                output.as_mut_ptr(),
+                output.len(),
+                std::ptr::null_mut(),
+            )
+        },
+        TB_BAD_ARGUMENT
+    );
+
+    output_len = usize::MAX;
+    assert_eq!(
+        unsafe { query(host.host_ctx, std::ptr::null_mut(), 1, &mut output_len) },
+        TB_BAD_ARGUMENT
+    );
+    assert_eq!(output_len, 0);
+    assert_eq!(
+        unsafe {
+            query(
+                host.host_ctx,
+                output.as_mut_ptr(),
+                crate::name::MAX_NAME_LEN + 1,
+                &mut output_len,
+            )
+        },
+        TB_BAD_ARGUMENT
+    );
+    assert_eq!(output_len, 0);
+
+    controller.close().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while binding.is_live() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("controller disconnect revokes subsequent queries");
+    assert_eq!(
+        unsafe {
+            query(
+                host.host_ctx,
+                output.as_mut_ptr(),
+                output.len(),
+                &mut output_len,
+            )
+        },
+        TB_CLOSED
+    );
+
+    let replacement_broker = Broker::new_restricted_module_control();
+    let (replacement_server, replacement_client) = MemoryTransport::pair();
+    let replacement_peer = replacement_broker
+        .attach_module_controller(Arc::new(replacement_server))
+        .unwrap();
+    let _replacement = Connection::connect(Box::new(replacement_client))
+        .await
+        .unwrap();
+    assert_eq!(
+        replacement_peer, selected,
+        "separate brokers reuse unique names"
+    );
+    let (replacement_transport, replacement_host) = ModuleTransport::new_with_controller_binding(
+        "replacement-migration".into(),
+        vec![],
+        replacement_broker.restricted_module_controller_binding(),
+        Arc::from([]),
+    );
+    replacement_transport
+        .context
+        .init_started
+        .store(true, Ordering::Release);
+    let replacement_query = replacement_host.trusted_host_binding.unwrap();
+    let mut replacement_output = [0_u8; crate::name::MAX_NAME_LEN];
+    let mut replacement_len = 0;
+    assert_eq!(
+        unsafe {
+            replacement_query(
+                replacement_host.host_ctx,
+                replacement_output.as_mut_ptr(),
+                replacement_output.len(),
+                &mut replacement_len,
+            )
+        },
+        TB_OK
+    );
+    assert_eq!(
+        &replacement_output[..replacement_len],
+        replacement_peer.as_str().as_bytes()
+    );
+    assert_eq!(
+        unsafe {
+            query(
+                host.host_ctx,
+                output.as_mut_ptr(),
+                output.len(),
+                &mut output_len,
+            )
+        },
+        TB_CLOSED,
+        "an old attachment never follows a replacement with the same unique name"
+    );
+}
+
+#[tokio::test]
+async fn selected_controller_route_is_delivered_before_ready_only_for_exact_confidential_call() {
+    use std::time::Duration;
+
+    let _test_guard = VTABLE_TEST_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+    PRE_READY_DELIVERY_COUNT.store(0, Ordering::Release);
+
+    let broker = Broker::new_restricted_module_control();
+    let (broker_transport, controller_transport) = MemoryTransport::pair();
+    let selected = broker
+        .attach_module_controller(Arc::new(broker_transport))
+        .unwrap();
+    let controller = Connection::connect(Box::new(controller_transport))
+        .await
+        .unwrap();
+    assert_eq!(controller.unique_name().as_ref(), Some(&selected));
+
+    let route = PreReadyConfidentialRoute {
+        path: "/org/tinystoragedrivers/migration".parse().unwrap(),
+        interface: "org.tinystoragedrivers.Migration".parse().unwrap(),
+        member: "GetSchema".parse().unwrap(),
+    };
+    let binding = broker
+        .restricted_module_controller_binding()
+        .expect("the host selected one live controller");
+    let (transport, host) = ModuleTransport::new_with_controller_binding(
+        "migration-fixture".into(),
+        vec![],
+        Some(binding.clone()),
+        Arc::from([route]),
+    );
+    transport
+        .eager_initialize_with(host, |_| {
+            Ok(TbModuleVtable {
+                size: size_of::<TbModuleVtable>() as u32,
+                _reserved: 0,
+                module_ctx: std::ptr::dangling_mut(),
+                deliver: pre_ready_deliver,
+                shutdown,
+                reinitialize: Some(reinitialize),
+            })
+        })
+        .unwrap();
+    assert!(!transport.is_ready(), "fixture remains pre-READY");
+
+    let staged = broker.attach_module_staged(transport.clone());
+    let unique = staged.unique_name().clone();
+    let module_name: crate::BusName = "org.tinystoragedrivers.Migration".parse().unwrap();
+    broker
+        .reserve_module_name(&unique, module_name.clone())
+        .unwrap();
+    broker.attest_module(
+        &unique,
+        crate::attest::Attestation {
+            name: module_name.clone(),
+            sha256: "a".repeat(64),
+            library_sha256: None,
+        },
+    );
+    staged.start();
+
+    let mut call = Message::method_call(
+        module_name.clone(),
+        "/org/tinystoragedrivers/migration".parse().unwrap(),
+        "org.tinystoragedrivers.Migration".parse().unwrap(),
+        "GetSchema".parse().unwrap(),
+        serde_json::Value::Null,
+    );
+    call.header.confidential = true;
+    let notification = PRE_READY_DELIVERED.notified();
+    tokio::pin!(notification);
+    controller.send(call).await.unwrap();
+    let delivered_while_initializing =
+        tokio::time::timeout(Duration::from_millis(200), &mut notification)
+            .await
+            .is_ok();
+
+    let mut ordinary = Message::method_call(
+        module_name.clone(),
+        "/org/tinystoragedrivers/migration".parse().unwrap(),
+        "org.tinystoragedrivers.Migration".parse().unwrap(),
+        "GetSchema".parse().unwrap(),
+        serde_json::Value::Null,
+    );
+    ordinary.header.confidential = false;
+    controller.send(ordinary).await.unwrap();
+    let queued_pre_ready_count = usize::from(!delivered_while_initializing);
+    wait_for_pending_len(&transport, queued_pre_ready_count + 1).await;
+
+    let (outsider_broker, outsider_transport) = MemoryTransport::pair();
+    broker.attach(Arc::new(outsider_broker));
+    let outsider = Connection::connect(Box::new(outsider_transport))
+        .await
+        .unwrap();
+    let mut forged = Message::method_call(
+        module_name.clone(),
+        "/org/tinystoragedrivers/migration".parse().unwrap(),
+        "org.tinystoragedrivers.Migration".parse().unwrap(),
+        "GetSchema".parse().unwrap(),
+        serde_json::Value::Null,
+    );
+    forged.header.confidential = true;
+    forged.header.sender = Some(selected.clone());
+    outsider.send(forged).await.unwrap();
+    wait_for_pending_len(&transport, queued_pre_ready_count + 2).await;
+
+    let mut wrong_route = Message::method_call(
+        module_name.clone(),
+        "/org/tinystoragedrivers/migration/other".parse().unwrap(),
+        "org.tinystoragedrivers.Migration".parse().unwrap(),
+        "GetSchema".parse().unwrap(),
+        serde_json::Value::Null,
+    );
+    wrong_route.header.confidential = true;
+    controller.send(wrong_route).await.unwrap();
+    wait_for_pending_len(&transport, queued_pre_ready_count + 3).await;
+
+    drop(controller);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while binding.is_live() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the selected controller disconnects and its binding becomes stale");
+    let mut stale_controller = Message::method_call(
+        module_name,
+        "/org/tinystoragedrivers/migration".parse().unwrap(),
+        "org.tinystoragedrivers.Migration".parse().unwrap(),
+        "GetSchema".parse().unwrap(),
+        serde_json::Value::Null,
+    );
+    stale_controller.header.confidential = true;
+    stale_controller.header.sender = Some(selected.clone());
+    outsider.send(stale_controller).await.unwrap();
+    wait_for_pending_len(&transport, queued_pre_ready_count + 4).await;
+    assert_eq!(
+        PRE_READY_DELIVERY_COUNT.load(Ordering::Acquire),
+        usize::from(delivered_while_initializing)
+    );
+
+    // Release the legacy pending queue so the RED test leaves no blocked task.
+    unsafe { (host.ready)(host.host_ctx) };
+    wait_for_pre_ready_delivery_count(5).await;
+
+    assert!(
+        delivered_while_initializing,
+        "the exact confidential selected-controller route should bypass only the READY queue"
+    );
+    assert_eq!(PRE_READY_DELIVERY_COUNT.load(Ordering::Acquire), 5);
+}
+
+#[tokio::test]
+async fn a_binding_absent_at_transport_creation_is_never_added_later() {
+    let broker = Broker::new_restricted_module_control();
+    let (old_transport, old_host) = ModuleTransport::new_with_controller_binding(
+        "before-selection".into(),
+        vec![],
+        None,
+        Arc::from([]),
+    );
+    assert!(old_host.trusted_host_binding.is_none());
+    let mut output = [0_u8; crate::name::MAX_NAME_LEN];
+    let mut output_len = 1;
+    assert_eq!(
+        unsafe {
+            host_trusted_host_binding(
+                old_host.host_ctx,
+                output.as_mut_ptr(),
+                output.len(),
+                &mut output_len,
+            )
+        },
+        TB_UNSUPPORTED
+    );
+    assert_eq!(output_len, 0);
+
+    let (broker_transport, controller_transport) = MemoryTransport::pair();
+    broker
+        .attach_module_controller(Arc::new(broker_transport))
+        .unwrap();
+    let _controller = Connection::connect(Box::new(controller_transport))
+        .await
+        .unwrap();
+    assert!(old_host.trusted_host_binding.is_none());
+    let (new_transport, new_host) = ModuleTransport::new_with_controller_binding(
+        "after-selection".into(),
+        vec![],
+        broker.restricted_module_controller_binding(),
+        Arc::from([]),
+    );
+    assert!(new_host.trusted_host_binding.is_some());
+    drop(old_transport);
+    drop(new_transport);
+
+    let unrestricted = Broker::new();
+    assert!(
+        unrestricted
+            .restricted_module_controller_binding()
+            .is_none()
+    );
+    let (unrestricted_transport, unrestricted_host) = ModuleTransport::new_with_controller_binding(
+        "unrestricted".into(),
+        vec![],
+        unrestricted.restricted_module_controller_binding(),
+        Arc::from([]),
+    );
+    assert!(unrestricted_host.trusted_host_binding.is_none());
+    drop(unrestricted_transport);
+}
+
+#[tokio::test]
+async fn a_retained_binding_denies_after_its_module_owner_is_terminal_or_gone() {
+    let broker = Broker::new_restricted_module_control();
+    let (broker_transport, controller_transport) = MemoryTransport::pair();
+    broker
+        .attach_module_controller(Arc::new(broker_transport))
+        .unwrap();
+    let _controller = Connection::connect(Box::new(controller_transport))
+        .await
+        .unwrap();
+    let binding = broker
+        .restricted_module_controller_binding()
+        .expect("selected controller");
+    let (transport, host) = ModuleTransport::new_with_controller_binding(
+        "terminal-binding".into(),
+        vec![],
+        Some(binding),
+        Arc::from([]),
+    );
+    transport.eager_initialize(initialize_ok, host).unwrap();
+    let query = host.trusted_host_binding.unwrap();
+    let mut output = [0_u8; crate::name::MAX_NAME_LEN];
+    let mut output_len = 0;
+    transport.commit_terminal(true);
+    assert_eq!(
+        unsafe {
+            query(
+                host.host_ctx,
+                output.as_mut_ptr(),
+                output.len(),
+                &mut output_len,
+            )
+        },
+        TB_CLOSED
+    );
+    drop(transport);
+    assert_eq!(
+        unsafe {
+            query(
+                host.host_ctx,
+                output.as_mut_ptr(),
+                output.len(),
+                &mut output_len,
+            )
+        },
+        TB_CLOSED,
+        "the process-lifetime HostContext callback is a closed tombstone"
+    );
+}
+
+#[tokio::test]
+async fn trusted_host_callback_denies_a_poisoned_owner_without_unwinding_through_c() {
+    let broker = Broker::new_restricted_module_control();
+    let (broker_transport, controller_transport) = MemoryTransport::pair();
+    broker
+        .attach_module_controller(Arc::new(broker_transport))
+        .unwrap();
+    let _controller = Connection::connect(Box::new(controller_transport))
+        .await
+        .unwrap();
+    let (transport, host) = ModuleTransport::new_with_controller_binding(
+        "poisoned-owner".into(),
+        vec![],
+        broker.restricted_module_controller_binding(),
+        Arc::from([]),
+    );
+    transport.eager_initialize(initialize_ok, host).unwrap();
+    let query = host.trusted_host_binding.unwrap();
+    let context = transport.context;
+    assert!(
+        std::thread::spawn(move || {
+            let _owner = context.owner.lock().unwrap();
+            panic!("poison the module owner lock for the callback test");
+        })
+        .join()
+        .is_err()
+    );
+
+    let mut output = [0_u8; crate::name::MAX_NAME_LEN];
+    let mut output_len = usize::MAX;
+    assert_eq!(
+        unsafe {
+            query(
+                host.host_ctx,
+                output.as_mut_ptr(),
+                output.len(),
+                &mut output_len,
+            )
+        },
+        TB_CLOSED
+    );
+    assert_eq!(output_len, 0);
 }

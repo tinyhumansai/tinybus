@@ -30,10 +30,12 @@ indistinguishable from "the integration is slow".
 
 ## `NameOwnerChanged`
 
-Emitted when a well-known name is claimed or released, including by a peer
-dying. This is how the kernel learns an integration is gone in milliseconds
-rather than at the next timeout. Subscribers still have to ask for it; the
-broker does not push it at peers that did not.
+Emitted when a well-known name is claimed or released, and when a peer detaches
+for its unique name. The unique-name transition identifies peer death even
+when that peer never claimed an alias. This is how the kernel learns an
+integration is gone in milliseconds rather than at the next timeout.
+Subscribers still have to ask for it; the broker does not push it at peers
+that did not.
 
 ## Restricted module control (`modules` feature)
 

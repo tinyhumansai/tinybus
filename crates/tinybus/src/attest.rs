@@ -21,9 +21,11 @@
 //! # What the check actually establishes
 //!
 //! An [`Attestation`] records that *this* well-known name is owned by a module
-//! whose bytes hashed to *this* SHA-256, and that the operator listed that hash
-//! as acceptable. The hash is computed by the host over bytes the host read
-//! itself; nothing a module says about itself participates.
+//! whose admitted artifact hashed to *this* SHA-256. Release modules keep the
+//! archive digest there and may carry a separately verified library digest;
+//! local allowlisted libraries keep their file digest there. The host computes
+//! these values from protected files or the verified release cache; nothing a
+//! module says about itself participates.
 //!
 //! Admission also binds that record to the module's fixed unique peer. A unique
 //! lookup retains the original manifest name and digest even after alias release;
@@ -89,14 +91,22 @@ pub struct Attestation {
     /// against a `modules.toml` beside it. For one loaded from a pinned GitHub
     /// release it is the release *archive* the library was extracted from —
     /// the artifact named by the digest the host compiled in, and the only
-    /// value in that path any operator ever asserted. Hashing the extracted
-    /// library instead would report a number nobody had vouched for, computed
-    /// by the same code that would then be trusting it.
+    /// value in that path any operator ever asserted for the artifact. The
+    /// optional [`Self::library_sha256`] carries a separately published and
+    /// checked library digest without changing this archive-digest meaning.
     ///
     /// A linked module reports the SHA-256 of the host executable containing
     /// its code, not a release archive pin. A sender of a secret must recognize
     /// linked registration explicitly before accepting that digest.
     pub sha256: String,
+    /// Lowercase hex SHA-256 of the extracted library, when the host verified
+    /// one separately from the admitted artifact digest.
+    ///
+    /// GitHub release attestations keep [`Self::sha256`] bound to the pinned
+    /// archive and carry this value for the extracted library. Legacy peers
+    /// omit it, which leaves strict library-pinned calls ineligible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_sha256: Option<String>,
 }
 
 /// Whether `value` is exactly 64 hex digits.

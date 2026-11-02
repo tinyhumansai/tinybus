@@ -23,6 +23,7 @@ fn host() -> TbHostVtable {
         },
         broker_routing: None,
         native_terminal_state: None,
+        trusted_host_binding: None,
     }
 }
 fn output() -> TbModuleVtable {
@@ -316,6 +317,9 @@ mod controlled {
         pub payload_drops: AtomicUsize,
         pub config_drops: AtomicUsize,
         pub config_parse_control: StdMutex<Option<Arc<std::sync::Barrier>>>,
+        pub initial_poll_gate: StdMutex<Option<Arc<std::sync::Barrier>>>,
+        pub request_gate:
+            StdMutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
         pub drop_off_lock: AtomicBool,
         pub request_off_lock: AtomicBool,
         pub future_drop_control: StdMutex<Option<(Arc<std::sync::Barrier>, bool)>>,
@@ -339,6 +343,8 @@ mod controlled {
             payload_drops: AtomicUsize::new(0),
             config_drops: AtomicUsize::new(0),
             config_parse_control: StdMutex::new(None),
+            initial_poll_gate: StdMutex::new(None),
+            request_gate: StdMutex::new(None),
             drop_off_lock: AtomicBool::new(true),
             request_off_lock: AtomicBool::new(true),
             future_drop_control: StdMutex::new(None),
@@ -386,6 +392,9 @@ mod controlled {
             if self.first {
                 self.first = false;
                 self.fixture.events.send(Event::Poll(self.mode)).unwrap();
+                if let Some(gate) = self.fixture.initial_poll_gate.lock().unwrap().take() {
+                    gate.wait();
+                }
             }
             match self.mode {
                 0 => Poll::Ready(Ok(())),
@@ -509,6 +518,10 @@ mod controlled {
                 *request.wake.0.lock().unwrap() = true;
                 request.wake.1.notify_all();
                 request.events.send(Event::Request).unwrap();
+                if let Some((entered, release)) = request.request_gate.lock().unwrap().take() {
+                    let _ = entered.send(());
+                    let _ = release.recv();
+                }
                 if request.hook_failure.load(Ordering::Acquire) == 1 {
                     std::panic::panic_any(HookPayload(request.clone()));
                 }
@@ -750,6 +763,11 @@ async fn actual_linked_hook_panics_and_uncertain_finish_preserve_once_join_and_a
 async fn actual_linked_rejected_physical_spawn_retains_received_resources_without_retry() {
     let _serial = controlled::TEST_LOCK.lock().await;
     let (fixture, events) = controlled::fixture();
+    let poll_gate = Arc::new(std::sync::Barrier::new(2));
+    *fixture.initial_poll_gate.lock().unwrap() = Some(poll_gate.clone());
+    let (request_entered, request_entered_rx) = std::sync::mpsc::channel();
+    let (request_release_tx, request_release_rx) = std::sync::mpsc::channel();
+    *fixture.request_gate.lock().unwrap() = Some((request_entered, request_release_rx));
     let broker = tinybus::broker::Broker::new();
     broker
         .clone()
@@ -762,9 +780,42 @@ async fn actual_linked_rejected_physical_spawn_retains_received_resources_withou
     .unwrap();
     let entered = events.recv_timeout(Duration::from_secs(3)).unwrap();
     let view = fixture.view.lock().unwrap().take().unwrap();
+    assert!(matches!(entered, controlled::Event::Poll(1)));
+    let future_was_stored_before_its_poll_returned = view
+        .inner
+        .resources
+        .lock()
+        .unwrap()
+        .initial_future
+        .lock()
+        .unwrap()
+        .is_some();
+    // Poll is sent from inside SetupFuture::poll, while TerminalSetupPoll has
+    // temporarily taken the future out of its storage slot.
+    poll_gate.wait();
+    assert!(!future_was_stored_before_its_poll_returned);
+    view.inner.wait_initial_future_restored_for_test().await;
+    assert!(
+        view.inner
+            .resources
+            .lock()
+            .unwrap()
+            .initial_future
+            .lock()
+            .unwrap()
+            .is_some()
+    );
     let context = view.inner.context();
     view.inner.reject_worker_spawn_for_test();
-    view.request_fault();
+
+    // Hold the first request callback after its bounded wake signal. A second
+    // terminal cause then hits the already-running callback and rejects the
+    // physical worker submission.
+    let fault_view = view.clone();
+    let fault = std::thread::spawn(move || fault_view.request_fault());
+    request_entered_rx
+        .recv_timeout(Duration::from_secs(3))
+        .unwrap();
     host.shutdown(Duration::from_secs(3)).await;
     // Submission failure cannot execute original finish. The fixture alone
     // releases/joins its independent worker; this is not SDK finish evidence.
@@ -773,9 +824,8 @@ async fn actual_linked_rejected_physical_spawn_retains_received_resources_withou
     let observations: Vec<_> = events.try_iter().collect();
     let native = view.inner.host.0;
     let flags = unsafe { native.native_terminal_state.unwrap()(native.host_ctx) };
-    assert!(matches!(entered, controlled::Event::Poll(1)));
     assert_eq!(completed, TerminalCompletion::Uncertain);
-    assert!(view.inner.request_done_for_test());
+    assert!(!view.inner.request_done_for_test());
     assert_ne!(flags & tinybus::module::abi::TB_NATIVE_TERMINAL_FAULT, 0);
     assert_eq!(fixture.requests.load(Ordering::Acquire), 1);
     assert_eq!(fixture.finishes.load(Ordering::Acquire), 0);
@@ -812,6 +862,19 @@ async fn actual_linked_rejected_physical_spawn_retains_received_resources_withou
     assert!(resources.runtime.is_some());
     assert!(resources.initial.is_some());
     assert!(resources.initial_future.lock().unwrap().is_some());
+    drop(resources);
+
+    // The sender disconnects on assertion failure, so this test-only gate
+    // cannot strand the request thread during unwinding.
+    let _ = request_release_tx.send(());
+    fault.join().unwrap();
+    // A re-entrant host shutdown may own and finish this one-shot callback on
+    // its physical worker; joining the signal trigger need not join that worker.
+    assert!(
+        view.inner
+            .wait_request_done_for_test(Duration::from_secs(3))
+    );
+    assert!(view.inner.request_done_for_test());
     // One deliberately retained, bounded original State/job/Runtime remains.
 }
 

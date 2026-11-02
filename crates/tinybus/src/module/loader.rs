@@ -1,6 +1,8 @@
 //! Platform loader: resolve the three v1 symbols and deliberately never unload.
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 
 use crate::error::{Error, Result};
 use crate::module::abi::{
@@ -20,6 +22,46 @@ pub(crate) struct LoadedArtifact {
     pub(crate) descriptor: TbAbiDescriptor,
     pub(crate) manifest: ModuleManifest,
     pub(crate) init: TbModuleInit,
+    pub(crate) library_sha256: Option<String>,
+}
+
+#[derive(Clone)]
+struct MappedImage {
+    file_sha256: String,
+    trusted_library_sha256: Option<String>,
+}
+
+fn mapped_images() -> &'static Mutex<HashMap<usize, MappedImage>> {
+    static IMAGES: OnceLock<Mutex<HashMap<usize, MappedImage>>> = OnceLock::new();
+    IMAGES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn record_mapped_image(
+    images: &mut HashMap<usize, MappedImage>,
+    handle: usize,
+    file_sha256: String,
+    expected_library_sha256: Option<&str>,
+) -> std::result::Result<Option<String>, &'static str> {
+    if let Some(mapped) = images.get(&handle) {
+        if mapped.file_sha256 != file_sha256 {
+            return Err("mapped library bytes differ from the original image");
+        }
+        if expected_library_sha256
+            .is_some_and(|expected| mapped.trusted_library_sha256.as_deref() != Some(expected))
+        {
+            return Err("mapped image has no matching library digest proof");
+        }
+        return Ok(expected_library_sha256.map(str::to_string));
+    }
+    let trusted_library_sha256 = expected_library_sha256.map(str::to_string);
+    images.insert(
+        handle,
+        MappedImage {
+            file_sha256,
+            trusted_library_sha256: trusted_library_sha256.clone(),
+        },
+    );
+    Ok(trusted_library_sha256)
 }
 
 #[repr(C)]
@@ -30,8 +72,47 @@ struct DescriptorPrefix {
     descriptor_size: u32,
 }
 
+#[allow(dead_code)] // Legacy unverified load remains available to internal fixtures.
 pub(crate) fn load(path: &Path, strict: bool) -> Result<LoadedArtifact> {
+    load_verified(path, strict, None)
+}
+
+/// Load one library, binding an optional expected digest to the first native
+/// image TinyBus maps for that handle. Shared library handles are never closed,
+/// so a later file at the same path cannot inherit proof for an older image.
+pub(crate) fn load_verified(
+    path: &Path,
+    strict: bool,
+    expected_library_sha256: Option<&str>,
+) -> Result<LoadedArtifact> {
+    let mut images = mapped_images()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let actual_sha256 = crate::module::hash::file_hex(
+        std::fs::File::open(path)
+            .map_err(|_| Error::module_refused(path, "dynamic loader rejected the artifact"))?,
+    )
+    .map_err(|_| Error::module_refused(path, "module library could not be hashed"))?;
+    if let Some(expected) = expected_library_sha256 {
+        if !crate::attest::is_hex_sha256(expected) {
+            return Err(Error::module_refused(path, "library digest pin is invalid"));
+        }
+        if !actual_sha256.eq_ignore_ascii_case(expected) {
+            return Err(Error::module_refused(
+                path,
+                "module library hash does not match its pin",
+            ));
+        }
+    }
     let handle = platform::open(path)?;
+    let library_sha256 = record_mapped_image(
+        &mut images,
+        handle as usize,
+        actual_sha256,
+        expected_library_sha256,
+    )
+    .map_err(|reason| Error::module_refused(path, reason))?;
+    drop(images);
     let descriptor_ptr = platform::symbol(handle, b"TINYBUS_MODULE_ABI_V1\0", path)?;
 
     let prefix = unsafe { descriptor_ptr.cast::<DescriptorPrefix>().read_unaligned() };
@@ -60,6 +141,7 @@ pub(crate) fn load(path: &Path, strict: bool) -> Result<LoadedArtifact> {
         descriptor,
         manifest,
         init,
+        library_sha256,
     })
 }
 

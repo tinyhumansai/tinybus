@@ -226,6 +226,31 @@ pub(crate) struct NameChange {
 }
 
 impl Router {
+    /// Whether a broker-minted unique peer remains attached under that exact
+    /// identity. Well-known aliases never satisfy this check.
+    #[cfg(feature = "modules")]
+    pub(crate) fn has_unique_peer(&self, unique: &BusName) -> bool {
+        self.names
+            .get(unique)
+            .and_then(|id| self.peers.get(id))
+            .is_some_and(|peer| peer.unique == *unique)
+    }
+
+    /// Verify that `id` is still attached under the unique identity stamped by
+    /// the broker for that connection.
+    pub(crate) fn ensure_peer_attached(&self, id: u64, unique: &BusName) -> Result<()> {
+        let attached = self.names.get(unique) == Some(&id)
+            && self
+                .peers
+                .get(&id)
+                .is_some_and(|peer| peer.unique == *unique);
+        if attached {
+            Ok(())
+        } else {
+            Err(Error::NameHasNoOwner(unique.clone()))
+        }
+    }
+
     /// Attach a peer and mint its unique name.
     pub fn attach(&mut self, outbox: mpsc::Sender<Message>) -> (u64, BusName) {
         // Ids start at 1 and are never reused, so a stale reply addressed to a
@@ -250,9 +275,10 @@ impl Router {
 
     /// Detach a peer, releasing every name it owned.
     ///
-    /// Returns one [`NameChange`] per released well-known name so the broker
-    /// can emit `NameOwnerChanged`. That signal is how the kernel learns an
-    /// integration died without polling it.
+    /// Returns one [`NameChange`] for the peer's unique name and each released
+    /// well-known name so the broker can emit `NameOwnerChanged`. The unique
+    /// transition lets observers detect peer death without polling; alias
+    /// transitions still report service ownership changes.
     pub fn detach(&mut self, id: u64) -> Vec<NameChange> {
         let Some(peer) = self.peers.remove(&id) else {
             return Vec::new();
@@ -275,21 +301,21 @@ impl Router {
         let mut changes = Vec::new();
         for name in owned {
             self.names.remove(&name);
-            if !name.is_unique() {
-                changes.push(NameChange {
-                    name,
-                    old_owner: Some(peer.unique.clone()),
-                    new_owner: None,
-                });
-            }
+            changes.push(NameChange {
+                name,
+                old_owner: Some(peer.unique.clone()),
+                new_owner: None,
+            });
         }
         changes
     }
 
     #[cfg(feature = "modules")]
-    pub(crate) fn detach_unique(&mut self, unique: &BusName) {
+    pub(crate) fn detach_unique(&mut self, unique: &BusName) -> Vec<NameChange> {
         if let Some(id) = self.names.get(unique).copied() {
-            self.detach(id);
+            self.detach(id)
+        } else {
+            Vec::new()
         }
     }
 
@@ -355,9 +381,26 @@ impl Router {
         self.request_name(id, name)
     }
 
+    #[cfg(feature = "modules")]
+    pub(crate) fn release_name_for_unique(
+        &mut self,
+        unique: &BusName,
+        name: &BusName,
+    ) -> Result<NameChange> {
+        let id = *self
+            .names
+            .get(unique)
+            .ok_or_else(|| Error::NameHasNoOwner(unique.clone()))?;
+        self.ensure_peer_attached(id, unique)?;
+        self.release_name(id, name)
+    }
+
     /// Give up a well-known name. Releasing a name you do not own is an error,
     /// not a no-op — it always means the caller's model of the bus is wrong.
     pub fn release_name(&mut self, id: u64, name: &BusName) -> Result<NameChange> {
+        if name.is_unique() {
+            return Err(Error::protocol("a unique name cannot be released"));
+        }
         match self.names.get(name) {
             Some(owner) if *owner == id => {
                 self.names.remove(name);
@@ -551,6 +594,22 @@ impl Router {
         }
     }
 
+    /// Resolve a call only while its sender remains attached as `source`.
+    /// Callers hold the router lock across this check and destination lookup,
+    /// making detach and route admission one ordered table operation.
+    pub(crate) fn resolve_call_from(
+        &self,
+        from: u64,
+        source: &BusName,
+        destination: &BusName,
+        expected: Option<&BusName>,
+        confidential: bool,
+        header: &crate::message::Header,
+    ) -> Result<mpsc::Sender<Message>> {
+        self.ensure_peer_attached(from, source)?;
+        self.resolve_call(destination, expected, confidential, header)
+    }
+
     #[cfg(feature = "modules")]
     pub(crate) fn add_host_callbacks(
         &mut self,
@@ -607,6 +666,30 @@ impl Router {
             return Err(Error::failed("directed signal authority is unavailable"));
         }
         self.resolve(destination)
+    }
+
+    #[cfg(feature = "modules")]
+    pub(crate) fn directed_signal_target_from(
+        &self,
+        from: u64,
+        source: &BusName,
+        destination: &BusName,
+        header: &crate::message::Header,
+    ) -> Result<mpsc::Sender<Message>> {
+        self.ensure_peer_attached(from, source)?;
+        self.directed_signal_target(source, destination, header)
+    }
+
+    /// Select signal recipients only while the stamped sender remains
+    /// attached. The caller keeps the router lock through both operations.
+    pub(crate) fn subscribers_from(
+        &self,
+        signal: &Message,
+        from: u64,
+        source: &BusName,
+    ) -> Result<Vec<mpsc::Sender<Message>>> {
+        self.ensure_peer_attached(from, source)?;
+        Ok(self.subscribers(signal, from))
     }
 
     /// The outbox of whoever owns `destination`.
