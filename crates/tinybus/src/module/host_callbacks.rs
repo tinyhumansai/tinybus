@@ -323,6 +323,10 @@ pub struct HostCallbackBinding {
     connection: Connection,
     state: Arc<CallbackState>,
     transport: Arc<MemoryTransport>,
+    // Top-level configuration keys whose values are callback-bearing and
+    // stay frozen across reinitialization. Empty means the whole
+    // configuration blob is frozen, which is the historical behaviour.
+    frozen_config_keys: Vec<String>,
     // Bounded test observers only; neither hook supplies production authority.
     #[cfg(test)]
     after_attach: Mutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -412,6 +416,24 @@ impl HostCallbackBinding {
     /// The exact SDK-created host destination for module configuration.
     pub fn unique_name(&self) -> &BusName {
         &self.state.destination
+    }
+
+    /// Freeze only these top-level configuration keys across
+    /// reinitialization, so a callback-bound module can take a
+    /// non-callback configuration update.
+    ///
+    /// The declared keys are the callback-bearing ones, such as the
+    /// destination the caller supplies in the module configuration; any
+    /// other key may change freely. With no keys declared the whole
+    /// configuration blob stays frozen, which is the historical behaviour.
+    pub fn with_frozen_config_keys(mut self, keys: &[&str]) -> Self {
+        self.frozen_config_keys = keys.iter().map(|key| key.to_string()).collect();
+        self
+    }
+
+    /// The top-level configuration keys frozen across reinitialization.
+    pub(crate) fn frozen_config_keys(&self) -> &[String] {
+        &self.frozen_config_keys
     }
 
     /// Accept a stream opened by this binding's currently authorized module.
@@ -623,6 +645,7 @@ impl HostCallbackBinding {
             connection,
             state: child,
             transport,
+            frozen_config_keys: Vec::new(),
             #[cfg(test)]
             after_attach: Mutex::new(None),
             #[cfg(test)]
@@ -1093,6 +1116,7 @@ impl ModuleHost {
             broker: self.inner.broker.clone(),
             connection,
             transport,
+            frozen_config_keys: Vec::new(),
             #[cfg(test)]
             after_attach: Mutex::new(None),
             #[cfg(test)]
@@ -1129,7 +1153,9 @@ impl ModuleHost {
     /// Load a hash-verified file and bind its exact peer before any initialization.
     ///
     /// All endpoints must already be served. The binding is single-use even on
-    /// failure. Configuration is frozen for reinitialization. Generic load APIs
+    /// failure. Configuration is frozen for reinitialization: by default the
+    /// whole blob, or only the keys declared with
+    /// [`HostCallbackBinding::with_frozen_config_keys`]. Generic load APIs
     /// grant no callback authority. The caller supplies the binding's unique
     /// destination in its domain-specific configuration; it cannot change scope.
     pub async fn load_file_with_host_callbacks(
@@ -1324,7 +1350,12 @@ impl ModuleHost {
             // deferred even for an eager module until routes and identity exist.
             let bytes = serde_json::to_vec(&config)
                 .map_err(|_| Error::failed("module configuration is invalid"))?;
-            let fingerprint = callback_config_fingerprint(&bytes);
+            // Only the keys the binding declared as callback-bearing are
+            // frozen; the rest of the configuration may change on
+            // reinitialization. The configuration is dropped below, so no
+            // plaintext survives past this fingerprint.
+            let fingerprint =
+                scoped_callback_config_fingerprint(&bytes, &config, binding.frozen_config_keys());
             drop(config);
             let trusted_host = self.inner.broker.restricted_module_controller_binding();
             let pre_ready_routes = self
@@ -1405,6 +1436,7 @@ impl ModuleHost {
                 state.active = true;
             }
             module.callback_config = Some(fingerprint);
+            module.callback_config_keys = binding.frozen_config_keys().to_vec();
             module.callback_state = Some(binding.state.clone());
             self.inner
                 .broker

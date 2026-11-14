@@ -3439,6 +3439,75 @@ async fn eager_native_setup_callbacks_are_bound_before_ready_and_failures_rollba
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires TINYBUS_TEST_HOST_CALLBACK_MODULE to point at the built cdylib"]
+async fn frozen_config_keys_allow_non_callback_config_changes_on_reinitialize() {
+    let artifact = PathBuf::from(std::env::var_os("TINYBUS_TEST_HOST_CALLBACK_MODULE").unwrap());
+    let hash = crate::module::hash::file_hex(std::fs::File::open(&artifact).unwrap()).unwrap();
+    let (_dir, artifact) = staged_module(&artifact, &hash);
+    let broker = Broker::new();
+    let modules = ModuleHost::new(broker.clone());
+    let binding = modules
+        .prepare_host_callbacks(vec![crate::module::HostCallbackEndpoint {
+            path: "/callback".parse().unwrap(),
+            interface: "org.example.Callback".parse().unwrap(),
+            members: vec!["Observe".parse().unwrap()],
+        }])
+        .await
+        .unwrap()
+        .with_frozen_config_keys(&["host"]);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let guard = binding.guard();
+    let sender_lookup = modules.sender_lookup();
+    binding
+        .serve_at(
+            "/callback".parse().unwrap(),
+            BoundNativeCallback {
+                calls: calls.clone(),
+                guard: guard.clone(),
+                sender_lookup,
+            },
+        )
+        .await
+        .unwrap();
+    let config = serde_json::json!({
+        "host": binding.unique_name(), "fail": false,
+        "credential": "callback-secret-must-not-be-retained",
+        "nested": [{"zero": -0.0, "literal": "\"-0.0\""}],
+    });
+    let info = modules
+        .load_file_with_host_callbacks(artifact, config.clone(), &binding)
+        .await
+        .unwrap();
+    assert!(matches!(info.state, ModuleState::Ready));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    // A non-callback field may change freely.
+    let mut rotated = config.clone();
+    rotated["credential"] = serde_json::json!("rotated-test-secret");
+    modules.reinitialize(&info.name, rotated).await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let mut literal = config.clone();
+    literal["nested"][0]["literal"] = serde_json::json!("\"0.0\"");
+    modules.reinitialize(&info.name, literal).await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    // The frozen callback destination may not change, and dropping it
+    // counts as a change.
+    let mut moved = config.clone();
+    moved["host"] = serde_json::json!(":1.999");
+    assert!(modules.reinitialize(&info.name, moved).await.is_err());
+    let mut dropped = config.clone();
+    dropped.as_object_mut().unwrap().remove("host");
+    assert!(modules.reinitialize(&info.name, dropped).await.is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    // An equivalent configuration still reinitializes.
+    let mut equivalent = config.clone();
+    equivalent["nested"][0]["zero"] = serde_json::json!(0.0);
+    modules.reinitialize(&info.name, equivalent).await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    modules.reinitialize(&info.name, config).await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 5);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires TINYBUS_TEST_HOST_CALLBACK_MODULE to point at the built cdylib"]
 async fn an_eager_setup_callback_resolves_its_admitted_module_before_ready() {
     let artifact = PathBuf::from(std::env::var_os("TINYBUS_TEST_HOST_CALLBACK_MODULE").unwrap());
     let hash = crate::module::hash::file_hex(std::fs::File::open(&artifact).unwrap()).unwrap();

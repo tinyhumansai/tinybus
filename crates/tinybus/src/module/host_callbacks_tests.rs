@@ -1351,6 +1351,44 @@ fn configuration_fingerprints_preserve_json_equality_without_normalizing_strings
     );
 }
 
+#[test]
+fn scoped_configuration_fingerprints_cover_only_the_declared_keys() {
+    fn fingerprint(value: &serde_json::Value, keys: &[String]) -> [u8; 32] {
+        let bytes = serde_json::to_vec(value).unwrap();
+        scoped_callback_config_fingerprint(&bytes, value, keys)
+    }
+    let keys = vec!["host".to_string()];
+    let base = serde_json::json!({
+        "host": ":1.42",
+        "credential": "private-test-secret",
+        "nested": [{"zero": -0.0}],
+    });
+    let mut changed_credential = base.clone();
+    changed_credential["credential"] = serde_json::json!("rotated-test-secret");
+    let mut changed_nested = base.clone();
+    changed_nested["nested"][0]["zero"] = serde_json::json!(0.0);
+    let mut changed_host = base.clone();
+    changed_host["host"] = serde_json::json!(":1.999");
+    let mut dropped_host = base.clone();
+    dropped_host.as_object_mut().unwrap().remove("host");
+    assert_eq!(
+        fingerprint(&base, &keys),
+        fingerprint(&changed_credential, &keys)
+    );
+    assert_eq!(
+        fingerprint(&base, &keys),
+        fingerprint(&changed_nested, &keys)
+    );
+    assert_ne!(fingerprint(&base, &keys), fingerprint(&changed_host, &keys));
+    assert_ne!(fingerprint(&base, &keys), fingerprint(&dropped_host, &keys));
+    // With no keys declared the whole blob is covered, as before.
+    let no_keys: Vec<String> = Vec::new();
+    assert_ne!(
+        fingerprint(&base, &no_keys),
+        fingerprint(&changed_credential, &no_keys)
+    );
+}
+
 // Private fixture-only release ownership. Drop never joins or asserts.
 struct ControlledRelease {
     barrier: Arc<super::super::super::transport::tests::NativeBarrier>,
