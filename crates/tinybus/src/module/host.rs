@@ -100,6 +100,10 @@ struct LoadedModule {
     descriptor_info: Option<DescriptorInfo>,
     lifecycle_busy: bool,
     callback_config: Option<[u8; 32]>,
+    /// Top-level configuration keys the stored callback fingerprint covers.
+    /// Empty means the fingerprint covers the whole configuration blob,
+    /// which is the historical behaviour for bindings that declare no keys.
+    callback_config_keys: Vec<String>,
     // Keep operation accounting after routing revocation removes the binding.
     callback_state: Option<Arc<callbacks::CallbackState>>,
     // Keep the owning capability alive for as long as this admitted module can
@@ -138,6 +142,37 @@ fn callback_config_fingerprint(bytes: &[u8]) -> [u8; 32] {
     }
     hash.update(&bytes[segment..]);
     hash.finalize().into()
+}
+
+/// Fingerprint only the declared callback-bearing keys of a configuration.
+///
+/// With no keys declared the whole blob is fingerprinted, which is the
+/// historical behaviour. Keys are top-level only: the callback destination
+/// lives at the top of the module configuration, and anything deeper is the
+/// module's own state rather than the host's scope. A declared key that is
+/// absent from the configuration contributes nothing, so adding it later
+/// counts as a change and a frozen destination cannot be smuggled in by
+/// introducing the key. Only key names are retained by the caller; values
+/// are hashed, never stored.
+fn scoped_callback_config_fingerprint(
+    bytes: &[u8],
+    config: &serde_json::Value,
+    keys: &[String],
+) -> [u8; 32] {
+    if keys.is_empty() {
+        return callback_config_fingerprint(bytes);
+    }
+    let mut scoped = serde_json::Map::new();
+    if let Some(object) = config.as_object() {
+        for key in keys {
+            if let Some(value) = object.get(key) {
+                scoped.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    let bytes = serde_json::to_vec(&serde_json::Value::Object(scoped))
+        .expect("scoped configuration serializes");
+    callback_config_fingerprint(&bytes)
 }
 
 enum PendingModule {
@@ -1821,6 +1856,7 @@ impl ModuleHost {
                 descriptor_info,
                 lifecycle_busy: false,
                 callback_config: None,
+                callback_config_keys: Vec::new(),
                 callback_state: None,
                 _callback_binding: None,
             });
@@ -2198,14 +2234,20 @@ impl ModuleControl for ModuleHostInner {
             serde_json::to_vec(&config)
                 .map_err(|_| Error::failed("module configuration is invalid"))?,
         );
-        drop(config);
-        let fingerprint = callback_config_fingerprint(bytes.expose_secret());
         let transport = {
             let mut loaded = self.loaded.lock().expect("module list lock");
             let module = loaded
                 .iter_mut()
                 .find(|module| module.info.name == name)
                 .ok_or_else(|| Error::failed("module is not loaded"))?;
+            // The fingerprint covers only the keys the binding declared as
+            // callback-bearing. The configuration is dropped after this
+            // block, so no plaintext survives past the comparison.
+            let fingerprint = scoped_callback_config_fingerprint(
+                bytes.expose_secret(),
+                &config,
+                &module.callback_config_keys,
+            );
             let state = module.snapshot().state;
             if module
                 .callback_config
@@ -2233,6 +2275,7 @@ impl ModuleControl for ModuleHostInner {
             module.lifecycle_busy = true;
             module.transport.clone()
         };
+        drop(config);
         let _lifecycle_busy = LifecycleBusyGuard::for_reinitialize(self, name);
         let reinitialized = transport.reinitialize(bytes).await;
         let mut loaded = self.loaded.lock().expect("module list lock");
